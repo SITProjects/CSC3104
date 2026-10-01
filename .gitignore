@@ -1,1 +1,61 @@
-# PLEASE UPDATE TO NEEDS FROM https://github.com/github/gitignore
+# Python environments and bytecode
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# Python packaging and tool caches
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.tox/
+.nox/
+.uv-cache/
+.ipynb_checkpoints/
+
+# Coverage and generated test reports
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+junit.xml
+/test-results/
+
+# Local environment settings (keep safe example templates)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Local credentials, private keys, and generated WireGuard configs
+.aws/
+.kube/
+kubeconfig
+kubeconfig.yaml
+kubeconfig.yml
+*.key
+*.pem
+id_rsa
+id_ed25519
+/infra/wireguard/generated/
+
+# Runtime data and logs (evaluation evidence remains trackable)
+/runtime/
+*.log
+*.log.*
+
+# Editor temporary files and OS metadata
+*.swp
+*.swo
+*~
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini

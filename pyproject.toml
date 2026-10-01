@@ -1,0 +1,40 @@
+[project]
+name = "csc3104"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Kitsunez", email = "nyx2753@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.43.106",
+    "fastapi>=0.142.2",
+    "httpx>=0.28.1",
+    "jinja2>=3.1.6",
+    "kubernetes>=36.0.3",
+    "locust>=2.46.6",
+    "matplotlib>=3.11.2",
+    "pandas>=3.0.6",
+    "pillow>=12.3.0",
+    "prometheus-client>=0.26.0",
+    "psutil>=7.2.2",
+    "psycopg[binary,pool]>=3,<4",
+    "pydantic>=2,<3",
+    "pydantic-settings>=2,<3",
+    "pymupdf>=1.28.2",
+    "pytesseract>=0.3.13",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "python-multipart>=0.0.32",
+    "ruff>=0.16.9",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.21,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+package = false
