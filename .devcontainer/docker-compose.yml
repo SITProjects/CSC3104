@@ -1,0 +1,74 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sleep infinity
+    init: true
+    userns_mode: "keep-id:uid=1000,gid=1000"
+    environment:
+      DATABASE_URL: postgresql://admin:password123@postgres:5432/csc3104
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
+      S3_BUCKET: csc3104-local
+      AWS_ACCESS_KEY_ID: csc3104-local
+      AWS_SECRET_ACCESS_KEY: csc3104-local-secret
+      AWS_DEFAULT_REGION: ap-southeast-1
+      AWS_EC2_METADATA_DISABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    volumes:
+      - ..:/workspaces/csc3104:Z
+    working_dir: /workspaces/csc3104
+
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: csc3104
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password123
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d password123"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: docker.io/alpine/minio:RELEASE.2025-10-15T17-29-55Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: docker.io/clickhouse/minio-mc:RELEASE.2026-09-16T00-00-00Z
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        attempts=0
+        until mc alias set local http://minio:9000 admin password123; do
+          attempts=$$((attempts + 1))
+          if [ "$$attempts" -ge 30 ]; then
+            echo "MinIO did not become available"
+            exit 1
+          fi
+          sleep 2
+        done
+        mc mb --ignore-existing local/csc3104-local
+    depends_on:
+      minio:
+        condition: service_started
+
+volumes:
+  postgres-data:
+  minio-data:
