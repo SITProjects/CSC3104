@@ -1,5 +1,8 @@
 from pathlib import Path
+from typing import LiteralString, cast
+
 import psycopg
+from psycopg import sql
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 LOCK_ID = 3104
@@ -21,7 +24,9 @@ def run_migrations(database_url: str) -> list[str]:
                 if path.name in done:
                     continue
                 with conn.transaction():  # file + bookkeeping row commit together
-                    conn.execute(path.read_text())
+                    conn.execute(
+                        sql.SQL(cast(LiteralString, path.read_text(encoding="utf-8")))
+                    )
                     conn.execute(
                         "INSERT INTO schema_migrations (name) VALUES (%s)", (path.name,)
                     )
