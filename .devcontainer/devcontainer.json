@@ -37,7 +37,9 @@
         "ms-azuretools.vscode-docker",
         "ms-kubernetes-tools.vscode-kubernetes-tools",
         "openai.chatgpt",
-        "anthropic.claude-code"
+        "anthropic.claude-code",
+        "mtxr.sqltools",
+        "mtxr.sqltools-driver-pg"
       ],
       "settings": {
         "python.defaultInterpreterPath": "/home/vscode/.venvs/csc3104-dev/bin/python",
@@ -45,7 +47,19 @@
         "[python]": {
           "editor.defaultFormatter": "charliermarsh.ruff",
           "editor.formatOnSave": true
+        },
+        "sqltools.connections": [
+        {
+          "name": "Postgres",
+          "driver": "PostgreSQL",
+          "server": "postgres",
+          "port": 5432,
+          "database": "csc3104",
+          "username": "admin",
+          "password": "password123",
+          "savePassword": true
         }
+      ]
       }
     }
   }
