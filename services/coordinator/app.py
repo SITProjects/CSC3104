@@ -28,10 +28,10 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="IdleCloud coordinator", lifespan=lifespan)
+app = FastAPI(title="Coordinator", lifespan=lifespan)
 
 HASH = "a" * 64  # TODO: remove this once we have a real hash
-S3 = "http//localhost:9000"
+S3 = "http//localhost:9000/csc3104-local"
 
 
 def require_token(replica_id: int, authorization: str | None) -> None:
@@ -125,47 +125,40 @@ def create_jobs(req: CreateJobRequest) -> CreateJobResponse:
 
 
 @app.get("/internal/replicas/{id}/manifest")
-def get_replica_manifest(
-    replica_id: int, authorization: str | None = Header(None)
-) -> Manifest:
-    require_token(replica_id, authorization)
+def get_replica_manifest(id: int, authorization: str | None = Header(None)) -> Manifest:
+    require_token(id, authorization)
     return Manifest(
-        replica_id=replica_id,
-        task_index=replica_id % 2,
+        replica_id=id,
+        task_index=id % 2,
         input={"pages": [1, 10]},
         input_urls={"input.pdf": f"{S3}/input.pdf"},
-        output_upload_url=f"{S3}/replicas/{replica_id}/result.json",
-        checkpoint_get_url=None if replica_id % 2 == 0 else f"{S3}/checkpoint.json",
-        checkpoint_put_url=f"{S3}/replicas/{replica_id}/checkpoint.json",
+        output_upload_url=f"{S3}/replicas/{id}/result.json",
+        checkpoint_get_url=None if id % 2 == 0 else f"{S3}/checkpoint.json",
+        checkpoint_put_url=f"{S3}/replicas/{id}/checkpoint.json",
         attempt=1,
     )
 
 
 @app.post("/internal/replicas/{id}/progress")
 def report_progress(
-    replica_id: int, body: ProgressIn, authorization: str | None = Header(None)
+    id: int, body: ProgressIn, authorization: str | None = Header(None)
 ) -> Ack:
-    require_token(replica_id, authorization)
+    require_token(id, authorization)
     return Ack()
 
 
 @app.post("/internal/replicas/{id}/result")
 def report_result(
-    replica_id: int, body: ResultIn, authorization: str | None = Header(None)
+    id: int, body: ResultIn, authorization: str | None = Header(None)
 ) -> Ack:
-    require_token(replica_id, authorization)
+    require_token(id, authorization)
     return Ack()
 
 
 @app.post("/internal/replicas/{id}/evicted")
-def report_evicted(replica_id: int, authorization: str | None = Header(None)) -> Ack:
-    require_token(replica_id, authorization)
+def report_evicted(id: int, authorization: str | None = Header(None)) -> Ack:
+    require_token(id, authorization)
     return Ack()
-
-
-@app.post("/internal/replicas/{id}/manifest")
-def upsert_node():
-    pass
 
 
 @app.post("/internal/jobs/{id}/cancel")
