@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Coordinator", lifespan=lifespan)
 
 HASH = "a" * 64  # TODO: remove this once we have a real hash
-S3 = "http//localhost:9000/csc3104-local"
+S3 = "http://localhost:9000/csc3104-local"
 
 
 def require_token(replica_id: int, authorization: str | None) -> None:

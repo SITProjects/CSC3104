@@ -30,7 +30,7 @@ def run_migrations(database_url: str) -> list[str]:
                     conn.execute(
                         "INSERT INTO schema_migrations (name) VALUES (%s)", (path.name,)
                     )
-                    applied.append(path.name)
+                applied.append(path.name)
         finally:
             conn.execute("SELECT pg_advisory_unlock(%s)", (LOCK_ID,))
 
