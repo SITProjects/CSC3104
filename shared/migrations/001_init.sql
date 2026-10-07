@@ -26,7 +26,7 @@ CREATE TABLE job_types (
 );
 
 CREATE TABLE jobs (
-    id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     owner_email        TEXT NOT NULL,
     job_type           TEXT NOT NULL REFERENCES job_types(name),
     params             JSONB NOT NULL DEFAULT '{}',        -- user-chosen options for this type
@@ -39,7 +39,7 @@ CREATE TABLE jobs (
 
 CREATE TABLE tasks (
     id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    job_id       BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    job_id       UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     task_index   INT NOT NULL CHECK (task_index >= 0),     -- 0..task_count-1, passed as TASK_INDEX
     input        JSONB NOT NULL DEFAULT '{}',              -- per-task args, e.g. {"pages": [1, 10]}
     status       task_status NOT NULL DEFAULT 'PENDING',
@@ -68,7 +68,7 @@ CREATE TABLE events (
     id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     time       TIMESTAMPTZ NOT NULL DEFAULT now(),
     type       TEXT NOT NULL,                              -- e.g. 'replica_evicted'
-    job_id     BIGINT REFERENCES jobs(id) ON DELETE CASCADE,
+    job_id     UUID REFERENCES jobs(id) ON DELETE CASCADE,
     task_id    BIGINT REFERENCES tasks(id) ON DELETE CASCADE,
     node_name  TEXT REFERENCES nodes(name) ON DELETE SET NULL,
     detail     JSONB
