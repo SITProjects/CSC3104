@@ -35,6 +35,15 @@ S3 = "http://localhost:9000/csc3104-local"
 
 
 def require_token(replica_id: int, authorization: str | None) -> None:
+    """
+    Checks that the request has the correct authorization token for the given id.
+
+    args:
+        replica_id: The id of the replica making the request.
+        authorization: The value of the Authorization header from the request.
+    raises:
+        HTTPException: If the authorization header is missing or incorrect.
+    """
     if authorization != f"Bearer {HASH}":
         log.warning("unauthorized request for replica %d", replica_id)
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -42,6 +51,14 @@ def require_token(replica_id: int, authorization: str | None) -> None:
 
 @app.get("/internal/jobs/{id}")
 def get_jobs(id: int) -> JobView:
+    """
+    Returns a mock job view for the given job id.
+
+    args:
+        id: The id of the job to retrieve.
+    returns:
+        JobView: A mock job view with the given id
+    """
     return JobView(
         id=id,
         job_type="ocr",
@@ -118,6 +135,14 @@ def get_jobs(id: int) -> JobView:
 
 @app.post("/internal/jobs", status_code=201)
 def create_jobs(req: CreateJobRequest) -> CreateJobResponse:
+    """
+    Creates a job with the given request and returns a mock response.
+
+    args:
+        req: The request to create the job.
+    returns:
+        CreateJobResponse: A mock response with the job id and task ids.
+    """
     task_ids = [100 + i for i in range(len(req.tasks))]
     return CreateJobResponse(
         job_id=req.job_id, task_ids=task_ids, replica_count=3 * len(task_ids)
@@ -126,6 +151,15 @@ def create_jobs(req: CreateJobRequest) -> CreateJobResponse:
 
 @app.get("/internal/replicas/{id}/manifest")
 def get_replica_manifest(id: int, authorization: str | None = Header(None)) -> Manifest:
+    """
+    Fetches the manifest for the given replica id.
+
+    args:
+        id: The id of the replica to fetch the manifest for.
+        authorization: The value of the Authorization header from the request.
+    returns:
+        Manifest: A mock manifest for the given replica id.
+    """
     require_token(id, authorization)
     return Manifest(
         replica_id=id,
@@ -143,6 +177,16 @@ def get_replica_manifest(id: int, authorization: str | None = Header(None)) -> M
 def report_progress(
     id: int, body: ProgressIn, authorization: str | None = Header(None)
 ) -> Ack:
+    """
+    Reports the progress of the given replica id.
+
+    args:
+        id: The id of the replica reporting progress.
+        body: The progress report from the replica.
+        authorization: The value of the Authorization header from the request.
+    returns:
+        Ack: An acknowledgment of the progress report.
+    """
     require_token(id, authorization)
     return Ack()
 
@@ -151,21 +195,54 @@ def report_progress(
 def report_result(
     id: int, body: ResultIn, authorization: str | None = Header(None)
 ) -> Ack:
+    """
+    Reports the result of the given replica id.
+
+    args:
+        id: The id of the replica reporting the result.
+        body: The result report from the replica.
+        authorization: The value of the Authorization header from the request.
+    returns:
+        Ack: An acknowledgment of the result report.
+    """
     require_token(id, authorization)
     return Ack()
 
 
 @app.post("/internal/replicas/{id}/evicted")
 def report_evicted(id: int, authorization: str | None = Header(None)) -> Ack:
+    """
+    Reports that the given replica has been evicted.
+
+    args:
+        id: The id of the replica that has been evicted.
+        authorization: The value of the Authorization header from the request.
+    returns:
+        Ack: An acknowledgment of the evicted report.
+    """
     require_token(id, authorization)
     return Ack()
 
 
 @app.post("/internal/jobs/{id}/cancel")
 def cancel_job(id: int) -> Ack:
+    """
+    Cancels the job with the given id.
+
+    args:
+        id: The id of the job to cancel.
+    returns:
+        Ack: An acknowledgment of the cancellation.
+    """
     return Ack()
 
 
 @app.get("/healthz")
 def healthcheck() -> Ack:
+    """
+    TODO: Implement a real health check.
+
+    returns:
+        Ack: An acknowledgment of the health check.
+    """
     return Ack()
