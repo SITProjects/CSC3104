@@ -1,6 +1,9 @@
+import uuid
+
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.db.models import Replica, ReplicaStatus, Task
+from shared.db.models import Job, JobStatus, Replica, ReplicaStatus, Task, TaskStatus
 
 
 async def create_replicas(
@@ -14,3 +17,27 @@ async def create_replicas(
     session.add_all(replicas)
     await session.flush()
     return replicas
+
+
+async def fetch_scheduled_replicas(
+    session: AsyncSession, limit: int
+) -> list[tuple[Replica, uuid.UUID]]:
+    """
+    Fetches list of scheduled replicas from database, up to specified limit
+    """
+    stmt = (
+        select(Replica, Task.job_id)
+        .join(Replica.task)
+        .join(Task.job)
+        .where(
+            Replica.status == ReplicaStatus.SCHEDULED,
+            Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
+            Task.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]),
+        )
+        .order_by(Replica.id)
+        .limit(limit)
+        # of Replica to only lock the Replica table, not the Task or Job tables
+        .with_for_update(skip_locked=True, of=Replica)
+    )
+    result = await session.execute(stmt)
+    return [(replica, job_id) for replica, job_id in result.all()]
