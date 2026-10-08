@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from core.settings import DEBUG_ECHO, MAX_OVERFLOW, POOL_SIZE
+
 
 class SessionManager:
     def __init__(self) -> None:
@@ -18,11 +20,11 @@ class SessionManager:
         self.engine = create_async_engine(
             db_url,
             poolclass=AsyncAdaptedQueuePool,
-            pool_size=5,
-            max_overflow=10,
+            pool_size=POOL_SIZE,
+            max_overflow=MAX_OVERFLOW,
             pool_pre_ping=True,
             pool_recycle=3600,
-            echo=True,
+            echo=DEBUG_ECHO,
         )
         self.session_factory = async_sessionmaker(
             bind=self.engine,

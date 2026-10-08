@@ -16,10 +16,10 @@ __all__ = [
     "Event",
     "Job",
     "JobStatus",
+    "JobType",
     "Replica",
     "ReplicaStatus",
     "Task",
     "TaskStatus",
     "session_manager",
-    "JobType",
 ]

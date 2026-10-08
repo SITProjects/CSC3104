@@ -5,7 +5,6 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.db import (
@@ -29,7 +28,6 @@ from .models import (
     ProgressIn,
     ReplicaView,
     ResultIn,
-    TaskIn,
     TaskView,
 )
 
@@ -40,9 +38,10 @@ DbSession = Annotated[AsyncSession, Depends(session_manager.get_session)]
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     run_migrations(os.environ["DATABASE_URL"])
-    session_manager.init_db(os.environ["DATABASE_URL"])
+    session_manager.init_db(
+        os.environ["DATABASE_URL"].replace("postgresql://", "postgresql+asyncpg://", 1)
+    )
     yield
-
     await session_manager.close()
 
 
@@ -182,7 +181,7 @@ async def create_jobs(req: CreateJobRequest, session: DbSession) -> CreateJobRes
                 input=task.input,
                 status=TaskStatus.PENDING,
                 cpu_request=req.cpu_request,  # in cores
-                mem_request=req.mem_request,  # in GB
+                mem_request=req.mem_request,  # in MB
             )
             session.add(new_task)
             await session.flush()
@@ -196,7 +195,9 @@ async def create_jobs(req: CreateJobRequest, session: DbSession) -> CreateJobRes
             )
             await session.flush()
     return CreateJobResponse(
-        job_id=new_job.id, task_ids=task_ids, replica_count=3 * len(task_ids)
+        job_id=new_job.id,
+        task_ids=task_ids,
+        replica_count=req.replicas_per_task * len(task_ids),
     )
 
 

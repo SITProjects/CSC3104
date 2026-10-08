@@ -13,8 +13,8 @@ INSERT INTO job_types (
     'Simple test workload',
     'busybox:1.37.0',
     ARRAY['sh', '-c', 'echo "Test job completed"'],
-    100,
-    128,
+    1, -- in GB --
+    128, -- in MB --
     60,
     true
 )
