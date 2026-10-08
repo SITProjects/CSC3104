@@ -8,17 +8,11 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.db import (
-    Job,
-    JobStatus,
-    JobType,
-    Replica,
-    ReplicaStatus,
-    Task,
-    TaskStatus,
     session_manager,
 )
 from shared.migrate import run_migrations
 
+from .crud import create_job, create_replicas, create_tasks, ensure_job_type_exists
 from .models import (
     Ack,
     CreateJobRequest,
@@ -161,41 +155,13 @@ async def create_jobs(req: CreateJobRequest, session: DbSession) -> CreateJobRes
         CreateJobResponse: A mock response with the job id and task ids.
     """
     async with session.begin():
-        if await session.get(JobType, req.job_type) is None:
-            raise HTTPException(422, f"unknown job_type {req.job_type!r}")
-        new_job = Job(
-            owner_email=req.email,
-            job_type=req.job_type,
-            params=req.params,
-            status=JobStatus.PENDING,
-            task_count=len(req.tasks),
-            replicas_per_task=req.replicas_per_task,
-        )
-        session.add(new_job)
-        await session.flush()
-        task_ids = []
-        for i, task in enumerate(req.tasks):
-            new_task = Task(
-                job_id=new_job.id,
-                task_index=i,
-                input=task.input,
-                status=TaskStatus.PENDING,
-                cpu_request=req.cpu_request,  # in cores
-                mem_request=req.mem_request,  # in GB
-            )
-            session.add(new_task)
-            await session.flush()
-            task_ids.append(new_task.id)
-        for task_id in task_ids:
-            session.add_all(
-                [
-                    Replica(task_id=task_id, attempt=1, status=ReplicaStatus.SCHEDULED)
-                    for _ in range(req.replicas_per_task)
-                ]
-            )
-            await session.flush()
+        await ensure_job_type_exists(session, req.job_type)
+        job = await create_job(session, req)
+        tasks = await create_tasks(session, job, req)
+        task_ids = [task.id for task in tasks]
+        await create_replicas(session, tasks, req.replicas_per_task)
     return CreateJobResponse(
-        job_id=new_job.id,
+        job_id=job.id,
         task_ids=task_ids,
         replica_count=req.replicas_per_task * len(task_ids),
     )
