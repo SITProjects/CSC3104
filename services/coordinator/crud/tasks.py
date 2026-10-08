@@ -1,3 +1,4 @@
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.coordinator.models import CreateJobRequest
@@ -21,3 +22,16 @@ async def create_tasks(
     session.add_all(tasks)
     await session.flush()  # assigns task ids
     return tasks
+
+
+async def mark_task_running(session: AsyncSession, task_id: int) -> None:
+    stmt = (
+        update(Task)
+        .where(
+            Task.id == task_id,
+            Task.status == TaskStatus.PENDING,
+        )
+        .values(status=TaskStatus.RUNNING)
+    )
+
+    await session.execute(stmt)

@@ -1,12 +1,15 @@
+import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.settings import COORDINATOR_URL
+from services.coordinator.scheduler import scheduler_loop
 from shared.db import (
     session_manager,
 )
@@ -35,7 +38,13 @@ async def lifespan(app: FastAPI):
     session_manager.init_db(
         os.environ["DATABASE_URL"].replace("postgresql://", "postgresql+asyncpg://", 1)
     )
+    task = asyncio.create_task(
+        scheduler_loop(session_manager.session_factory, COORDINATOR_URL)
+    )
     yield
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
     await session_manager.close()
 
 

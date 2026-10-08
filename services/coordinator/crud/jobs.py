@@ -1,4 +1,7 @@
+import uuid
+
 from fastapi import HTTPException
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.coordinator.models import CreateJobRequest
@@ -23,3 +26,12 @@ async def create_job(session: AsyncSession, req: CreateJobRequest) -> Job:
     session.add(job)
     await session.flush()  # assigns job.id
     return job
+
+
+async def mark_job_running(session: AsyncSession, job_id: uuid.UUID) -> None:
+    stmt = (
+        update(Job)
+        .where(Job.id == job_id, Job.status == JobStatus.PENDING)
+        .values(status=JobStatus.RUNNING)
+    )
+    await session.execute(stmt)
