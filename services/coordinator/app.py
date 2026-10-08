@@ -181,7 +181,7 @@ async def create_jobs(req: CreateJobRequest, session: DbSession) -> CreateJobRes
                 input=task.input,
                 status=TaskStatus.PENDING,
                 cpu_request=req.cpu_request,  # in cores
-                mem_request=req.mem_request,  # in MB
+                mem_request=req.mem_request,  # in GB
             )
             session.add(new_task)
             await session.flush()
