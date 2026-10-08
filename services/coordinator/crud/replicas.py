@@ -36,7 +36,8 @@ async def fetch_scheduled_replicas(
         )
         .order_by(Replica.id)
         .limit(limit)
-        .with_for_update(skip_locked=True)
+        # of Replica to only lock the Replica table, not the Task or Job tables
+        .with_for_update(skip_locked=True, of=Replica)
     )
     result = await session.execute(stmt)
     return [(replica, job_id) for replica, job_id in result.all()]
