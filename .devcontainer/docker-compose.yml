@@ -49,6 +49,7 @@ services:
       - "9001:9001"
     volumes:
       - minio-data:/data
+    user: "0:0"
 
   minio-init:
     image: docker.io/clickhouse/minio-mc:RELEASE.2026-09-16T00-00-00Z
