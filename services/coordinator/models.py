@@ -1,4 +1,5 @@
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -16,12 +17,17 @@ class TaskIn(BaseModel):
 
 
 class CreateJobRequest(BaseModel):
-    job_id: int
+    email: str = Field(examples=["user@example.com"])
+    job_type: str = Field(examples=["ocr"])
+    params: dict[str, Any] = Field(examples=[{"param1": "value1", "param2": "value2"}])
     tasks: list[TaskIn] = Field(min_length=1)
+    replicas_per_task: int = Field(ge=1, le=5, examples=[3])
+    cpu_request: int = Field(ge=1, le=16, examples=[2])
+    mem_request: int = Field(ge=1, le=64, examples=[4])  # in GB
 
 
 class CreateJobResponse(BaseModel):
-    job_id: int
+    job_id: UUID
     task_ids: list[int]
     replica_count: int
 
@@ -44,7 +50,7 @@ class TaskView(BaseModel):
 
 
 class JobView(BaseModel):
-    id: int
+    id: UUID
     job_type: str
     status: JobStatus
     progress: int  # 0-100, average over tasks

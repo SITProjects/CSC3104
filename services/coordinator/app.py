@@ -1,9 +1,22 @@
 import logging
 import os
 from contextlib import asynccontextmanager
+from typing import Annotated
+from uuid import UUID
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared.db import (
+    Job,
+    JobStatus,
+    JobType,
+    Replica,
+    ReplicaStatus,
+    Task,
+    TaskStatus,
+    session_manager,
+)
 from shared.migrate import run_migrations
 
 from .models import (
@@ -19,13 +32,17 @@ from .models import (
 )
 
 log = logging.getLogger("coordinator")
+DbSession = Annotated[AsyncSession, Depends(session_manager.get_session)]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    applied = run_migrations(os.environ["DATABASE_URL"])
-    log.info("migrations applied: %s", applied or "none (up to date)")
+    run_migrations(os.environ["DATABASE_URL"])
+    session_manager.init_db(
+        os.environ["DATABASE_URL"].replace("postgresql://", "postgresql+asyncpg://", 1)
+    )
     yield
+    await session_manager.close()
 
 
 app = FastAPI(title="Coordinator", lifespan=lifespan)
@@ -50,7 +67,7 @@ def require_token(replica_id: int, authorization: str | None) -> None:
 
 
 @app.get("/internal/jobs/{id}")
-def get_jobs(id: int) -> JobView:
+def get_jobs(id: UUID) -> JobView:
     """
     Returns a mock job view for the given job id.
 
@@ -134,7 +151,7 @@ def get_jobs(id: int) -> JobView:
 
 
 @app.post("/internal/jobs", status_code=201)
-def create_jobs(req: CreateJobRequest) -> CreateJobResponse:
+async def create_jobs(req: CreateJobRequest, session: DbSession) -> CreateJobResponse:
     """
     Creates a job with the given request and returns a mock response.
 
@@ -143,9 +160,44 @@ def create_jobs(req: CreateJobRequest) -> CreateJobResponse:
     returns:
         CreateJobResponse: A mock response with the job id and task ids.
     """
-    task_ids = [100 + i for i in range(len(req.tasks))]
+    async with session.begin():
+        if await session.get(JobType, req.job_type) is None:
+            raise HTTPException(422, f"unknown job_type {req.job_type!r}")
+        new_job = Job(
+            owner_email=req.email,
+            job_type=req.job_type,
+            params=req.params,
+            status=JobStatus.PENDING,
+            task_count=len(req.tasks),
+            replicas_per_task=req.replicas_per_task,
+        )
+        session.add(new_job)
+        await session.flush()
+        task_ids = []
+        for i, task in enumerate(req.tasks):
+            new_task = Task(
+                job_id=new_job.id,
+                task_index=i,
+                input=task.input,
+                status=TaskStatus.PENDING,
+                cpu_request=req.cpu_request,  # in cores
+                mem_request=req.mem_request,  # in GB
+            )
+            session.add(new_task)
+            await session.flush()
+            task_ids.append(new_task.id)
+        for task_id in task_ids:
+            session.add_all(
+                [
+                    Replica(task_id=task_id, attempt=1, status=ReplicaStatus.SCHEDULED)
+                    for _ in range(req.replicas_per_task)
+                ]
+            )
+            await session.flush()
     return CreateJobResponse(
-        job_id=req.job_id, task_ids=task_ids, replica_count=3 * len(task_ids)
+        job_id=new_job.id,
+        task_ids=task_ids,
+        replica_count=req.replicas_per_task * len(task_ids),
     )
 
 
@@ -225,7 +277,7 @@ def report_evicted(id: int, authorization: str | None = Header(None)) -> Ack:
 
 
 @app.post("/internal/jobs/{id}/cancel")
-def cancel_job(id: int) -> Ack:
+def cancel_job(id: UUID) -> Ack:
     """
     Cancels the job with the given id.
 
