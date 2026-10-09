@@ -7,7 +7,7 @@
   "updateRemoteUserUID": false,
   "shutdownAction": "stopCompose",
   "postStartCommand": {
-    "deps": "uv sync",
+    "deps": "uv sync --frozen",
     "k8s": "bash scripts/dev-cluster.sh"
   },
   "features": {
