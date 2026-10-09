@@ -22,8 +22,8 @@ class CreateJobRequest(BaseModel):
     params: dict[str, Any] = Field(examples=[{"param1": "value1", "param2": "value2"}])
     tasks: list[TaskIn] = Field(min_length=1)
     replicas_per_task: int = Field(ge=1, le=5, examples=[3])
-    cpu_request: int = Field(ge=1, le=16, examples=[2])
-    mem_request: int = Field(ge=64, le=4096, examples=[4])  # in MiB
+    cpu_request: int = Field(ge=1, le=16, examples=[2])  # in cores
+    mem_request: int = Field(ge=64, le=4096, examples=[256])  # in MiB
 
 
 class CreateJobResponse(BaseModel):

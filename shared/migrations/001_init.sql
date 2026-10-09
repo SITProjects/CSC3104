@@ -19,7 +19,7 @@ CREATE TABLE job_types (
     description        TEXT NOT NULL DEFAULT '',
     image              TEXT NOT NULL,                      -- pinned by digest for deterministic output
     command            TEXT[],                             -- NULL = image's default entrypoint
-    default_cpu        INT NOT NULL CHECK (default_cpu > 0),  -- millicores
+    default_cpu        INT NOT NULL CHECK (default_cpu > 0),  -- cores
     default_mem        INT NOT NULL CHECK (default_mem > 0),  -- MiB
     timeout_seconds    INT NOT NULL DEFAULT 3600,
     enabled            BOOLEAN NOT NULL DEFAULT true
