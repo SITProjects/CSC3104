@@ -6,7 +6,10 @@
   "remoteUser": "vscode",
   "updateRemoteUserUID": false,
   "shutdownAction": "stopCompose",
-  "postStartCommand": "uv sync --frozen",
+  "postStartCommand": {
+    "deps": "uv sync",
+    "k8s": "bash scripts/dev-cluster.sh"
+  },
   "features": {
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
     "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
@@ -18,7 +21,8 @@
   },
   "remoteEnv": {
     "PATH": "/home/vscode/.venvs/csc3104-dev/bin:${containerEnv:PATH}",
-    "VIRTUAL_ENV": "/home/vscode/.venvs/csc3104-dev"
+    "VIRTUAL_ENV": "/home/vscode/.venvs/csc3104-dev",
+    "KUBECONFIG": "/tmp/dev-kubeconfig"
   },
   "forwardPorts": [8000, 8001, "minio:9000", "minio:9001"],
   "portsAttributes": {

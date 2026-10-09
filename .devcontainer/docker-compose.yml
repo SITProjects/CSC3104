@@ -20,8 +20,11 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+      k3-server:
+        condition: service_healthy
     volumes:
       - ..:/workspaces/csc3104:Z
+      - k3s-config:/k3s-config:ro
     working_dir: /workspaces/csc3104
 
   postgres:
@@ -69,7 +72,42 @@ services:
     depends_on:
       minio:
         condition: service_started
+  # creates a local k3s cluster for development purposes, until ec2 instance is ready to act as k3s server
+  k3-server:
+    image: rancher/k3s:v1.34.1-k3s1
+    privileged: true
+    command:
+      - server # Starts control place, including API and scheduling component
+      - --tls-san=k3-server # makes TLS cert valid for hostname k3-server
+      - --disable=servicelb # disable bundled load balancer component
+      - --disable=traefik # disables bunded HTTP controller
+      # control plane only: the server never runs pods, it holds Jobs in Pending until a
+      # worker node (lab PC or burst EC2) joins as an agent and the scheduler places them
+      - --disable-agent
+    restart: unless-stopped
+    tmpfs:
+      - /run
+      - /var/run
+    environment:
+      K3S_KUBECONFIG_OUTPUT: /output/config
+      K3S_KUBECONFIG_MODE: "644"
+    volumes:
+      - k3s-data:/var/lib/rancher/k3s
+      - k3s-config:/output
+    healthcheck:
+      test:
+        - CMD
+        - kubectl # `k3s kubectl` errors in this image; the kubectl symlink works
+        - --kubeconfig=/output/config
+        - get
+        - --raw=/readyz
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
 
 volumes:
   postgres-data:
   minio-data:
+  k3s-data:
+  k3s-config:
