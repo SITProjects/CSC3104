@@ -23,7 +23,7 @@ class CreateJobRequest(BaseModel):
     tasks: list[TaskIn] = Field(min_length=1)
     replicas_per_task: int = Field(ge=1, le=5, examples=[3])
     cpu_request: int = Field(ge=1, le=16, examples=[2])
-    mem_request: int = Field(ge=1, le=64, examples=[4])  # in GB
+    mem_request: int = Field(ge=64, le=4096, examples=[4])  # in MiB
 
 
 class CreateJobResponse(BaseModel):
