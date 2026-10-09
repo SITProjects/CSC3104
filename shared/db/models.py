@@ -191,12 +191,12 @@ class JobType(Base):
         nullable=True,
     )
 
-    default_cpu: Mapped[int] = mapped_column(
+    default_cpu: Mapped[int] = mapped_column(  # cores
         Integer,
         nullable=False,
     )
 
-    default_mem: Mapped[int] = mapped_column(
+    default_mem: Mapped[int] = mapped_column(  # MiB
         Integer,
         nullable=False,
     )
@@ -351,12 +351,12 @@ class Task(Base):
         server_default=text("'PENDING'"),
     )
 
-    cpu_request: Mapped[int] = mapped_column(
+    cpu_request: Mapped[int] = mapped_column(  # cores
         Integer,
         nullable=False,
     )
 
-    mem_request: Mapped[int] = mapped_column(
+    mem_request: Mapped[int] = mapped_column(  # MiB
         Integer,
         nullable=False,
     )
