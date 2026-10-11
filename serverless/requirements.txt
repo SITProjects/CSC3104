@@ -1,0 +1,3 @@
+# Only for the Lambda image. boto3 already ships in the Lambda base image.
+# For local work, the repo root pyproject.toml has everything.
+pymupdf==1.28.2
