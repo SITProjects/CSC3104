@@ -2,7 +2,10 @@
 
 import json
 
+import pytest
+
 from serverless.common.storage import job_id_from_key, page_key
+from serverless.renderer import handler as renderer
 from serverless.splitter import handler as splitter
 from serverless.tests.conftest import make_pdf, s3_event
 
@@ -69,3 +72,31 @@ def test_job_id_from_encoded_key():
     assert job_id_from_key("jobs/abc-123/input.pdf") == "abc-123"
     assert job_id_from_key("jobs%2Fabc%2Finput.pdf") == "abc"
     assert job_id_from_key("jobs/abc/output/result.txt") is None
+
+
+def test_render_failure_sends_failed_callback(s3, sent, monkeypatch):
+    def broken_render(pdf, start, end, dpi):
+        yield start, b"png"
+        raise RuntimeError("corrupt page content")
+
+    monkeypatch.setattr(renderer, "render_pages", broken_render)
+    s3.files["jobs/j3/input.pdf"] = make_pdf(5)
+    splitter.split_handler(s3_event("jobs/j3/input.pdf"))
+    assert len(sent) == 1
+    assert sent[0]["status"] == "failed"
+    assert (sent[0]["page_start"], sent[0]["page_end"]) == (1, 5)
+    assert "corrupt page content" in sent[0]["error"]
+
+
+def test_one_failing_record_does_not_stop_the_others(s3, sent):
+    s3.files["jobs/good/input.pdf"] = make_pdf(3)
+    event = {
+        "Records": [
+            s3_event("jobs/missing/input.pdf")["Records"][0],  # not in S3
+            s3_event("jobs/good/input.pdf")["Records"][0],
+        ]
+    }
+    with pytest.raises(RuntimeError, match="1 record"):
+        splitter.split_handler(event)
+    assert page_key("good", 3) in s3.files
+    assert [b["job_id"] for b in sent] == ["good"]

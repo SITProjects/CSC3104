@@ -51,6 +51,18 @@ splitter sends one call instead and renders nothing:
 {"status": "failed", "job_id": "a1b2c3", "error": "PDF is password protected"}
 ```
 
+If one batch of pages cannot be rendered (a corrupt page), its renderer sends a
+`failed` call for that batch instead, so the job never waits forever:
+
+```json
+{"status": "failed", "job_id": "a1b2c3", "page_start": 21, "page_end": 40,
+ "error": "pages 21-40 could not be rendered: ..."}
+```
+
+`WEBHOOK_URL` must be set in a deployed Lambda. A missing value is an error,
+unless `ALLOW_NO_WEBHOOK=1` is set on purpose to only log callbacks (the local
+test tools set this for you).
+
 Headers `X-Idlecloud-Timestamp` and `X-Idlecloud-Signature` carry
 `hex(HMAC-SHA256(secret, timestamp + "." + body))`. The endpoint should reject
 bad signatures and anything older than 5 minutes, then reply 2xx.

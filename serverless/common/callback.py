@@ -23,9 +23,14 @@ def post(payload: dict) -> None:
     url = os.environ.get("WEBHOOK_URL", "")
     secret = os.environ.get("HMAC_SECRET", "")
     if not url:
-        # No web app yet. Log the payload so the result still shows in CloudWatch.
-        log.info("WEBHOOK_URL not set, would send: %s", json.dumps(payload))
-        return
+        # Only allowed on purpose (local runs, or a deploy before the web app
+        # exists). Otherwise a missing setting would silently drop every callback.
+        if os.environ.get("ALLOW_NO_WEBHOOK") == "1":
+            log.warning("WEBHOOK_URL not set, would send: %s", json.dumps(payload))
+            return
+        raise RuntimeError(
+            "WEBHOOK_URL is not set. Set it, or set ALLOW_NO_WEBHOOK=1 to only log callbacks."
+        )
     if not secret:
         raise RuntimeError("HMAC_SECRET must be set when WEBHOOK_URL is set")
 

@@ -35,6 +35,9 @@ def use_local_minio() -> str:
     os.environ.pop("AWS_SESSION_TOKEN", None)
     os.environ.setdefault("AWS_DEFAULT_REGION", "ap-southeast-1")
     os.environ.pop("RENDER_FUNCTION_NAME", None)  # render in-process, no real Lambda
+    os.environ.setdefault(
+        "ALLOW_NO_WEBHOOK", "1"
+    )  # no web app locally, just log callbacks
     return os.environ["S3_BUCKET"]
 
 

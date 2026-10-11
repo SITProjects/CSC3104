@@ -6,6 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from serverless.common import callback
+from serverless.common.errors import BadPdfError
 from serverless.common.pdf_pages import render_pages
 from serverless.common.storage import input_key, page_key, read_object, s3_client
 
@@ -21,20 +22,34 @@ def render_handler(event, context=None):
     started = time.monotonic()
 
     pdf = read_object(s3, bucket, input_key(job_id))
-    # Render on this thread and upload on others, so CPU and network overlap
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        uploads = [
-            pool.submit(
-                s3.put_object,
-                Bucket=bucket,
-                Key=page_key(job_id, number),
-                Body=png,
-                ContentType="image/png",
-            )
-            for number, png in render_pages(pdf, start, end, dpi)
-        ]
-        for upload in uploads:
-            upload.result()  # raises if any upload failed
+    try:
+        # Render on this thread and upload on others, so CPU and network overlap
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            uploads = [
+                pool.submit(
+                    s3.put_object,
+                    Bucket=bucket,
+                    Key=page_key(job_id, number),
+                    Body=png,
+                    ContentType="image/png",
+                )
+                for number, png in render_pages(pdf, start, end, dpi)
+            ]
+    except (BadPdfError, RuntimeError, ValueError) as error:
+        # A broken page fails the same way every time, so retrying will not help.
+        # Tell the web app now instead of leaving the job waiting forever.
+        log.error("job %s: pages %d-%d failed to render: %s", job_id, start, end, error)
+        failed = {
+            "status": "failed",
+            "job_id": job_id,
+            "page_start": start,
+            "page_end": end,
+            "error": f"pages {start}-{end} could not be rendered: {error}",
+        }
+        callback.post(failed)
+        return failed
+    for upload in uploads:
+        upload.result()  # S3 errors raise here, so Lambda retries the batch
 
     render_ms = int((time.monotonic() - started) * 1000)
     log.info("job %s: pages %d-%d rendered in %d ms", job_id, start, end, render_ms)

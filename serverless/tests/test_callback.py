@@ -72,6 +72,14 @@ def test_does_not_retry_rejections(urlopen):
     assert len(urlopen.calls) == 1
 
 
-def test_no_url_just_logs(monkeypatch):
+def test_missing_url_is_an_error(monkeypatch):
     monkeypatch.delenv("WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("ALLOW_NO_WEBHOOK", raising=False)
+    with pytest.raises(RuntimeError, match="WEBHOOK_URL"):
+        callback.post(PAYLOAD)
+
+
+def test_missing_url_only_logs_when_allowed(monkeypatch):
+    monkeypatch.delenv("WEBHOOK_URL", raising=False)
+    monkeypatch.setenv("ALLOW_NO_WEBHOOK", "1")
     callback.post(PAYLOAD)  # must not raise
