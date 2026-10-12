@@ -1,0 +1,4 @@
+# Only for the Lambda image. boto3 already ships in the Lambda base image.
+# For local work, the repo root pyproject.toml has everything.
+# Keep this the same version as uv.lock, so Lambda and local runs match.
+pymupdf==1.28.2
