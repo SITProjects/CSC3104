@@ -7,14 +7,21 @@ services:
       - ./services/coordinator:/app/services/coordinator
       - ./shared:/app/shared
       - ./core:/app/core
-      - ./kubeconfig:/etc/kube/config:ro
+      - k3s-config:/k3s-config:ro
+    # k3s writes its kubeconfig with server 127.0.0.1; point it at the k3-server service
+    command: >-
+      sh -c "sed 's#https://127.0.0.1:6443#https://k3-server:6443#' /k3s-config/config > /tmp/kubeconfig
+      && exec python -m uvicorn services.coordinator.app:app --host 0.0.0.0 --port 8001 --workers 1"
     ports:
       - "8001:8001"
     environment:
       DATABASE_URL: postgresql://admin:password123@postgres:5432/csc3104
-      COORDINATOR_URL: http://localhost:8001
-      S3_URL: http://minio:9000
-      KUBECONFIG: /etc/kube/config
+      # These are handed to worker Pods, so on a real cluster they must be addresses the
+      # worker nodes can reach (e.g. the coordinator host's WireGuard IP). Locally, k3s runs
+      # with --disable-agent, so no Pods start.
+      COORDINATOR_URL: ${COORDINATOR_URL:-http://localhost:8001}
+      S3_URL: ${S3_URL:-http://minio:9000/csc3104-local}
+      KUBECONFIG: /tmp/kubeconfig
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,7 +63,7 @@ services:
       K3S_KUBECONFIG_MODE: "644"
     volumes:
       - k3s-data:/var/lib/rancher/k3s
-      - k3s-config:/etc/kube:ro
+      - k3s-config:/output
     healthcheck:
       test:
         - CMD

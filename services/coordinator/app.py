@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from kubernetes import client, config
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.settings import COORDINATOR_URL, S3_URL
 from services.coordinator.crud.jobs import get_job
 from services.coordinator.scheduler import scheduler_loop
 from shared.db import JobView, session_manager
@@ -40,9 +41,7 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(config.load_kube_config)
     batch_v1 = client.BatchV1Api()
     task = asyncio.create_task(
-        scheduler_loop(
-            session_manager.session_factory, os.environ["COORDINATOR_URL"], batch_v1
-        )
+        scheduler_loop(session_manager.session_factory, COORDINATOR_URL, batch_v1)
     )
     yield
     task.cancel()
@@ -54,7 +53,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Coordinator", lifespan=lifespan)
 
 HASH = "a" * 64  # TODO: remove this once we have a real hash
-S3 = os.environ["S3_URL"]
+S3 = S3_URL
 
 
 def require_token(replica_id: int, authorization: str | None) -> None:
