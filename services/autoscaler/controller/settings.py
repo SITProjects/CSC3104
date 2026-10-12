@@ -1,0 +1,115 @@
+"""Autoscaler tuning. Each value can be overridden with an environment variable.
+
+Hard numbers here are facts (machine sizes, AWS prices, AWS Academy quotas) or
+safety limits. How many workers to run, and which size, is worked out every
+tick from the waiting pods. Nothing here fixes the number of workers.
+"""
+
+import os
+from dataclasses import dataclass
+
+from core.settings import JOB_NAMESPACE  # noqa: F401  (re-exported for the controller)
+from services.autoscaler.burst import config as burst_config
+
+
+def _int(name: str, default: int) -> int:
+    return int(os.environ.get(name, default))
+
+
+# ---------- timing ----------
+
+INTERVAL_S = _int("AUTOSCALER_INTERVAL_S", 30)
+# How long one stuck pod waits for a campus PC before we pay for EC2. The wait
+# shrinks as the backlog grows (see decide.pending_grace), down to the floor.
+PENDING_GRACE_S = _int("AUTOSCALER_PENDING_GRACE_S", 120)
+MIN_PENDING_GRACE_S = _int("AUTOSCALER_MIN_PENDING_GRACE_S", 30)
+# A burst node with no task pods this long is terminated
+EMPTY_GRACE_S = _int("AUTOSCALER_EMPTY_GRACE_S", 300)
+# A burst worker that has not joined the cluster by then is treated as failed
+BOOT_TIMEOUT_S = _int("AUTOSCALER_BOOT_TIMEOUT_S", 600)
+# An EC2 instance or slot row younger than this is never treated as an orphan,
+# so a launch that is still being recorded is not cleaned up by mistake
+ORPHAN_GRACE_S = _int("AUTOSCALER_ORPHAN_GRACE_S", 120)
+# Log what would happen, but change nothing in AWS, Kubernetes or the database
+DRY_RUN = os.environ.get("AUTOSCALER_DRY_RUN", "") == "1"
+
+
+# ---------- machine sizes ----------
+
+
+@dataclass(frozen=True)
+class MachineType:
+    name: str
+    vcpu: int
+    mem_mib: int
+    usd_per_hour: float  # On-Demand Linux, us-east-1
+
+    @property
+    def cpu_m(self) -> int:
+        """Millicores left for task pods after K3s, WireGuard and the OS."""
+        return self.vcpu * 1000 - RESERVED_CPU_M
+
+    @property
+    def free_mem_mib(self) -> int:
+        return self.mem_mib - RESERVED_MEM_MIB
+
+    @property
+    def cost_per_hour(self) -> float:
+        """Instance plus its EBS disk (gp3 at US$0.08 per GB-month)."""
+        return self.usd_per_hour + burst_config.DISK_GB * 0.08 / 730
+
+
+# What a node keeps back from task pods. This must match what the scheduler
+# sees, or the plan and the scheduler disagree. K3s reserves no CPU by default,
+# so a 2-core pod does fit a 2 vCPU machine. Memory is lower than the advertised
+# size: the kernel keeps some, and K3s evicts pods below 100 MiB free.
+RESERVED_CPU_M = 0
+RESERVED_MEM_MIB = 400
+
+# AWS Academy allows sizes up to large. T3 only, because the launch template
+# sets T-family CPU credits. Bigger pods than t3.large can never burst.
+_ALL_TYPES = [
+    MachineType("t3.micro", 2, 1024, 0.0104),
+    MachineType("t3.small", 2, 2048, 0.0208),
+    MachineType("t3.medium", 2, 4096, 0.0416),
+    MachineType("t3.large", 2, 8192, 0.0832),
+]
+_allowed = os.environ.get("BURST_INSTANCE_TYPES", "")
+CATALOG = {
+    t.name: t for t in _ALL_TYPES if not _allowed or t.name in _allowed.split(",")
+}
+CHEAPEST = min(CATALOG.values(), key=lambda t: t.cost_per_hour)
+
+
+# ---------- spending and quotas ----------
+
+# Each task runs 3 replicas on 3 different nodes. The default budget is the least
+# that still lets one task run entirely in the cloud: 3 of the cheapest machine,
+# about US$0.04 an hour. Raise it to let bigger or more jobs burst.
+REPLICAS_PER_TASK = 3
+BUDGET_USD_PER_HOUR = float(
+    os.environ.get(
+        "BURST_BUDGET_USD_PER_HOUR",
+        round(REPLICAS_PER_TASK * CHEAPEST.cost_per_hour, 4),
+    )
+)
+# AWS Academy Learner Lab: at most 9 instances and 32 vCPUs running in a region,
+# counting the control plane and anything else in the account
+ACCOUNT_MAX_INSTANCES = _int("AWS_MAX_INSTANCES", 9)
+ACCOUNT_MAX_VCPU = _int("AWS_MAX_VCPU", 32)
+
+
+# ---------- cluster names from the implementation plan ----------
+
+ROLE_LABEL = "idlecloud/role"
+POOL_LABEL = "idlecloud/pool"
+TASK_LABEL = "idlecloud/task-id"
+TYPE_LABEL = "idlecloud/instance-type"
+OWNER_TAINT = "idlecloud/owner-active"
+# Node annotations the autoscaler keeps on burst nodes. Kept on the node, not in
+# memory, so a restarted autoscaler carries on where the last one stopped.
+EMPTY_SINCE_ANNOTATION = "idlecloud/empty-since"
+DRAINING_ANNOTATION = "idlecloud/draining"
+
+# Postgres advisory lock, so only one autoscaler copy acts per tick
+LOCK_ID = 31046

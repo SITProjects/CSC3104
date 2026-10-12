@@ -18,6 +18,7 @@ MAX_USER_DATA_BYTES = 16 * 1024  # EC2 limit
 # Both values go into a root shell line, so only allow safe characters
 K3S_VERSION_RE = re.compile(r"^v\d+\.\d+\.\d+\+k3s\d+$")
 K3S_TOKEN_RE = re.compile(r"^[A-Za-z0-9:._-]+$")
+INSTANCE_TYPE_RE = re.compile(r"^[a-z][a-z0-9]*\.[a-z0-9]+$")
 
 
 def _check_wg_conf(slot: int, wg_conf: str) -> str:
@@ -41,7 +42,11 @@ def _check_wg_conf(slot: int, wg_conf: str) -> str:
 
 
 def render_user_data(
-    slot: int, wg_conf: str, k3s_token: str, k3s_version: str | None = None
+    slot: int,
+    wg_conf: str,
+    k3s_token: str,
+    k3s_version: str | None = None,
+    instance_type: str | None = None,
 ) -> str:
     if slot not in config.SLOTS:
         raise ValueError(f"slot must be one of {list(config.SLOTS)}")
@@ -49,10 +54,18 @@ def render_user_data(
     if not k3s_version:
         raise ValueError("set K3S_VERSION to the server's version (ask member 1)")
     if not K3S_VERSION_RE.match(k3s_version):
-        raise ValueError(f"K3S_VERSION must look like v1.31.4+k3s1, got {k3s_version!r}")
+        raise ValueError(
+            f"K3S_VERSION must look like v1.31.4+k3s1, got {k3s_version!r}"
+        )
     k3s_token = (k3s_token or "").strip()
     if not K3S_TOKEN_RE.match(k3s_token):
-        raise ValueError("k3s token is empty or has characters other than A-Z a-z 0-9 : . _ -")
+        raise ValueError(
+            "k3s token is empty or has characters other than A-Z a-z 0-9 : . _ -"
+        )
+
+    instance_type = instance_type or config.INSTANCE_TYPE
+    if not INSTANCE_TYPE_RE.match(instance_type):
+        raise ValueError(f"not an EC2 instance type: {instance_type!r}")
 
     values = {
         "SLOT": str(slot),
@@ -63,6 +76,7 @@ def render_user_data(
         "K3S_VERSION": k3s_version,
         "K3S_TOKEN": k3s_token,
         "MAX_LIFETIME_MIN": str(config.MAX_LIFETIME_MIN),
+        "INSTANCE_TYPE": instance_type,
         "WG_CONF": _check_wg_conf(slot, wg_conf),
     }
     script = TEMPLATE
