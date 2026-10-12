@@ -1,0 +1,193 @@
+# Burst autoscaler: one Deployment in idlecloud-system plus the narrowest
+# permissions it needs. Member 1 can include this file in infra/k8s.
+#
+# Before applying, create in idlecloud-system:
+#   Secret idlecloud-db       key DATABASE_URL  (same database as the coordinator)
+#   Secret burst-wg-slots     keys slot-200 ... slot-204  (member 1, Step 2)
+#   Secret k3s-agent-token    key token                   (member 1, Step 2)
+# AWS access comes from the control-plane instance's role (LabRole in AWS Academy),
+# which needs the instance metadata hop limit set to 2 so pods can reach it.
+# The role needs ec2:RunInstances, ec2:CreateTags (tags are set at launch),
+# ec2:TerminateInstances and ec2:DescribeInstances.
+# No iam:PassRole, because burst workers get no instance profile.
+# Check once in the Learner Lab before the first real run, since a missing
+# permission only shows up as "launch failed, will retry next tick" in the log.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: idlecloud-autoscaler
+  namespace: idlecloud-system
+---
+# Read and cordon nodes, delete a burst node when it is retired
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: idlecloud-autoscaler
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: idlecloud-autoscaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: idlecloud-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: idlecloud-autoscaler
+    namespace: idlecloud-system
+---
+# See which task pods are waiting and where they run
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: idlecloud-autoscaler
+  namespace: idlecloud-jobs
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: idlecloud-autoscaler
+  namespace: idlecloud-jobs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: idlecloud-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: idlecloud-autoscaler
+    namespace: idlecloud-system
+---
+# Read only the two burst Secrets
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: idlecloud-autoscaler
+  namespace: idlecloud-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["burst-wg-slots", "k3s-agent-token"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: idlecloud-autoscaler
+  namespace: idlecloud-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: idlecloud-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: idlecloud-autoscaler
+    namespace: idlecloud-system
+---
+# Delete only the K3s node passwords of the five burst slots, so a slot can be reused
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: idlecloud-autoscaler
+  namespace: kube-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+      - burst-200.node-password.k3s
+      - burst-201.node-password.k3s
+      - burst-202.node-password.k3s
+      - burst-203.node-password.k3s
+      - burst-204.node-password.k3s
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: idlecloud-autoscaler
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: idlecloud-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: idlecloud-autoscaler
+    namespace: idlecloud-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idlecloud-autoscaler
+  namespace: idlecloud-system
+  labels:
+    app.kubernetes.io/name: idlecloud-autoscaler
+spec:
+  replicas: 1
+  # Never run two copies during a rollout. The advisory lock guards this too.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: idlecloud-autoscaler
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: idlecloud-autoscaler
+    spec:
+      serviceAccountName: idlecloud-autoscaler
+      # Run on the AWS control plane, never on a campus PC that may leave
+      nodeSelector:
+        idlecloud/role: control
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: autoscaler
+          # Versioned, so a rebuilt image is picked up. Bump it on every rebuild.
+          image: idlecloud/autoscaler:0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: idlecloud-db
+                  key: DATABASE_URL
+            - name: AWS_USE_DEFAULT_CREDENTIALS
+              value: "1"
+            - name: AWS_REGION
+              value: us-east-1
+            - name: K3S_VERSION
+              value: v1.34.1+k3s1  # must match the server, check with: k3s --version
+            # Spending cap for all burst workers together. Leave unset for the
+            # minimum (3 of the cheapest machine). Raise it for heavy jobs.
+            # - name: BURST_BUDGET_USD_PER_HOUR
+            #   value: "0.30"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

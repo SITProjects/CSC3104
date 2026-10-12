@@ -42,8 +42,11 @@ def launch_params(
     token: str,
     spot: bool = False,
     k3s_version: str | None = None,
+    instance_type: str | None = None,
 ) -> dict:
-    """The exact run_instances request for one burst worker. No AWS calls here."""
+    """The exact run_instances request for one burst worker. No AWS calls here.
+    instance_type overrides the launch template's default size."""
+    instance_type = instance_type or config.INSTANCE_TYPE
     params = {
         "LaunchTemplate": {
             "LaunchTemplateName": config.TEMPLATE_NAME,
@@ -52,7 +55,8 @@ def launch_params(
         "MinCount": 1,
         "MaxCount": 1,
         # boto3 base64-encodes this for us
-        "UserData": render_user_data(slot, wg_conf, token, k3s_version),
+        "InstanceType": instance_type,
+        "UserData": render_user_data(slot, wg_conf, token, k3s_version, instance_type),
         "TagSpecifications": [
             {
                 "ResourceType": "instance",
@@ -75,19 +79,20 @@ def launch_params(
     return params
 
 
-def launch(slot: int, spot: bool = False) -> str:
+def launch(slot: int, spot: bool = False, instance_type: str | None = None) -> str:
     ec2 = _ec2()
     if find_instances(ec2, slot):
         raise RuntimeError(f"slot {slot} is already in use")
 
     wg_conf, token = load_slot(slot)
-    params = launch_params(slot, wg_conf, token, spot)
+    params = launch_params(slot, wg_conf, token, spot, instance_type=instance_type)
     # The last instance on this slot may have ended without `down` (lifetime limit,
     # failed boot or Spot reclaim). Clear its node so the new one is not rejected.
     remove_node(slot)
     instance_id = ec2.run_instances(**params)["Instances"][0]["InstanceId"]
     print(
-        f"Launched {instance_id} as {config.node_name(slot)} ({config.node_ip(slot)})"
+        f"Launched {instance_id} ({params['InstanceType']}) as "
+        f"{config.node_name(slot)} ({config.node_ip(slot)})"
     )
     return instance_id
 
@@ -142,6 +147,7 @@ def list_workers() -> None:
         market = instance.get("InstanceLifecycle", "on-demand")
         print(
             f"{instance['InstanceId']}  slot {tags.get(config.SLOT_TAG_KEY)}  "
+            f"{instance['InstanceType']}  "
             f"{instance['State']['Name']}  {market}  since {instance['LaunchTime']:%H:%M}"
         )
 
@@ -154,13 +160,14 @@ def main() -> None:
     up = sub.add_parser("up")
     up.add_argument("--slot", type=int, required=True, choices=list(config.SLOTS))
     up.add_argument("--spot", action="store_true")
+    up.add_argument("--type", help=f"EC2 instance type, default {config.INSTANCE_TYPE}")
     down = sub.add_parser("down")
     down.add_argument("--slot", type=int, required=True, choices=list(config.SLOTS))
     sub.add_parser("list")
     args = parser.parse_args()
 
     if args.command == "up":
-        launch(args.slot, args.spot)
+        launch(args.slot, args.spot, args.type)
     elif args.command == "down":
         terminate(args.slot)
     else:
