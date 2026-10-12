@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from kubernetes import client, config
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.settings import COORDINATOR_URL
+from core.settings import COORDINATOR_URL, S3_URL
 from services.coordinator.crud.jobs import get_job
 from services.coordinator.scheduler import scheduler_loop
 from shared.db import JobView, session_manager
@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Coordinator", lifespan=lifespan)
 
 HASH = "a" * 64  # TODO: remove this once we have a real hash
-S3 = "http://localhost:9000/csc3104-local"
+S3 = S3_URL
 
 
 def require_token(replica_id: int, authorization: str | None) -> None:

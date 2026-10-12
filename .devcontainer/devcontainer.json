@@ -24,7 +24,7 @@
     "VIRTUAL_ENV": "/home/vscode/.venvs/csc3104-dev",
     "KUBECONFIG": "/tmp/dev-kubeconfig"
   },
-  "forwardPorts": [8000, 8001, "minio:9000", "minio:9001"],
+  "forwardPorts": [18000, 18001, "minio:19000", "minio:19001"],
   "portsAttributes": {
     "8000": {"label": "Web/API"},
     "8001": {"label": "Coordinator"},
