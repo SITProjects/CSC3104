@@ -2,7 +2,7 @@
 
 It counts the pages, then starts one renderer Lambda per 20 pages at the same
 time (fan-out). With RENDER_FUNCTION_NAME unset, it calls the renderer in-process
-instead. local_run.py uses that to test the whole flow without AWS.
+instead, which lets the whole flow run without AWS.
 """
 
 import json

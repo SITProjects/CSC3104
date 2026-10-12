@@ -25,7 +25,6 @@ Both Lambdas run from one container image built from this folder.
 | `splitter/` | The splitter handler and the 20-page batching |
 | `renderer/` | The renderer handler |
 | `common/` | S3 keys, PDF rendering, HMAC signing and the callback, used by both |
-| `tests/` | Unit tests and a full pipeline test with a fake S3 |
 
 ## Contract with the web app (member 5)
 
@@ -60,8 +59,7 @@ If one batch of pages cannot be rendered (a corrupt page), its renderer sends a
 ```
 
 `WEBHOOK_URL` must be set in a deployed Lambda. A missing value is an error,
-unless `ALLOW_NO_WEBHOOK=1` is set on purpose to only log callbacks (the local
-test tools set this for you).
+unless `ALLOW_NO_WEBHOOK=1` is set on purpose to only log callbacks.
 
 Headers `X-Idlecloud-Timestamp` and `X-Idlecloud-Signature` carry
 `hex(HMAC-SHA256(secret, timestamp + "." + body))`. The endpoint should reject
@@ -69,22 +67,6 @@ bad signatures and anything older than 5 minutes, then reply 2xx.
 `common/signing.py` has a `verify()` function to reuse. The same batch can arrive
 twice after a retry, so ignore a `(job_id, page_start)` already seen.
 All pages are ready once the `page_end` values cover `page_count`.
-
-## How to test locally
-
-Run from the repo root inside the dev container, after `source .venv/bin/activate`.
-
-| Command | What it does |
-| --- | --- |
-| `python -m pytest serverless` | Unit tests and a full pipeline test with a fake S3 |
-| `python -m serverless.dev_receiver` | Fake web app `/hooks/pages-ready` that checks signatures (run in a second terminal) |
-| `python -m serverless.local_run file.pdf --callback` | Uploads the PDF to the dev container's MinIO and runs the splitter and renderers, like the S3 trigger would |
-
-Then check the page images at http://localhost:9001 (`admin` / `password123`),
-under `csc3104-local/jobs/<job_id>/pages/`.
-
-`local_run.py`, `local_minio.py` and `dev_receiver.py` are test tools only.
-They are not part of the Lambda image.
 
 ## AWS deployment
 
