@@ -80,9 +80,16 @@ def main() -> None:
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
         while True:
             started = time.monotonic()
-            reading = read_state()
-            if send_state(client, reading):
-                log.info("sent %s", reading)
+            try:
+                reading = read_state()
+            except OSError as exc:
+                # GetLastInputInfo can fail, e.g. on a locked or disconnected session.
+                # Skip this tick rather than crash; the node agent treats missing
+                # readings as BUSY, which is the safe default.
+                log.warning("could not read sensor state: %s", exc)
+            else:
+                if send_state(client, reading):
+                    log.info("sent %s", reading)
             # Sleep for whatever is left of the interval so readings stay ~5 s apart
             # even when the POST was slow.
             time.sleep(max(0.0, INTERVAL - (time.monotonic() - started)))
