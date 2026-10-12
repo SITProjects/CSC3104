@@ -1,0 +1,4 @@
+# The boot script runs on Linux EC2 instances, so keep Linux line endings
+# even when the repo is checked out on Windows.
+*.tmpl text eol=lf
+*.sh text eol=lf

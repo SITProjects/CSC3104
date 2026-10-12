@@ -1,0 +1,52 @@
+#!/bin/bash
+# Burst worker bootstrap for Campus Idle-Compute Cloud.
+# Rendered per slot by burst/user_data.py. Do not run this file by hand.
+set -euo pipefail
+exec > >(tee -a /var/log/idlecloud-burst.log) 2>&1
+
+SLOT="{{SLOT}}"
+NODE_IP="{{NODE_IP}}"
+NODE_NAME="{{NODE_NAME}}"
+
+# Safety net. The launch template sets shutdown behaviour to terminate,
+# so this ends the instance even if the autoscaler is down.
+shutdown -h +{{MAX_LIFETIME_MIN}} "idlecloud burst lifetime reached" || true
+
+# If any step fails, keep the instance 10 minutes so you can read the log, then terminate
+trap 'echo "BOOTSTRAP FAILED, terminating in 10 minutes"; shutdown -h +10' ERR
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y wireguard-tools
+
+install -d -m 700 /etc/wireguard
+cat > /etc/wireguard/wg0.conf <<'WGEOF'
+{{WG_CONF}}
+WGEOF
+chmod 600 /etc/wireguard/wg0.conf
+systemctl enable --now wg-quick@wg0
+
+# Wait for the hub to answer through the tunnel before joining
+for attempt in $(seq 1 30); do
+  if ping -c1 -W2 {{HUB_WG_IP}} >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+if ! ping -c1 -W2 {{HUB_WG_IP}} >/dev/null 2>&1; then
+  echo "WireGuard tunnel never came up. BOOTSTRAP FAILED, terminating in 10 minutes"
+  shutdown -h +10
+  exit 1
+fi
+
+curl -sfL https://get.k3s.io | \
+  INSTALL_K3S_VERSION='{{K3S_VERSION}}' K3S_URL='{{K3S_URL}}' K3S_TOKEN='{{K3S_TOKEN}}' \
+  sh -s - agent \
+    --node-name "$NODE_NAME" \
+    --node-ip "$NODE_IP" \
+    --flannel-iface wg0 \
+    --node-label idlecloud/role=worker \
+    --node-label idlecloud/pool=cloud \
+    --node-label "idlecloud/burst-slot=$SLOT"
+
+echo "burst worker $NODE_NAME joined"
