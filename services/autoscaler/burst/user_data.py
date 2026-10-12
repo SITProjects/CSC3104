@@ -15,6 +15,10 @@ def _lf(text: str) -> str:
 TEMPLATE = _lf(Path(__file__).with_name("user_data.sh.tmpl").read_text())
 MAX_USER_DATA_BYTES = 16 * 1024  # EC2 limit
 
+# Both values go into a root shell line, so only allow safe characters
+K3S_VERSION_RE = re.compile(r"^v\d+\.\d+\.\d+\+k3s\d+$")
+K3S_TOKEN_RE = re.compile(r"^[A-Za-z0-9:._-]+$")
+
 
 def _check_wg_conf(slot: int, wg_conf: str) -> str:
     wg_conf = _lf(wg_conf).strip()
@@ -44,8 +48,11 @@ def render_user_data(
     k3s_version = k3s_version or config.K3S_VERSION
     if not k3s_version:
         raise ValueError("set K3S_VERSION to the server's version (ask member 1)")
-    if not k3s_token or "'" in k3s_token:
-        raise ValueError("k3s token is empty or contains a quote")
+    if not K3S_VERSION_RE.match(k3s_version):
+        raise ValueError(f"K3S_VERSION must look like v1.31.4+k3s1, got {k3s_version!r}")
+    k3s_token = (k3s_token or "").strip()
+    if not K3S_TOKEN_RE.match(k3s_token):
+        raise ValueError("k3s token is empty or has characters other than A-Z a-z 0-9 : . _ -")
 
     values = {
         "SLOT": str(slot),
@@ -54,7 +61,7 @@ def render_user_data(
         "HUB_WG_IP": config.HUB_WG_IP,
         "K3S_URL": config.K3S_URL,
         "K3S_VERSION": k3s_version,
-        "K3S_TOKEN": k3s_token.strip(),
+        "K3S_TOKEN": k3s_token,
         "MAX_LIFETIME_MIN": str(config.MAX_LIFETIME_MIN),
         "WG_CONF": _check_wg_conf(slot, wg_conf),
     }

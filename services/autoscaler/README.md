@@ -45,6 +45,11 @@ security group has no inbound rules, since all cluster traffic comes through the
 WireGuard tunnel the node opens itself. Every instance terminates itself after
 120 minutes, even if the autoscaler is down.
 
+Known limit: the slot's WireGuard private key and the K3s token travel in EC2
+user data. Anyone with `ec2:DescribeInstanceAttribute` in the AWS account can
+read them. That is fine for a lab account the group controls. Fetching them at
+boot instead would need an IAM role, which burst workers deliberately do not have.
+
 ## Launching a burst worker
 
 Run from the repo root. AWS keys go in `runtime/aws-credentials`, the same file

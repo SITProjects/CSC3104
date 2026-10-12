@@ -26,7 +26,13 @@ def _from_cluster(slot: int) -> tuple[str, str]:
     try:
         kube_config.load_incluster_config()  # when the autoscaler runs in the cluster (step 3)
     except kube_config.ConfigException:
-        kube_config.load_kube_config()  # in the dev container with the shared kubeconfig
+        try:
+            kube_config.load_kube_config()  # in the dev container with the shared kubeconfig
+        except (kube_config.ConfigException, FileNotFoundError) as error:
+            raise SystemExit(
+                "No kubeconfig found to read the burst Secrets. Get the shared kubeconfig "
+                "from member 1, or set BURST_WG_DIR and K3S_TOKEN_FILE in .env.aws."
+            ) from error
     core = client.CoreV1Api()
 
     secret = core.read_namespaced_secret(

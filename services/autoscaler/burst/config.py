@@ -1,4 +1,5 @@
-"""Settings for burst workers. Values in services/autoscaler/.env.aws override the defaults."""
+"""Settings for burst workers. Values in services/autoscaler/.env.aws override the
+defaults. Real environment variables win over the file."""
 
 import os
 from pathlib import Path
@@ -10,7 +11,7 @@ if _ENV_FILE.exists():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
             _key, _value = _line.split("=", 1)
-            os.environ[_key.strip()] = _value.strip()
+            os.environ.setdefault(_key.strip(), _value.strip().strip("\"'"))
 
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 

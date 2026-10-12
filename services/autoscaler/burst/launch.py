@@ -13,7 +13,8 @@ from services.autoscaler.burst.aws import ec2_client
 from services.autoscaler.burst.slot_store import load_slot
 from services.autoscaler.burst.user_data import render_user_data
 
-LIVE_STATES = ["pending", "running", "stopping", "stopped"]
+# shutting-down counts as live, because the old instance still holds the WireGuard peer
+LIVE_STATES = ["pending", "running", "shutting-down", "stopping", "stopped"]
 
 
 def _ec2():
@@ -81,6 +82,9 @@ def launch(slot: int, spot: bool = False) -> str:
 
     wg_conf, token = load_slot(slot)
     params = launch_params(slot, wg_conf, token, spot)
+    # The last instance on this slot may have ended without `down` (lifetime limit,
+    # failed boot or Spot reclaim). Clear its node so the new one is not rejected.
+    remove_node(slot)
     instance_id = ec2.run_instances(**params)["Instances"][0]["InstanceId"]
     print(
         f"Launched {instance_id} as {config.node_name(slot)} ({config.node_ip(slot)})"
