@@ -13,7 +13,7 @@ COPY pyproject.toml uv.lock .python-version README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-install-project
 
-FROM python:3.12-slim-trixie as runtime
+FROM python:3.12-slim-trixie AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -28,7 +28,8 @@ COPY --from=builder /app/.venv /app/.venv
 
 COPY core/ ./core/
 COPY shared/ ./shared/
-COPY services/coordinator/ ./coordinator/
+COPY services/__init__.py ./services/__init__.py
+COPY services/coordinator/ ./services/coordinator/
 
 USER 10001:10001
 
@@ -37,5 +38,5 @@ EXPOSE 8001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=3).close()"]
 
-CMD ["python", "-m", "uvicorn", "coordinator.app:app", \
+CMD ["python", "-m", "uvicorn", "services.coordinator.app:app", \
      "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]
