@@ -1,5 +1,6 @@
 # Burst autoscaler image. Build context is the repo root:
-#   docker build -f services/autoscaler/Dockerfile -t idlecloud/autoscaler .
+#   docker build -f services/autoscaler/Dockerfile -t idlecloud/autoscaler:0.1.0 .
+# Bump the tag in k8s/autoscaler.yml to match on every rebuild.
 FROM python:3.12-slim-trixie AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.13.0 /uv /usr/local/bin/uv

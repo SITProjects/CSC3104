@@ -62,7 +62,9 @@ def account_usage(ec2) -> AccountUsage:
 def observe(db: Session, core, ec2, now: datetime) -> Snapshot:
     pods = cluster.task_pods(core)
     waiting, unschedulable = cluster.unscheduled_pods(pods, now)
-    idle_campus, burst_nodes = cluster.read_nodes(core, cluster.pods_per_node(pods))
+    idle_campus, campus_free, burst_nodes = cluster.read_nodes(
+        core, cluster.node_loads(pods)
+    )
     instances = burst_instances(ec2) if ec2 is not None else None
     account = account_usage(ec2) if ec2 is not None else None
 
@@ -87,6 +89,7 @@ def observe(db: Session, core, ec2, now: datetime) -> Snapshot:
         free_slots=slots.free_count(db),
         instances=instances,
         account=account,
+        campus_free=campus_free,
     )
 
 
@@ -135,7 +138,7 @@ def tick(engine, core, ec2) -> None:
             return
         snapshot = observe(db, core, ec2, now)
         log.info(
-            "pods waiting %d (unschedulable %d, burst after %.0fs), idle campus PCs %d, "
+            "pods waiting %d (unschedulable %d, burst after %.0fs), campus PCs taking pods %d, "
             "burst slots in use %s",
             snapshot.unscheduled_pods,
             len(snapshot.unschedulable),

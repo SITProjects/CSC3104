@@ -23,6 +23,10 @@ INTERVAL_S = _int("AUTOSCALER_INTERVAL_S", 30)
 # shrinks as the backlog grows (see decide.pending_grace), down to the floor.
 PENDING_GRACE_S = _int("AUTOSCALER_PENDING_GRACE_S", 120)
 MIN_PENDING_GRACE_S = _int("AUTOSCALER_MIN_PENDING_GRACE_S", 30)
+# For this long after a burst node turns Ready, the planner still counts its free
+# room. The scheduler can take a few tries to place waiting pods on a new node,
+# and without this the same pods would trigger a second launch.
+READY_SETTLE_S = _int("AUTOSCALER_READY_SETTLE_S", 90)
 # A burst node with no task pods this long is terminated
 EMPTY_GRACE_S = _int("AUTOSCALER_EMPTY_GRACE_S", 300)
 # A burst worker that has not joined the cluster by then is treated as failed

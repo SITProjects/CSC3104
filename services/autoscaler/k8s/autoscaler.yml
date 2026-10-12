@@ -7,7 +7,11 @@
 #   Secret k3s-agent-token    key token                   (member 1, Step 2)
 # AWS access comes from the control-plane instance's role (LabRole in AWS Academy),
 # which needs the instance metadata hop limit set to 2 so pods can reach it.
-# The role needs ec2:RunInstances, TerminateInstances and DescribeInstances.
+# The role needs ec2:RunInstances, ec2:CreateTags (tags are set at launch),
+# ec2:TerminateInstances and ec2:DescribeInstances.
+# No iam:PassRole, because burst workers get no instance profile.
+# Check once in the Learner Lab before the first real run, since a missing
+# permission only shows up as "launch failed, will retry next tick" in the log.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -150,7 +154,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: autoscaler
-          image: idlecloud/autoscaler:latest
+          # Versioned, so a rebuilt image is picked up. Bump it on every rebuild.
+          image: idlecloud/autoscaler:0.1.0
           imagePullPolicy: IfNotPresent
           env:
             - name: DATABASE_URL

@@ -88,7 +88,9 @@ with it (120 s divided by the number of stuck pods, at least 30 s).
 first-fit decreasing bin packing, using each pod's CPU and memory requests.
 Two replicas of one task never share a machine, matching the coordinator's
 anti-affinity. Pods go onto workers that are still booting first, so the same
-pods never cause two launches. Each new machine is the cheapest size that fits,
+pods never cause two launches. For 90 seconds after a worker turns Ready, its
+free room still counts, because the scheduler can take a few tries to place
+the waiting pods. After that, the scheduler's verdict is trusted again. Each new machine is the cheapest size that fits,
 from `t3.micro` up to `t3.large` (the largest AWS Academy allows). All the
 machines the plan needs launch in the same tick and boot in parallel.
 
@@ -105,8 +107,9 @@ without it, so smaller pods still get machines. Every pod that has to wait is
 logged with the reason.
 
 **Scale down.** A burst node with no task pods for 5 minutes is cordoned,
-terminated and its slot freed. When campus PCs are idle again and nothing is
-waiting, one burst node per tick is cordoned so it takes no new pods. Its
+terminated and its slot freed. When a campus PC has free CPU and memory for
+at least the smallest pod on a burst node, and nothing is waiting, one burst
+node per tick is cordoned so it takes no new pods. Its
 running pods finish, then it is retired. If pods get stuck again first, the
 draining nodes are reopened instead of launching new ones.
 
@@ -141,7 +144,7 @@ Timings, sizes and the budget can be changed with the variables in
 In the cluster, build the image from the repo root and apply the manifest:
 
 ```sh
-docker build -f services/autoscaler/Dockerfile -t idlecloud/autoscaler .
+docker build -f services/autoscaler/Dockerfile -t idlecloud/autoscaler:0.1.0 .
 kubectl apply -f services/autoscaler/k8s/autoscaler.yml
 ```
 

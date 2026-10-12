@@ -25,6 +25,25 @@ class StuckPod:
     group: str  # replicas of one task share a group and need different nodes
 
 
+@dataclass
+class NodeLoad:
+    """The task pods bound to one node and what they request."""
+
+    pods: int = 0
+    cpu_m: int = 0
+    mem_mib: float = 0
+    groups: set[str] = field(default_factory=set)
+    smallest: tuple[int, float] | None = None  # (cpu_m, mem_mib) of the smallest pod
+
+    def add(self, cpu_m: int, mem_mib: float, group: str) -> None:
+        self.pods += 1
+        self.cpu_m += cpu_m
+        self.mem_mib += mem_mib
+        self.groups.add(group)
+        if self.smallest is None or (cpu_m, mem_mib) < self.smallest:
+            self.smallest = (cpu_m, mem_mib)
+
+
 @dataclass(frozen=True)
 class BurstNode:
     slot: int
@@ -34,6 +53,8 @@ class BurstNode:
     task_pods: int
     empty_since: datetime | None
     machine: str = ""  # from the node's idlecloud/instance-type label
+    ready_since: datetime | None = None
+    load: NodeLoad = field(default_factory=NodeLoad)
 
 
 @dataclass(frozen=True)
@@ -64,7 +85,7 @@ class Snapshot:
     now: datetime
     unscheduled_pods: int  # task pods with no node yet, for any reason
     unschedulable: list[StuckPod]  # those the scheduler could not place
-    idle_campus_nodes: int
+    idle_campus_nodes: int  # campus PCs that take pods (Ready, uncordoned, owner away)
     burst_nodes: dict[int, BurstNode]  # by slot
     claimed_slots: dict[int, ClaimedSlot]  # by slot
     free_slots: int
@@ -72,6 +93,8 @@ class Snapshot:
     # None when EC2 was not checked (dry run).
     instances: dict[int, Instance] | None = None
     account: AccountUsage | None = None
+    # Free (cpu_m, mem_mib) on each campus PC that takes pods
+    campus_free: list[tuple[int, float]] = field(default_factory=list)
 
 
 # ---------- what the loop should do ----------
@@ -210,6 +233,15 @@ class _Bin:
     def __post_init__(self):
         self.cpu_left, self.mem_left = self.machine.cpu_m, self.machine.free_mem_mib
 
+    @classmethod
+    def settling(cls, node: "BurstNode") -> "_Bin":
+        """A node that just turned Ready, minus what already runs on it."""
+        b = cls(CATALOG.get(node.machine, settings.CHEAPEST), new=False)
+        b.cpu_left -= node.load.cpu_m
+        b.mem_left -= node.load.mem_mib
+        b.groups = set(node.load.groups)
+        return b
+
     def takes(self, pod: StuckPod) -> bool:
         return (
             pod.group not in self.groups
@@ -223,14 +255,14 @@ class _Bin:
         self.groups.add(pod.group)
 
 
-def _pack(pods: list[StuckPod], booting: list[MachineType]) -> list[_Bin]:
+def _pack(pods: list[StuckPod], existing: list[_Bin]) -> list[_Bin]:
     """First-fit decreasing bin packing. Returns the new machines needed.
 
-    Pods go onto machines that are already booting first, so the next tick does
-    not launch twice for the same pods. Two replicas of one task never share a
-    machine, matching the coordinator's pod anti-affinity.
+    Pods go onto machines that are booting or just turned Ready first, so the
+    next tick does not launch twice for the same pods. Two replicas of one task
+    never share a machine, matching the coordinator's pod anti-affinity.
     """
-    bins = [_Bin(machine, new=False) for machine in booting]
+    bins = [_copy_bin(b) for b in existing]
     for pod in sorted(pods, key=lambda p: (p.cpu_m, p.mem_mib), reverse=True):
         target = next((b for b in bins if b.takes(pod)), None)
         if target is None:
@@ -243,10 +275,16 @@ def _pack(pods: list[StuckPod], booting: list[MachineType]) -> list[_Bin]:
     return [b for b in bins if b.new]
 
 
+def _copy_bin(b: _Bin) -> _Bin:
+    c = _Bin(b.machine, new=b.new, opener=b.opener)
+    c.cpu_left, c.mem_left, c.groups = b.cpu_left, b.mem_left, set(b.groups)
+    return c
+
+
 def plan_machines(
     pods: list[StuckPod], booting: list[MachineType]
 ) -> list[MachineType]:
-    return [b.machine for b in _pack(pods, booting)]
+    return [b.machine for b in _pack(pods, [_Bin(m, new=False) for m in booting])]
 
 
 def _machine_of(claimed: ClaimedSlot) -> MachineType:
@@ -268,20 +306,32 @@ def _scale_by_demand(s: Snapshot, plan: _Plan, booting: list[ClaimedSlot]) -> No
         _launch_for(stuck, s, plan, booting)
         return
 
-    # Campus PCs are idle again and nothing is waiting: start emptying one burst
+    # Campus PCs have room again and nothing is waiting: start emptying one burst
     # node. It takes no new pods, finishes what it runs, then _scale_down_empty
-    # retires it. One per tick, so capacity drops gradually.
-    if s.idle_campus_nodes > 0 and s.unscheduled_pods == 0:
+    # retires it. One per tick, so capacity drops gradually. A campus PC only
+    # counts if it has room for at least the smallest pod on that burst node.
+    if s.campus_free and s.unscheduled_pods == 0:
         candidates = [
-            node for node in active if not node.draining and node.task_pods > 0
+            node
+            for node in active
+            if not node.draining and node.task_pods > 0 and _campus_can_take(s, node)
         ]
         if candidates:
             node = min(candidates, key=lambda n: n.task_pods)
             plan.add(
                 "drain",
                 node.slot,
-                f"{s.idle_campus_nodes} campus PCs idle and no pods waiting",
+                "a campus PC has room for its work and no pods are waiting",
             )
+
+
+def _campus_can_take(s: Snapshot, node: BurstNode) -> bool:
+    if node.load.smallest is None:
+        return False
+    cpu, mem = node.load.smallest
+    return any(
+        free_cpu >= cpu and free_mem >= mem for free_cpu, free_mem in s.campus_free
+    )
 
 
 def _launch_for(
@@ -312,10 +362,17 @@ def _launch_for(
     # otherwise drop the pod that needed it. Then plan again with what is left.
     # Every round accepts a machine or drops a pod, so this always ends.
     pods = [p for p in stuck if smallest_fit(p) is not None]
-    machines = [_machine_of(c) for c in booting]
+    bins = [_Bin(_machine_of(c), new=False) for c in booting]
+    bins += [
+        _Bin.settling(node)
+        for node in _active_nodes(s, plan)
+        if not node.draining
+        and node.ready_since is not None
+        and _age(s.now, node.ready_since) < settings.READY_SETTLE_S
+    ]
     unaffordable: list[str] = []
     while True:
-        wanted = _pack(pods, machines)
+        wanted = _pack(pods, bins)
         if not wanted:
             break
         first = wanted[0]
@@ -342,7 +399,7 @@ def _launch_for(
             f"{len(stuck)} task pods stuck for over {pending_grace(len(s.unschedulable)):.0f}s",
             machine=machine.name,
         )
-        machines.append(machine)
+        bins.append(_Bin(machine, new=False))
         free_slots -= 1
         spend += machine.cost_per_hour
         if instances is not None:

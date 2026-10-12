@@ -7,7 +7,7 @@ from kubernetes import config as kube_config
 
 from services.autoscaler.burst import config as burst_config
 from services.autoscaler.controller import settings
-from services.autoscaler.controller.decide import BurstNode, StuckPod
+from services.autoscaler.controller.decide import BurstNode, NodeLoad, StuckPod
 
 
 def connect() -> client.CoreV1Api:
@@ -99,12 +99,17 @@ def unscheduled_pods(pods, now: datetime) -> tuple[int, list[StuckPod]]:
     return waiting, unschedulable
 
 
-def pods_per_node(pods) -> dict[str, int]:
-    counts: dict[str, int] = {}
+def node_loads(pods) -> dict[str, NodeLoad]:
+    """What the task pods bound to each node request, by node name."""
+    loads: dict[str, NodeLoad] = {}
     for pod in pods:
         if pod.spec.node_name and pod.status.phase in ("Pending", "Running"):
-            counts[pod.spec.node_name] = counts.get(pod.spec.node_name, 0) + 1
-    return counts
+            cpu, mem = _pod_requests(pod)
+            labels = pod.metadata.labels or {}
+            loads.setdefault(pod.spec.node_name, NodeLoad()).add(
+                cpu, mem, labels.get(settings.TASK_LABEL, pod.metadata.name)
+            )
+    return loads
 
 
 # ---------- nodes ----------
@@ -120,19 +125,30 @@ def _parse_time(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
-def read_nodes(
-    core: client.CoreV1Api, pod_counts: dict[str, int]
-) -> tuple[int, dict[int, BurstNode]]:
-    """Return the number of idle campus PCs and the burst nodes by slot.
+def _ready_since(node) -> datetime | None:
+    for c in node.status.conditions or []:
+        if c.type == "Ready" and c.status == "True":
+            return c.last_transition_time
+    return None
 
-    A campus PC is idle when it is a Ready worker that takes pods and has no
-    owner-active taint (member 2's node agent adds that taint when the owner is back).
+
+def read_nodes(
+    core: client.CoreV1Api, loads: dict[str, NodeLoad]
+) -> tuple[int, list[tuple[int, float]], dict[int, BurstNode]]:
+    """Return the campus PCs that take pods, the free room on each, and the
+    burst nodes by slot.
+
+    A campus PC takes pods when it is a Ready worker, not cordoned, with no
+    owner-active taint (member 2's node agent adds that taint when the owner is
+    back). Its free room is its allocatable CPU and memory minus what the task
+    pods bound to it request.
     """
-    idle_campus, burst = 0, {}
+    campus_free, burst = [], {}
     for node in core.list_node().items:
         labels = node.metadata.labels or {}
         if labels.get(settings.ROLE_LABEL) != "worker":
             continue
+        load = loads.get(node.metadata.name, NodeLoad())
         if labels.get(settings.POOL_LABEL) == "cloud":
             slot = labels.get(burst_config.SLOT_TAG_KEY)
             if slot is None or not slot.isdigit():
@@ -143,16 +159,24 @@ def read_nodes(
                 name=node.metadata.name,
                 ready=_is_ready(node),
                 draining=notes.get(settings.DRAINING_ANNOTATION) == "true",
-                task_pods=pod_counts.get(node.metadata.name, 0),
+                task_pods=load.pods,
                 empty_since=_parse_time(notes.get(settings.EMPTY_SINCE_ANNOTATION)),
                 machine=labels.get(settings.TYPE_LABEL, ""),
+                ready_since=_ready_since(node),
+                load=load,
             )
             continue
         taints = node.spec.taints or []
         owner_active = any(t.key == settings.OWNER_TAINT for t in taints)
         if _is_ready(node) and not node.spec.unschedulable and not owner_active:
-            idle_campus += 1
-    return idle_campus, burst
+            allocatable = node.status.allocatable or {}
+            campus_free.append(
+                (
+                    cpu_millicores(allocatable.get("cpu", "0")) - load.cpu_m,
+                    memory_mib(allocatable.get("memory", "0")) - load.mem_mib,
+                )
+            )
+    return len(campus_free), campus_free, burst
 
 
 def _patch(core: client.CoreV1Api, name: str, body: dict) -> None:
