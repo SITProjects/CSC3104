@@ -5,13 +5,13 @@ from contextlib import asynccontextmanager, suppress
 from typing import Annotated
 from uuid import UUID
 
+from coordinator.crud.jobs import get_job
+from coordinator.scheduler import scheduler_loop
 from fastapi import Depends, FastAPI, Header, HTTPException
 from kubernetes import client, config
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.settings import COORDINATOR_URL
-from services.coordinator.crud.jobs import get_job
-from services.coordinator.scheduler import scheduler_loop
 from shared.db import JobView, session_manager
 from shared.migrate import run_migrations
 

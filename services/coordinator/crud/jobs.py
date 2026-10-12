@@ -1,11 +1,11 @@
 import uuid
 
+from coordinator.models import CreateJobRequest
 from fastapi import HTTPException
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from services.coordinator.models import CreateJobRequest
 from shared.db import JobType
 from shared.db.models import Job, JobStatus, Replica, ReplicaStatus, Task
 

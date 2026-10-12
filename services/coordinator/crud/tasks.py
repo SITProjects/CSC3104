@@ -1,7 +1,7 @@
+from coordinator.models import CreateJobRequest
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from services.coordinator.models import CreateJobRequest
 from shared.db import Job, Task, TaskStatus
 
 
