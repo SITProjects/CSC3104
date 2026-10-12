@@ -2,6 +2,16 @@
 
 Owner: member 6.
 
+Monitor queued work and available campus capacity, launch bounded EC2 burst
+capacity, and retire unused workers. Manage burst slots and cost controls, and
+coordinate Spot interruption handling with the existing eviction and checkpoint
+flow. Infrastructure templates belong in root `infra/`.
+
+The EC2 launch template is the one exception. `burst/launch_template.py` creates
+it with boto3, because the autoscaler reuses the same settings when it launches
+workers. Shared network and cluster setup, such as the WireGuard hub and peer
+configs, stays in member 1's `infra/`.
+
 A burst worker is an EC2 `t3.small` that joins the K3s cluster through WireGuard,
 like a campus PC. It gets the labels `idlecloud/role=worker` and
 `idlecloud/pool=cloud`, so the coordinator's Jobs run on it with no changes.
