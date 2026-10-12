@@ -1,3 +1,7 @@
+import asyncio
+
+from kubernetes.client import ApiException, BatchV1Api
+
 from core.settings import JOB_NAMESPACE
 from shared.db.models import JobType, Replica, Task
 
@@ -102,3 +106,26 @@ def build_replica_job_manifest(
             },
         },
     }
+
+
+async def create_job(manifest: dict, k3_api: BatchV1Api) -> None:
+    """
+    Submit k8s job. If job already exist, it will be deleted and recreated.
+    """
+    name = manifest["metadata"]["name"]
+    try:
+        await asyncio.to_thread(k3_api.create_namespaced_job, JOB_NAMESPACE, manifest)
+    except ApiException as e:
+        if e.status == 409:
+            raise
+        try:
+            await asyncio.to_thread(
+                k3_api.delete_namespaced_job,
+                name,
+                JOB_NAMESPACE,
+                propagation_policy="Background",
+            )
+        except ApiException as e:
+            if e.status != 404:
+                raise
+        await asyncio.to_thread(k3_api.create_namespaced_job, JOB_NAMESPACE, manifest)

@@ -1,17 +1,15 @@
 import asyncio
 import hashlib
 import secrets
-import traceback
 
 from kubernetes.client import BatchV1Api
-from kubernetes.client.exceptions import ApiException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from core.settings import BATCH_SIZE, JOB_NAMESPACE, SCHEDULER_INTERVAL
+from core.settings import BATCH_SIZE, SCHEDULER_INTERVAL
 from shared.db.models import ReplicaStatus
 
 from .crud import fetch_scheduled_replicas, mark_job_running, mark_task_running
-from .k8s import build_replica_job_manifest
+from .k8s import build_replica_job_manifest, create_job
 
 
 async def launch_batch(
@@ -31,22 +29,11 @@ async def launch_batch(
             )
             try:
                 # BatchV1Api is blocking, so keep it off the event loop
-                await asyncio.to_thread(
-                    k3_api.create_namespaced_job, JOB_NAMESPACE, job_manifest
-                )
-            except ApiException as e:
-                if e.status == 409:
-                    # left over from a launch whose commit failed; its token is lost,
-                    # so delete it and relaunch on the next loop
-                    await asyncio.to_thread(
-                        k3_api.delete_namespaced_job,
-                        job_manifest["metadata"]["name"],
-                        JOB_NAMESPACE,
-                        propagation_policy="Background",
-                    )
-                print(
-                    f"Failed to create K8s job for replica {replica.id}: {e.status} {e.reason}"
-                )
+                await create_job(job_manifest, k3_api)
+            except Exception:  # noqa: BLE001
+                # left over from a launch whose commit failed; its token is lost,
+                # so delete it and relaunch on the next loop
+                print(f"Failed to create K8s job for replica {replica.id}")
                 continue
             replica.status = ReplicaStatus.RUNNING
             replica.token_hash = hashlib.sha256(token.encode()).hexdigest()
@@ -84,6 +71,5 @@ async def scheduler_loop(
             raise
         except Exception:  # noqa: BLE001
             print("Scheduler transaction failed")
-            traceback.print_exc()
         # wait for x seconds before checking for new scheduled replicas
         await asyncio.sleep(SCHEDULER_INTERVAL)
