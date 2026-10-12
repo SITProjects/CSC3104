@@ -39,7 +39,10 @@ async def lifespan(app: FastAPI):
     session_manager.init_db(
         os.environ["DATABASE_URL"].replace("postgresql://", "postgresql+asyncpg://", 1)
     )
-    await asyncio.to_thread(config.load_incluster_config)
+    try:
+        await asyncio.to_thread(config.load_incluster_config)
+    except config.ConfigException:
+        await asyncio.to_thread(config.load_kube_config)
     batch_v1 = client.BatchV1Api()
     task = asyncio.create_task(
         scheduler_loop(session_manager.session_factory, COORDINATOR_URL, batch_v1)

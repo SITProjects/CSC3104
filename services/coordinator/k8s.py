@@ -115,8 +115,8 @@ async def create_job(manifest: dict, k3_api: BatchV1Api) -> None:
     name = manifest["metadata"]["name"]
     try:
         await asyncio.to_thread(k3_api.create_namespaced_job, JOB_NAMESPACE, manifest)
-    except ApiException as e:
-        if e.status == 409:
+    except ApiException as create_err:
+        if create_err.status == 409:
             raise
         try:
             await asyncio.to_thread(
@@ -125,7 +125,7 @@ async def create_job(manifest: dict, k3_api: BatchV1Api) -> None:
                 JOB_NAMESPACE,
                 propagation_policy="Background",
             )
-        except ApiException as e:
-            if e.status != 404:
+        except ApiException as delete_err:
+            if delete_err.status != 404:
                 raise
         await asyncio.to_thread(k3_api.create_namespaced_job, JOB_NAMESPACE, manifest)

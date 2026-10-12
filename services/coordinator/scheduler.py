@@ -31,8 +31,7 @@ async def launch_batch(
                 # BatchV1Api is blocking, so keep it off the event loop
                 await create_job(job_manifest, k3_api)
             except Exception:  # noqa: BLE001
-                # left over from a launch whose commit failed; its token is lost,
-                # so delete it and relaunch on the next loop
+                # TODO: include a X amt of retries here, mark replica as failed if it fails to launch after X attempts
                 print(f"Failed to create K8s job for replica {replica.id}")
                 continue
             replica.status = ReplicaStatus.RUNNING
