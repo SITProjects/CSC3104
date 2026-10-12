@@ -6,6 +6,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from kubernetes import client, config
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.settings import COORDINATOR_URL
@@ -38,8 +39,13 @@ async def lifespan(app: FastAPI):
     session_manager.init_db(
         os.environ["DATABASE_URL"].replace("postgresql://", "postgresql+asyncpg://", 1)
     )
+    try:
+        await asyncio.to_thread(config.load_incluster_config)
+    except config.ConfigException:
+        await asyncio.to_thread(config.load_kube_config)
+    batch_v1 = client.BatchV1Api()
     task = asyncio.create_task(
-        scheduler_loop(session_manager.session_factory, COORDINATOR_URL)
+        scheduler_loop(session_manager.session_factory, COORDINATOR_URL, batch_v1)
     )
     yield
     task.cancel()

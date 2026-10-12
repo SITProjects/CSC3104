@@ -2,38 +2,54 @@ import asyncio
 import hashlib
 import secrets
 
+from kubernetes.client import BatchV1Api
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.settings import BATCH_SIZE, SCHEDULER_INTERVAL
 from shared.db.models import ReplicaStatus
 
 from .crud import fetch_scheduled_replicas, mark_job_running, mark_task_running
+from .k8s import build_replica_job_manifest, create_job
 
 
 async def launch_batch(
-    session_factory: async_sessionmaker[AsyncSession], coordinator_url
+    session_factory: async_sessionmaker[AsyncSession],
+    coordinator_url: str,
+    k3_api: BatchV1Api,
 ) -> int:
+    launched = 0
     async with session_factory.begin() as session:
         scheduled_replicas = await fetch_scheduled_replicas(session, limit=BATCH_SIZE)
-        for replica, job_id in scheduled_replicas:
+        for replica, task, job_type in scheduled_replicas:
+            print(f"launching replica {replica.id} attempt {replica.attempt}")
+            # the pod gets the plain token; only its hash is stored
             token = secrets.token_urlsafe(32)
-            hashlib.sha256(token.encode()).hexdigest()
-            # TODO: K8s jobs in idlecloud-job
-            # Create K8 jobs if successful, update replica status to RUNNING and store token in db
-
+            job_manifest = build_replica_job_manifest(
+                replica, task, job_type, token, coordinator_url
+            )
+            try:
+                # BatchV1Api is blocking, so keep it off the event loop
+                await create_job(job_manifest, k3_api)
+            except Exception:  # noqa: BLE001
+                # TODO: include a X amt of retries here, mark replica as failed if it fails to launch after X attempts
+                print(f"Failed to create K8s job for replica {replica.id}")
+                continue
             replica.status = ReplicaStatus.RUNNING
-            replica.token_hash = token
+            replica.token_hash = hashlib.sha256(token.encode()).hexdigest()
             replica.progress = 0
-            replica.attempt += 1
             await session.flush()
-            await mark_task_running(session, replica.task_id)
-            await mark_job_running(session, job_id)
+            await mark_task_running(session, task.id)
+            await mark_job_running(session, task.job_id)
+            launched += 1
             print(f"launched replica {replica.id} attempt {replica.attempt}")
-        return len(scheduled_replicas)
+    # only count successes, so repeated failures still wait SCHEDULER_INTERVAL
+    return launched
 
 
 async def scheduler_loop(
-    session_factory: async_sessionmaker[AsyncSession], coordinator_url: str
+    session_factory: async_sessionmaker[AsyncSession],
+    coordinator_url: str,
+    k3_api: BatchV1Api,
 ) -> None:
     """
     Main scheduler loop that periodically checks for sheduled replicas, creates K8s jobs for them, and updates their status in the database.
@@ -44,7 +60,9 @@ async def scheduler_loop(
     """
     while True:
         try:
-            launched_replicas = await launch_batch(session_factory, coordinator_url)
+            launched_replicas = await launch_batch(
+                session_factory, coordinator_url, k3_api
+            )
             if launched_replicas == BATCH_SIZE:
                 # immediately check for more scheduled replicas if we launched a full batch
                 continue
