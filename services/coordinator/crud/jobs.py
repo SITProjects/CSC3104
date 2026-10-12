@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from services.coordinator.models import CreateJobRequest
 from shared.db import JobType
-from shared.db.models import Job, JobStatus, Replica, Task
+from shared.db.models import Job, JobStatus, Replica, ReplicaStatus, Task
 
 
 async def ensure_job_type_exists(session: AsyncSession, job_type: str) -> None:
@@ -46,6 +46,7 @@ async def get_job(
         .select_from(Task)  # Start from tasks
         .join(Replica, Replica.task_id == Task.id)
         .where(Task.job_id == Job.id)
+        .where(Replica.status.in_([ReplicaStatus.RUNNING, ReplicaStatus.DONE]))
         .correlate(Job)
         .scalar_subquery()
     )
@@ -54,7 +55,6 @@ async def get_job(
         select(Job, progress.label("progress"))
         .options(selectinload(Job.tasks).selectinload(Task.replicas))
         .where(Job.id == job_id)
-        .with_for_update()
     )
     result = await session.execute(stmt)
     row = result.one_or_none()
