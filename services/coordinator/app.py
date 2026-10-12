@@ -10,10 +10,9 @@ from kubernetes import client, config
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.settings import COORDINATOR_URL
+from services.coordinator.crud.jobs import get_job
 from services.coordinator.scheduler import scheduler_loop
-from shared.db import (
-    session_manager,
-)
+from shared.db import JobView, session_manager
 from shared.migrate import run_migrations
 
 from .crud import create_job, create_replicas, create_tasks, ensure_job_type_exists
@@ -21,12 +20,9 @@ from .models import (
     Ack,
     CreateJobRequest,
     CreateJobResponse,
-    JobView,
     Manifest,
     ProgressIn,
-    ReplicaView,
     ResultIn,
-    TaskView,
 )
 
 log = logging.getLogger("coordinator")
@@ -75,88 +71,24 @@ def require_token(replica_id: int, authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-@app.get("/internal/jobs/{id}")
-def get_jobs(id: UUID) -> JobView:
+@app.get("/internal/job/{id}")
+async def fetch_job(id: UUID, session: DbSession) -> JobView:
     """
-    Returns a mock job view for the given job id.
+    Returns a job view for the given job id.
 
     args:
         id: The id of the job to retrieve.
     returns:
-        JobView: A mock job view with the given id
+        JobView: A job view with the given id
     """
-    return JobView(
-        id=id,
-        job_type="ocr",
-        status="RUNNING",
-        progress=55,
-        tasks=[
-            TaskView(
-                id=100,
-                task_index=0,
-                status="VERIFIED",
-                final_hash=HASH,
-                replicas=[
-                    ReplicaView(
-                        id=1,
-                        node_name="lab-pc-01",
-                        status="DONE",
-                        attempt=1,
-                        progress=100,
-                        result_hash=HASH,
-                    ),
-                    ReplicaView(
-                        id=2,
-                        node_name="lab-pc-02",
-                        status="DONE",
-                        attempt=1,
-                        progress=100,
-                        result_hash=HASH,
-                    ),
-                    ReplicaView(
-                        id=3,
-                        node_name="lab-pc-03",
-                        status="DONE",
-                        attempt=2,
-                        progress=100,
-                        result_hash=HASH,
-                    ),
-                ],
-            ),
-            TaskView(
-                id=101,
-                task_index=1,
-                status="RUNNING",
-                final_hash=None,
-                replicas=[
-                    ReplicaView(
-                        id=4,
-                        node_name="lab-pc-01",
-                        status="RUNNING",
-                        attempt=1,
-                        progress=40,
-                        result_hash=None,
-                    ),
-                    ReplicaView(
-                        id=5,
-                        node_name="lab-pc-04",
-                        status="EVICTED",
-                        attempt=1,
-                        progress=20,
-                        result_hash=None,
-                    ),
-                    ReplicaView(
-                        id=6,
-                        node_name=None,
-                        status="SCHEDULED",
-                        attempt=1,
-                        progress=0,
-                        result_hash=None,
-                    ),
-                ],
-            ),
-        ],
-    )
+    async with session:
+        result = await get_job(session, id)
+        if result is None:
+            raise HTTPException(404, f"job {id} not found")
+        job, progress = result
+        view = JobView.model_validate(job, from_attributes=True)
+        view.progress = int(progress) if progress is not None else 0
+        return view
 
 
 @app.post("/internal/jobs", status_code=201)

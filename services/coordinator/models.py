@@ -32,31 +32,6 @@ class CreateJobResponse(BaseModel):
     replica_count: int
 
 
-class ReplicaView(BaseModel):
-    id: int
-    node_name: str | None
-    status: ReplicaStatus
-    attempt: int
-    progress: int
-    result_hash: str | None
-
-
-class TaskView(BaseModel):
-    id: int
-    task_index: int
-    status: TaskStatus
-    final_hash: str | None
-    replicas: list[ReplicaView]
-
-
-class JobView(BaseModel):
-    id: UUID
-    job_type: str
-    status: JobStatus
-    progress: int  # 0-100, average over tasks
-    tasks: list[TaskView]
-
-
 class Manifest(BaseModel):
     replica_id: int
     task_index: int
