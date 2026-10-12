@@ -116,7 +116,7 @@ async def create_job(manifest: dict, k3_api: BatchV1Api) -> None:
     try:
         await asyncio.to_thread(k3_api.create_namespaced_job, JOB_NAMESPACE, manifest)
     except ApiException as create_err:
-        if create_err.status == 409:
+        if create_err.status != 409:
             raise
         try:
             await asyncio.to_thread(
