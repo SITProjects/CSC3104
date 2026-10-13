@@ -150,3 +150,42 @@ kubectl apply -f services/autoscaler/k8s/autoscaler.yml
 
 The manifest lists the Secrets it needs. It runs on the control-plane node and
 uses that instance's AWS role, so no AWS keys are stored in the cluster.
+
+## Spot reclaim handling (Step 4)
+
+AWS gives a Spot machine a two-minute warning before taking it back. The
+**Spot watcher** (`spotwatch/`) is a small pod on every burst node. Every 5
+seconds it asks the instance metadata service (IMDSv2) for a warning. On one, it
+adds the owner-active taint `idlecloud/owner-active=true:NoExecute` to its node,
+the same taint member 2's agent uses when a PC's owner returns. Kubernetes then
+evicts the task pods, and member 3's checkpoint and requeue logic resumes them
+elsewhere. It also writes `idlecloud/reclaim-at` (the deadline) and
+`idlecloud/reclaim-source` (`spot` or `injected`) on the node, and logs one JSON
+line with the timings.
+
+It reads two sources and handles both the same way:
+
+- `spot/instance-action`, the real AWS Spot notice
+- the EC2 tag `reclaim-at`, an injected warning for testing. AWS Academy allows
+  no Spot instances, so this is how the same path is exercised there.
+
+Every 10 seconds it also sends the coordinator a heartbeat for its node
+(`IDLE`, or `BUSY` once a warning is seen), since burst nodes have no campus
+node agent.
+
+It uses only the Python standard library and runs from a ConfigMap on a small
+public Python image, so new burst nodes pull no project image.
+
+**Security.** It reads metadata through the node's network (hop limit 1 keeps
+task pods away from it). RBAC lets it get and patch only the burst nodes
+`burst-200` to `burst-204`. A ValidatingAdmissionPolicy narrows that to the node
+the pod runs on, using the node name the API server signs into the pod's
+token (Kubernetes 1.32+). On that node it may only add the exact taint
+`idlecloud/owner-active=true:NoExecute` and set the three `idlecloud/reclaim-*`
+annotations. Everything else on the node must stay exactly as it was.
+
+Apply with kustomize, which builds the ConfigMap from `watcher.py`:
+
+```sh
+kubectl apply -k services/autoscaler/spotwatch
+```

@@ -67,8 +67,11 @@ class MachineType:
 # sees, or the plan and the scheduler disagree. K3s reserves no CPU by default,
 # so a 2-core pod does fit a 2 vCPU machine. Memory is lower than the advertised
 # size: the kernel keeps some, and K3s evicts pods below 100 MiB free.
+# The Spot watcher pod on each burst node requests no CPU and this much memory
+# (spotwatch/spot-watcher.yml). Change both together.
+SPOT_WATCHER_MEM_MIB = 32
 RESERVED_CPU_M = 0
-RESERVED_MEM_MIB = 400
+RESERVED_MEM_MIB = 400 + SPOT_WATCHER_MEM_MIB
 
 # AWS Academy allows sizes up to large. T3 only, because the launch template
 # sets T-family CPU credits. Bigger pods than t3.large can never burst.
@@ -114,6 +117,9 @@ OWNER_TAINT = "idlecloud/owner-active"
 # memory, so a restarted autoscaler carries on where the last one stopped.
 EMPTY_SINCE_ANNOTATION = "idlecloud/empty-since"
 DRAINING_ANNOTATION = "idlecloud/draining"
+# Written by the Spot watcher (spotwatch/watcher.py) when a reclaim warning arrives
+RECLAIM_AT_ANNOTATION = "idlecloud/reclaim-at"
+RECLAIM_SOURCE_ANNOTATION = "idlecloud/reclaim-source"
 
 # Postgres advisory lock, so only one autoscaler copy acts per tick
 LOCK_ID = 31046
