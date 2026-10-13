@@ -106,6 +106,13 @@ If the budget cannot cover a pod, only that pod waits. The plan is rebuilt
 without it, so smaller pods still get machines. Every pod that has to wait is
 logged with the reason.
 
+The running cost comes from EC2, not only from our own records. Every live
+burst instance counts, including one not in `burst_slots` and one being
+terminated, until a later check shows it gone. Each is priced by its real size
+from a table of all T3 sizes. When the size is not known yet, it is priced as
+the dearest size we launch. The budget may then be underused for a moment,
+but a live worker is never counted as free.
+
 **Scale down.** A burst node with no task pods for 5 minutes is cordoned,
 terminated and its slot freed. When a campus PC has free CPU and memory for
 at least the smallest pod on a burst node, and nothing is waiting, one burst

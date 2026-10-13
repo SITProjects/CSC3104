@@ -73,19 +73,45 @@ SPOT_WATCHER_MEM_MIB = 32
 RESERVED_CPU_M = 0
 RESERVED_MEM_MIB = 400 + SPOT_WATCHER_MEM_MIB
 
-# AWS Academy allows sizes up to large. T3 only, because the launch template
-# sets T-family CPU credits. Bigger pods than t3.large can never burst.
-_ALL_TYPES = [
-    MachineType("t3.micro", 2, 1024, 0.0104),
-    MachineType("t3.small", 2, 2048, 0.0208),
-    MachineType("t3.medium", 2, 4096, 0.0416),
-    MachineType("t3.large", 2, 8192, 0.0832),
-]
+# Every T3 size, so the budget can price any burst instance it finds, even one
+# the autoscaler would not launch itself (started by hand, or a size removed
+# from BURST_INSTANCE_TYPES since). T3 only, because the launch template sets
+# T-family CPU credits.
+KNOWN_TYPES = {
+    t.name: t
+    for t in [
+        MachineType("t3.nano", 2, 512, 0.0052),
+        MachineType("t3.micro", 2, 1024, 0.0104),
+        MachineType("t3.small", 2, 2048, 0.0208),
+        MachineType("t3.medium", 2, 4096, 0.0416),
+        MachineType("t3.large", 2, 8192, 0.0832),
+        MachineType("t3.xlarge", 4, 16384, 0.1664),
+        MachineType("t3.2xlarge", 8, 32768, 0.3328),
+    ]
+}
+# Sizes the autoscaler launches. AWS Academy allows up to large, and a nano
+# has almost no memory left for pods. Bigger pods than t3.large never burst.
+_LAUNCHABLE = ["t3.micro", "t3.small", "t3.medium", "t3.large"]
 _allowed = os.environ.get("BURST_INSTANCE_TYPES", "")
 CATALOG = {
-    t.name: t for t in _ALL_TYPES if not _allowed or t.name in _allowed.split(",")
+    name: KNOWN_TYPES[name]
+    for name in _LAUNCHABLE
+    if not _allowed or name in _allowed.split(",")
 }
 CHEAPEST = min(CATALOG.values(), key=lambda t: t.cost_per_hour)
+DEAREST = max(CATALOG.values(), key=lambda t: t.cost_per_hour)
+
+
+def cost_per_hour(machine: str) -> float:
+    """What a burst instance of this size costs, rounded up when unsure.
+    An empty name is a worker we launched whose size is not visible yet, so it
+    is one of the sizes we launch, at most the dearest. Any other unknown name
+    costs as much as the dearest size in the full table."""
+    if machine in KNOWN_TYPES:
+        return KNOWN_TYPES[machine].cost_per_hour
+    if not machine:
+        return DEAREST.cost_per_hour
+    return max(t.cost_per_hour for t in KNOWN_TYPES.values())
 
 
 # ---------- spending and quotas ----------

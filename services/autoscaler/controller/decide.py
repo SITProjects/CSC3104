@@ -236,7 +236,7 @@ class _Bin:
     @classmethod
     def settling(cls, node: "BurstNode") -> "_Bin":
         """A node that just turned Ready, minus what already runs on it."""
-        b = cls(CATALOG.get(node.machine, settings.CHEAPEST), new=False)
+        b = cls(settings.KNOWN_TYPES.get(node.machine, settings.CHEAPEST), new=False)
         b.cpu_left -= node.load.cpu_m
         b.mem_left -= node.load.mem_mib
         b.groups = set(node.load.groups)
@@ -288,7 +288,30 @@ def plan_machines(
 
 
 def _machine_of(claimed: ClaimedSlot) -> MachineType:
-    return CATALOG.get(claimed.machine, settings.CHEAPEST)
+    """The size used to plan room on a booting worker. When unsure, the smallest,
+    so the plan never counts on room that may not exist."""
+    return settings.KNOWN_TYPES.get(claimed.machine, settings.CHEAPEST)
+
+
+def running_spend(s: Snapshot, plan: _Plan) -> float:
+    """What the burst workers cost per hour right now.
+
+    EC2 is the truth: every live burst instance counts, including orphans and
+    ones being retired or shutting down, until a later snapshot shows them gone.
+    A slot we claimed counts too while EC2 does not list its instance yet
+    (a launch EC2 has not caught up with). A claimed slot whose instance EC2
+    already reports gone, and that is being freed this tick, costs nothing.
+    Without EC2 (dry run), every claimed slot counts.
+    """
+    if s.instances is None:
+        return sum(settings.cost_per_hour(c.machine) for c in s.claimed_slots.values())
+    spend = sum(settings.cost_per_hour(i.machine) for i in s.instances.values())
+    spend += sum(
+        settings.cost_per_hour(c.machine)
+        for slot, c in s.claimed_slots.items()
+        if slot not in s.instances and slot not in plan.gone
+    )
+    return spend
 
 
 def _scale_by_demand(s: Snapshot, plan: _Plan, booting: list[ClaimedSlot]) -> None:
@@ -345,12 +368,7 @@ def _launch_for(
             f"pods {', '.join(too_big)} are bigger than any allowed machine",
         )
 
-    # Running spend counts every slot still in use, booting or not
-    spend = sum(
-        _machine_of(c).cost_per_hour
-        for slot, c in s.claimed_slots.items()
-        if slot not in plan.gone
-    )
+    spend = running_spend(s, plan)
     free_slots = s.free_slots
     if s.instances is not None:
         # A free slot whose old instance is still winding down cannot be used yet
