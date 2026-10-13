@@ -48,6 +48,13 @@ SLOT_TAG_KEY = "idlecloud-burst-slot"
 # Safe to remove once no such worker can be running.
 LEGACY_SLOT_TAG_KEY = "idlecloud/burst-slot"
 
+# Injected Spot warning for testing (`launch reclaim`). The value is a UTC
+# deadline like 2026-11-01T12:02:00Z. The Spot watcher reads it through instance
+# metadata, so the name must match RECLAIM_TAG_KEY in spotwatch/watcher.py.
+RECLAIM_TAG_KEY = "reclaim-at"
+# A real Spot warning gives two minutes, so the injected one does too
+RECLAIM_WARNING_S = 120
+
 # Kubernetes node label with the slot number. user_data.sh.tmpl sets it at join.
 SLOT_LABEL_KEY = "idlecloud/burst-slot"
 

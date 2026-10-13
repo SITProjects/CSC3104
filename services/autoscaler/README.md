@@ -177,6 +177,26 @@ A reclaim is final. Once the node is marked, the watcher stops checking and
 never touches the taint again. Removing the taint by hand does not cancel the
 reclaim, because the machine still goes at the deadline.
 
+To inject a warning on the worker in slot 200:
+
+```sh
+python -m services.autoscaler.burst.launch reclaim --slot 200
+```
+
+It tags the one running instance on that slot with a UTC deadline two minutes
+ahead. It refuses if the slot has no running instance or more than one, if the
+instance already has a warning, or if the instance cannot read its tags.
+`launch list` shows the deadline.
+
+Not changing an existing warning is best effort. The check and the tag write
+are two separate EC2 calls, so two runs at once can still overwrite the
+deadline. Only one person should run it at a time.
+
+For now the command only injects the warning, so the watcher taints the node
+and Kubernetes evicts its pods. Nothing ends the instance at the deadline yet
+(the autoscaler will do that in the next change). After an early live test,
+end the worker by hand with `launch down --slot 200`.
+
 Injected warnings only work on workers launched from the current launch
 template version, which makes instance tags readable through metadata. Updating
 the template does not change workers that are already running. The watcher logs
