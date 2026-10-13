@@ -173,6 +173,15 @@ Every 10 seconds it also sends the coordinator a heartbeat for its node
 (`IDLE`, or `BUSY` once a warning is seen), since burst nodes have no campus
 node agent.
 
+A reclaim is final. Once the node is marked, the watcher stops checking and
+never touches the taint again. Removing the taint by hand does not cancel the
+reclaim, because the machine still goes at the deadline.
+
+Injected warnings only work on workers launched from the current launch
+template version, which makes instance tags readable through metadata. Updating
+the template does not change workers that are already running. The watcher logs
+at start whether tags are readable.
+
 It uses only the Python standard library and runs from a ConfigMap on a small
 public Python image, so new burst nodes pull no project image.
 

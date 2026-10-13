@@ -14,6 +14,10 @@ admin page can see why, and logs one JSON line with the timings for evaluation.
 
 Every 10 seconds it also sends the coordinator a heartbeat for this node:
 IDLE (available for work) or BUSY (reclaim warning seen, take no new work).
+
+A reclaim is final. Once the node is marked, the watcher stops checking and
+never touches the taint again. Removing the taint by hand does not cancel the
+reclaim: the machine still goes at the deadline.
 Burst nodes have no campus node agent, so without this the coordinator would
 mark them OFFLINE.
 
@@ -22,6 +26,7 @@ so new burst nodes pull no project image. The pod uses the host network,
 because the metadata service only answers one network hop away.
 """
 
+import http.client
 import json
 import logging
 import os
@@ -54,6 +59,11 @@ DEFAULT_WARNING_S = 120
 HTTP_TIMEOUT_S = 2
 
 log = logging.getLogger("spot-watcher")
+
+# Everything a plain HTTP call can raise: refused or dropped connections and
+# timeouts (OSError, which includes URLError), malformed replies
+# (http.client.HTTPException, which is not an OSError) and bad text (ValueError)
+HTTP_ERRORS = (OSError, http.client.HTTPException, ValueError)
 
 # Never send metadata or cluster calls through a proxy
 _direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -245,8 +255,10 @@ def mark_node(kube: KubeApi, name: str, notice: Notice, seen_at: datetime) -> bo
 
 
 class Heartbeat:
-    """Tells the coordinator this burst node is alive. Never blocks reclaim
-    handling: failures are logged once per kind and then retried quietly."""
+    """Tells the coordinator this burst node is alive. Heartbeat failures must
+    never stop reclaim handling, so every error is caught, logged once per kind
+    and retried quietly. A send is synchronous with a 2 s timeout, so a slow
+    coordinator can delay the next poll by up to that."""
 
     def __init__(self, url: str = COORDINATOR_URL, node: str = NODE_NAME):
         self.url = f"{url}/internal/nodes/{node}/heartbeat" if url else ""
@@ -279,7 +291,7 @@ class Heartbeat:
             if self.last_problem:
                 log.info("coordinator heartbeats working again")
             self.last_problem = None
-        except (urllib.error.URLError, OSError) as error:
+        except HTTP_ERRORS as error:
             self._problem(getattr(error, "code", None) or type(error).__name__)
 
     def _problem(self, problem) -> None:
@@ -342,6 +354,27 @@ def handle(kube: KubeApi, notice: Notice, seen_at: datetime) -> None:
     )
 
 
+def log_tag_access(imds: Imds) -> None:
+    """Say at start whether injected warnings can work on this machine. A worker
+    from an old launch template version cannot read its tags, and the injected
+    tag would then be ignored without any other sign."""
+    try:
+        readable = imds.get("tags/instance") is not None
+    except HTTP_ERRORS:
+        log.warning(
+            "could not check instance tag access, metadata service not reachable yet"
+        )
+        return
+    if readable:
+        log.info("instance tags are readable, injected reclaim warnings will work")
+    else:
+        log.warning(
+            "instance tags are NOT readable through metadata (old launch template "
+            "version?). Injected reclaim warnings will be ignored. Real Spot "
+            "notices still work."
+        )
+
+
 def run(stop: threading.Event) -> None:
     if not NODE_NAME:
         raise SystemExit("NODE_NAME is not set (use the downward API)")
@@ -354,6 +387,7 @@ def run(stop: threading.Event) -> None:
         marked = False
     if marked:
         log.info("node %s is already marked for reclaim", NODE_NAME)
+    log_tag_access(imds)
     log.info("watching %s every %.0f s", NODE_NAME, POLL_S)
     # The first warning is kept, so a failed taint is retried with the same
     # deadline. The taint goes first because it is what moves the work off;
@@ -378,7 +412,10 @@ def run(stop: threading.Event) -> None:
                 log.exception("reclaim handling failed, retrying every %.0f s", POLL_S)
                 last_error = repr(error)
         if time.monotonic() >= next_beat:
-            beat.send("BUSY" if notice or marked else "IDLE")
+            try:
+                beat.send("BUSY" if notice or marked else "IDLE")
+            except Exception:  # second guard, a heartbeat must never end the loop
+                log.exception("unexpected heartbeat error, carrying on")
             next_beat = time.monotonic() + HEARTBEAT_S
         stop.wait(POLL_S)
 
