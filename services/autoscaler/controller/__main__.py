@@ -14,7 +14,6 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from services.autoscaler.burst import config as burst_config
 from services.autoscaler.burst import launch as burst
 from services.autoscaler.burst.aws import ec2_client
 from services.autoscaler.controller import cluster, settings, slots
@@ -34,10 +33,9 @@ log = logging.getLogger("autoscaler")
 def burst_instances(ec2) -> dict[int, Instance]:
     instances = {}
     for found in burst.find_instances(ec2):
-        tags = {t["Key"]: t["Value"] for t in found.get("Tags", [])}
-        slot = tags.get(burst_config.SLOT_TAG_KEY, "")
-        if slot.isdigit():
-            instances[int(slot)] = Instance(
+        slot = burst.slot_of(found)
+        if slot is not None:
+            instances[slot] = Instance(
                 found["InstanceId"], found["LaunchTime"], found["InstanceType"]
             )
     return instances

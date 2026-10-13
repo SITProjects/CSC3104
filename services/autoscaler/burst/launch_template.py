@@ -64,7 +64,7 @@ def ensure_security_group(ec2, ssh_cidr: str | None) -> str:
 
 
 def template_data(ami: str, group_id: str, key_name: str | None) -> dict:
-    tags = [config.PROJECT_TAG, {"Key": "idlecloud/role", "Value": "burst-worker"}]
+    tags = [config.PROJECT_TAG, config.ROLE_TAG]
     data = {
         "ImageId": ami,
         "InstanceType": config.INSTANCE_TYPE,
@@ -81,10 +81,13 @@ def template_data(ami: str, group_id: str, key_name: str | None) -> dict:
         ],
         # IMDSv2 only, and hop limit 1 so pods cannot reach the metadata service.
         # No IAM instance profile at all: workers never hold AWS keys.
+        # Instance tags are readable through metadata so the Spot watcher can see
+        # an injected reclaim warning. This is why tag keys must not contain "/".
         "MetadataOptions": {
             "HttpTokens": "required",
             "HttpPutResponseHopLimit": 1,
             "HttpEndpoint": "enabled",
+            "InstanceMetadataTags": "enabled",
         },
         "CreditSpecification": {
             "CpuCredits": "standard"

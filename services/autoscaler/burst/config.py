@@ -37,8 +37,19 @@ K3S_TOKEN_SECRET = "k3s-agent-token"  # key token
 # Safety net: the instance powers off (and so terminates) after this many minutes
 MAX_LIFETIME_MIN = int(os.environ.get("BURST_MAX_LIFETIME_MIN", "120"))
 
+# EC2 tags. The launch template exposes instance tags to the instance metadata
+# service (the Spot watcher reads them), and AWS then forbids "/" in tag keys.
+# So EC2 tags use "-" while Kubernetes labels keep the "idlecloud/" prefix.
 PROJECT_TAG = {"Key": "project", "Value": "idlecloud"}
-SLOT_TAG_KEY = "idlecloud/burst-slot"
+ROLE_TAG = {"Key": "idlecloud-role", "Value": "burst-worker"}
+SLOT_TAG_KEY = "idlecloud-burst-slot"
+# Slot tag used before metadata tags were enabled. Still read, so a worker
+# launched by older code stays visible until it ends (at most MAX_LIFETIME_MIN).
+# Safe to remove once no such worker can be running.
+LEGACY_SLOT_TAG_KEY = "idlecloud/burst-slot"
+
+# Kubernetes node label with the slot number. user_data.sh.tmpl sets it at join.
+SLOT_LABEL_KEY = "idlecloud/burst-slot"
 
 
 def node_ip(slot: int) -> str:

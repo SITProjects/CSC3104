@@ -150,7 +150,7 @@ def read_nodes(
             continue
         load = loads.get(node.metadata.name, NodeLoad())
         if labels.get(settings.POOL_LABEL) == "cloud":
-            slot = labels.get(burst_config.SLOT_TAG_KEY)
+            slot = labels.get(burst_config.SLOT_LABEL_KEY)
             if slot is None or not slot.isdigit():
                 continue
             notes = node.metadata.annotations or {}

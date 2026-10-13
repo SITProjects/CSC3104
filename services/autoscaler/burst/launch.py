@@ -21,6 +21,16 @@ def _ec2():
     return ec2_client()
 
 
+def slot_of(instance: dict) -> int | None:
+    """The burst slot an instance holds, from the current or the legacy tag."""
+    tags = {t["Key"]: t["Value"] for t in instance.get("Tags", [])}
+    for key in (config.SLOT_TAG_KEY, config.LEGACY_SLOT_TAG_KEY):
+        value = tags.get(key, "")
+        if value.isdigit():
+            return int(value)
+    return None
+
+
 def find_instances(ec2, slot: int | None = None) -> list[dict]:
     filters = [
         {
@@ -28,12 +38,17 @@ def find_instances(ec2, slot: int | None = None) -> list[dict]:
             "Values": [config.PROJECT_TAG["Value"]],
         },
         {"Name": "instance-state-name", "Values": LIVE_STATES},
+        # Either slot tag. Values in one filter are ORed by EC2.
+        {
+            "Name": "tag-key",
+            "Values": [config.SLOT_TAG_KEY, config.LEGACY_SLOT_TAG_KEY],
+        },
     ]
-    filters.append(
-        {"Name": f"tag:{config.SLOT_TAG_KEY}", "Values": [str(slot)] if slot else ["*"]}
-    )
     reservations = ec2.describe_instances(Filters=filters)["Reservations"]
-    return [instance for r in reservations for instance in r["Instances"]]
+    found = [instance for r in reservations for instance in r["Instances"]]
+    if slot is None:
+        return [i for i in found if slot_of(i) is not None]
+    return [i for i in found if slot_of(i) == slot]
 
 
 def launch_params(
@@ -143,10 +158,9 @@ def terminate(slot: int) -> None:
 
 def list_workers() -> None:
     for instance in find_instances(_ec2()):
-        tags = {t["Key"]: t["Value"] for t in instance.get("Tags", [])}
         market = instance.get("InstanceLifecycle", "on-demand")
         print(
-            f"{instance['InstanceId']}  slot {tags.get(config.SLOT_TAG_KEY)}  "
+            f"{instance['InstanceId']}  slot {slot_of(instance)}  "
             f"{instance['InstanceType']}  "
             f"{instance['State']['Name']}  {market}  since {instance['LaunchTime']:%H:%M}"
         )
