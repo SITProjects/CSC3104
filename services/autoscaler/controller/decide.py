@@ -70,6 +70,7 @@ class Instance:
     instance_id: str
     launched_at: datetime
     machine: str
+    slot: int | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,9 @@ class Snapshot:
     account: AccountUsage | None = None
     # Free (cpu_m, mem_mib) on each campus PC that takes pods
     campus_free: list[tuple[int, float]] = field(default_factory=list)
+    # Extra live instances on a slot that already has one in `instances`.
+    # Should never happen, but each still costs money.
+    duplicates: list[Instance] = field(default_factory=list)
 
 
 # ---------- what the loop should do ----------
@@ -103,7 +107,7 @@ class Snapshot:
 @dataclass(frozen=True)
 class Action:
     # launch, uncordon, drain, mark_empty, clear_empty, retire, free_slot,
-    # kill_orphan, or hold (nothing to do, only logged)
+    # kill_orphan, kill_duplicate, or hold (nothing to do, only logged)
     kind: str
     slot: int | None = None
     reason: str = ""
@@ -124,6 +128,30 @@ class _Plan:
 
 def _age(now: datetime, since: datetime) -> float:
     return (now - since).total_seconds()
+
+
+def split_by_slot(
+    live: list[Instance], claimed: dict[int, "ClaimedSlot"]
+) -> tuple[dict[int, Instance], list[Instance]]:
+    """One instance per slot, plus any extra ones. On a slot with several, the
+    one burst_slots recorded is kept, else the oldest (most likely the one that
+    joined the cluster). The others are duplicates."""
+    by_slot: dict[int, list[Instance]] = {}
+    for instance in live:
+        by_slot.setdefault(instance.slot, []).append(instance)
+    primary, duplicates = {}, []
+    for slot, found in by_slot.items():
+        recorded = claimed[slot].instance_id if slot in claimed else None
+        found.sort(key=lambda i: (i.instance_id != recorded, i.launched_at))
+        primary[slot] = found[0]
+        duplicates += found[1:]
+    return primary, duplicates
+
+
+def _live_ids(s: Snapshot) -> set[str]:
+    return {i.instance_id for i in (s.instances or {}).values()} | {
+        i.instance_id for i in s.duplicates
+    }
 
 
 def pending_grace(waiting: int) -> float:
@@ -156,24 +184,46 @@ def _reconcile_with_ec2(s: Snapshot, plan: _Plan) -> None:
     """Fix drift between the burst_slots table and what really runs in EC2."""
     if s.instances is None:
         return
+    live_ids = _live_ids(s)
     for slot, claimed in s.claimed_slots.items():
-        # The instance ended on its own: lifetime limit, failed boot or reclaim
+        # The recorded instance ended on its own: lifetime limit, failed boot or
+        # reclaim. Matched by instance id, not slot.
         if (
-            slot not in s.instances
+            claimed.instance_id not in live_ids
             and _age(s.now, claimed.claimed_at) > settings.ORPHAN_GRACE_S
         ):
             plan.add("free_slot", slot, "its EC2 instance is gone")
     for slot, instance in s.instances.items():
-        # Running in EC2 but not recorded, e.g. the autoscaler crashed mid-launch
-        if (
-            slot not in s.claimed_slots
-            and _age(s.now, instance.launched_at) > settings.ORPHAN_GRACE_S
-        ):
+        # Running in EC2 but not the instance burst_slots recorded for this
+        # slot, e.g. the autoscaler crashed mid-launch
+        claimed = s.claimed_slots.get(slot)
+        if (claimed is None or claimed.instance_id != instance.instance_id) and _age(
+            s.now, instance.launched_at
+        ) > settings.ORPHAN_GRACE_S:
             plan.add(
                 "kill_orphan",
                 slot,
                 "running but not in burst_slots",
                 instance_id=instance.instance_id,
+            )
+    # A second instance on one slot. Only the node of the kept one can join, so
+    # the extra one does no work. It still blocks the slot and costs money.
+    recorded = {c.instance_id for c in s.claimed_slots.values()}
+    for extra in s.duplicates:
+        if extra.instance_id in recorded:
+            continue  # cannot happen: split_by_slot keeps the recorded one
+        if _age(s.now, extra.launched_at) > settings.ORPHAN_GRACE_S:
+            plan.add(
+                "kill_duplicate",
+                extra.slot,
+                "a second instance on this slot",
+                instance_id=extra.instance_id,
+            )
+        else:
+            plan.add(
+                "hold",
+                extra.slot,
+                f"WARNING: {extra.instance_id} is a second instance on this slot",
             )
 
 
@@ -293,25 +343,41 @@ def _machine_of(claimed: ClaimedSlot) -> MachineType:
     return settings.KNOWN_TYPES.get(claimed.machine, settings.CHEAPEST)
 
 
-def running_spend(s: Snapshot, plan: _Plan) -> float:
-    """What the burst workers cost per hour right now.
+def _billed(s: Snapshot) -> list[tuple[str, str]]:
+    """(name, size) of every burst machine we may be paying for right now.
 
-    EC2 is the truth: every live burst instance counts, including orphans and
-    ones being retired or shutting down, until a later snapshot shows them gone.
-    A slot we claimed counts too while EC2 does not list its instance yet
-    (a launch EC2 has not caught up with). A claimed slot whose instance EC2
-    already reports gone, and that is being freed this tick, costs nothing.
+    EC2 is the truth. Every live burst instance counts, by instance id,
+    including orphans, duplicates and ones being retired or shutting down,
+    until a later snapshot shows them gone. A claim counts too while EC2 does
+    not list its recorded instance yet, within ORPHAN_GRACE_S of the launch (EC2
+    has not caught up). After that, its instance is gone and the claim is freed.
     Without EC2 (dry run), every claimed slot counts.
     """
     if s.instances is None:
-        return sum(settings.cost_per_hour(c.machine) for c in s.claimed_slots.values())
-    spend = sum(settings.cost_per_hour(i.machine) for i in s.instances.values())
-    spend += sum(
-        settings.cost_per_hour(c.machine)
-        for slot, c in s.claimed_slots.items()
-        if slot not in s.instances and slot not in plan.gone
-    )
-    return spend
+        return [(c.instance_id, c.machine) for c in s.claimed_slots.values()]
+    live = [*s.instances.values(), *s.duplicates]
+    billed = [(i.instance_id, i.machine) for i in live]
+    live_ids = {i.instance_id for i in live}
+    billed += [
+        (c.instance_id, c.machine)
+        for c in s.claimed_slots.values()
+        if c.instance_id not in live_ids
+        and _age(s.now, c.claimed_at) <= settings.ORPHAN_GRACE_S
+    ]
+    return billed
+
+
+def running_spend(s: Snapshot) -> tuple[float, list[str]]:
+    """What the burst workers cost per hour, and any machines with no known
+    price (described for the log)."""
+    spend, unpriced = 0.0, []
+    for name, machine in _billed(s):
+        price = settings.cost_per_hour(machine)
+        if price is None:
+            unpriced.append(f"{name} ({machine})")
+        else:
+            spend += price
+    return spend, unpriced
 
 
 def _scale_by_demand(s: Snapshot, plan: _Plan, booting: list[ClaimedSlot]) -> None:
@@ -368,7 +434,16 @@ def _launch_for(
             f"pods {', '.join(too_big)} are bigger than any allowed machine",
         )
 
-    spend = running_spend(s, plan)
+    spend, unpriced = running_spend(s)
+    if unpriced:
+        # Its real price is unknown, so the budget cannot be checked
+        plan.add(
+            "hold",
+            None,
+            f"no launches while {', '.join(unpriced)} runs: size not in the "
+            "price table (settings.KNOWN_TYPES)",
+        )
+        return
     free_slots = s.free_slots
     if s.instances is not None:
         # A free slot whose old instance is still winding down cannot be used yet

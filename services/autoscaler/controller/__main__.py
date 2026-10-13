@@ -24,19 +24,27 @@ from services.autoscaler.controller.decide import (
     Snapshot,
     decide,
     pending_grace,
+    split_by_slot,
 )
 from shared.migrate import run_migrations
 
 log = logging.getLogger("autoscaler")
 
 
-def burst_instances(ec2) -> dict[int, Instance]:
-    instances = {}
+def burst_instances(ec2) -> list[Instance]:
+    """Every live burst instance, one entry per instance id. Two on the same
+    slot are both kept, so neither drops out of the budget."""
+    instances = []
     for found in burst.find_instances(ec2):
         slot = burst.slot_of(found)
         if slot is not None:
-            instances[slot] = Instance(
-                found["InstanceId"], found["LaunchTime"], found["InstanceType"]
+            instances.append(
+                Instance(
+                    found["InstanceId"],
+                    found["LaunchTime"],
+                    found["InstanceType"],
+                    slot=slot,
+                )
             )
     return instances
 
@@ -63,16 +71,20 @@ def observe(db: Session, core, ec2, now: datetime) -> Snapshot:
     idle_campus, campus_free, burst_nodes = cluster.read_nodes(
         core, cluster.node_loads(pods)
     )
-    instances = burst_instances(ec2) if ec2 is not None else None
+    live = burst_instances(ec2) if ec2 is not None else None
     account = account_usage(ec2) if ec2 is not None else None
+    rows = slots.claimed(db)
+    instances, duplicates = (None, []) if live is None else split_by_slot(live, rows)
 
-    # The table does not store the machine size, so take it from EC2, then from
-    # the node label, so the budget counts what is really running
+    # The table does not store the machine size, so take it from the recorded
+    # instance in EC2, then from the node label, so the budget counts what is
+    # really running
+    by_id = {i.instance_id: i for i in live or []}
     claimed = {}
-    for slot, row in slots.claimed(db).items():
+    for slot, row in rows.items():
         machine = ""
-        if instances and slot in instances:
-            machine = instances[slot].machine
+        if row.instance_id in by_id:
+            machine = by_id[row.instance_id].machine
         elif slot in burst_nodes:
             machine = burst_nodes[slot].machine
         claimed[slot] = dataclasses.replace(row, machine=machine)
@@ -88,6 +100,7 @@ def observe(db: Session, core, ec2, now: datetime) -> Snapshot:
         instances=instances,
         account=account,
         campus_free=campus_free,
+        duplicates=duplicates,
     )
 
 
@@ -124,6 +137,9 @@ def apply(action: Action, db: Session, core, ec2, snapshot: Snapshot) -> None:
     elif action.kind == "kill_orphan":
         ec2.terminate_instances(InstanceIds=[action.instance_id])
         burst.remove_node(action.slot)
+    elif action.kind == "kill_duplicate":
+        # The node and slot belong to the instance that is kept
+        ec2.terminate_instances(InstanceIds=[action.instance_id])
     else:
         raise ValueError(f"unknown action {action.kind}")
 

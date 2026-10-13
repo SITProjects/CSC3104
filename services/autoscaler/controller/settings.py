@@ -102,16 +102,17 @@ CHEAPEST = min(CATALOG.values(), key=lambda t: t.cost_per_hour)
 DEAREST = max(CATALOG.values(), key=lambda t: t.cost_per_hour)
 
 
-def cost_per_hour(machine: str) -> float:
-    """What a burst instance of this size costs, rounded up when unsure.
-    An empty name is a worker we launched whose size is not visible yet, so it
-    is one of the sizes we launch, at most the dearest. Any other unknown name
-    costs as much as the dearest size in the full table."""
+def cost_per_hour(machine: str) -> float | None:
+    """What a burst instance of this size costs per hour, or None if unknown.
+    An empty name is a worker we launched whose size is not visible yet. It is
+    one of the sizes we launch, so it costs at most the dearest of those. Any
+    other size outside the T3 table has no known price, and the autoscaler
+    launches nothing more until it is gone or added to KNOWN_TYPES."""
     if machine in KNOWN_TYPES:
         return KNOWN_TYPES[machine].cost_per_hour
     if not machine:
         return DEAREST.cost_per_hour
-    return max(t.cost_per_hour for t in KNOWN_TYPES.values())
+    return None
 
 
 # ---------- spending and quotas ----------

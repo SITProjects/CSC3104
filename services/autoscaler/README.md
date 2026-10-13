@@ -107,11 +107,14 @@ without it, so smaller pods still get machines. Every pod that has to wait is
 logged with the reason.
 
 The running cost comes from EC2, not only from our own records. Every live
-burst instance counts, including one not in `burst_slots` and one being
-terminated, until a later check shows it gone. Each is priced by its real size
-from a table of all T3 sizes. When the size is not known yet, it is priced as
-the dearest size we launch. The budget may then be underused for a moment,
-but a live worker is never counted as free.
+burst instance counts by its instance id, including one not in `burst_slots`,
+a second one on the same slot, and one being terminated, until a later check
+shows it gone. A claim in `burst_slots` is matched to EC2 by instance id too.
+A second instance on a slot keeps the slot blocked, is logged as a warning and
+is terminated after 2 minutes. Each instance is priced by its real size from a
+table of all T3 sizes. A worker we launched whose size is not visible yet is
+priced as the dearest size we launch. A size outside the T3 table has no known
+price, so nothing more launches while it runs.
 
 **Scale down.** A burst node with no task pods for 5 minutes is cordoned,
 terminated and its slot freed. When a campus PC has free CPU and memory for
