@@ -11,4 +11,5 @@ kubectl config rename-context default idleCloud-cluster
 
 kubectl --context=idleCloud-cluster get nodes
 kubectl --context=idleCloud-cluster apply \
-  -f infra/k8s/base/namespaces.yml
+  -f infra/k8s/base/namespaces.yml \
+  -f infra/k8s/base/coordinator-rbac.yml
