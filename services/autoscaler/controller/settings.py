@@ -139,6 +139,8 @@ ROLE_LABEL = "idlecloud/role"
 POOL_LABEL = "idlecloud/pool"
 TASK_LABEL = "idlecloud/task-id"
 TYPE_LABEL = "idlecloud/instance-type"
+# The EC2 instance id a burst node runs on, set by the node itself at join
+INSTANCE_ID_LABEL = "idlecloud/instance-id"
 OWNER_TAINT = "idlecloud/owner-active"
 # Node annotations the autoscaler keeps on burst nodes. Kept on the node, not in
 # memory, so a restarted autoscaler carries on where the last one stopped.

@@ -8,7 +8,7 @@ within the free slots, the hourly budget and the AWS account quota.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 
 from services.autoscaler.controller import settings
 from services.autoscaler.controller.settings import CATALOG, MachineType
@@ -55,6 +55,12 @@ class BurstNode:
     machine: str = ""  # from the node's idlecloud/instance-type label
     ready_since: datetime | None = None
     load: NodeLoad = field(default_factory=NodeLoad)
+    # EC2 instance the node runs on, from its idlecloud/instance-id label
+    instance_id: str = ""
+    # The node object's uid, so a patch never lands on a replacement node
+    uid: str = ""
+    # Deadline the Spot watcher wrote on the node (idlecloud/reclaim-at)
+    reclaim_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +77,8 @@ class Instance:
     launched_at: datetime
     machine: str
     slot: int | None = None
+    # Deadline from the EC2 tag reclaim-at, set by `launch reclaim`
+    reclaim_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -107,7 +115,7 @@ class Snapshot:
 @dataclass(frozen=True)
 class Action:
     # launch, uncordon, drain, mark_empty, clear_empty, retire, free_slot,
-    # kill_orphan, kill_duplicate, or hold (nothing to do, only logged)
+    # kill_orphan, kill_duplicate, reclaim, or hold (nothing to do, only logged)
     kind: str
     slot: int | None = None
     reason: str = ""
@@ -119,15 +127,37 @@ class Action:
 class _Plan:
     actions: list[Action] = field(default_factory=list)
     gone: set[int] = field(default_factory=set)  # slots being removed this tick
+    # Slots with a reclaim warning whose deadline has not passed. They give no
+    # room and are never reopened, drained or retired by the normal rules.
+    reclaiming: set[int] = field(default_factory=set)
+    # Instances reclaimed this tick, so no other rule acts on them again
+    reclaimed: set[str] = field(default_factory=set)
+    # Instances inside their warning period. Nothing ends them before the deadline.
+    warned: set[str] = field(default_factory=set)
 
     def add(self, kind: str, slot: int | None = None, reason: str = "", **extra):
         self.actions.append(Action(kind, slot, reason, **extra))
-        if kind in ("retire", "free_slot", "kill_orphan") and slot is not None:
+        if (
+            kind in ("retire", "free_slot", "kill_orphan", "reclaim")
+            and slot is not None
+        ):
             self.gone.add(slot)
+        if kind == "reclaim" and extra.get("instance_id"):
+            self.reclaimed.add(extra["instance_id"])
 
 
 def _age(now: datetime, since: datetime) -> float:
     return (now - since).total_seconds()
+
+
+def parse_utc(text: str | None) -> datetime | None:
+    """A reclaim deadline like 2026-11-01T12:02:00Z. A time without a zone is
+    UTC. Unreadable text gives None, the same as the Spot watcher."""
+    try:
+        moment = datetime.fromisoformat(str(text).strip())
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
 
 
 def split_by_slot(
@@ -173,11 +203,62 @@ def smallest_fit(pod: StuckPod) -> MachineType | None:
 
 def decide(s: Snapshot) -> list[Action]:
     plan = _Plan()
+    _handle_reclaims(s, plan)
     _reconcile_with_ec2(s, plan)
     booting = _check_booting(s, plan)
     _scale_down_empty(s, plan)
     _scale_by_demand(s, plan, booting)
     return plan.actions
+
+
+def _handle_reclaims(s: Snapshot, plan: _Plan) -> None:
+    """Burst workers with a reclaim warning.
+
+    The warning is read from two places. The EC2 tag reclaim-at is on the
+    instance itself (an injected warning). The node annotation idlecloud/reclaim-at
+    is written by the Spot watcher for a real or injected warning, and only
+    counts when the node's idlecloud/instance-id label names this same
+    instance, so an old node can never end a new machine. The earlier deadline
+    wins. The tag alone is enough, so an injected warning still ends the machine
+    when the watcher failed or the node is NotReady. A real Spot warning the
+    watcher never published is not seen here. AWS still takes that machine, and
+    the normal cleanup frees its slot afterwards.
+
+    Before the deadline the slot is only marked as reclaiming. At the deadline
+    the instance is terminated, its node removed and its slot freed. The check
+    runs every INTERVAL_S, so it can be up to one interval late.
+    """
+    instances = s.instances or {}
+    for slot in sorted(set(s.claimed_slots) | set(instances)):
+        instance = instances.get(slot)
+        claimed = s.claimed_slots.get(slot)
+        target = instance.instance_id if instance else claimed.instance_id
+        deadlines = []
+        if instance is not None and instance.reclaim_at is not None:
+            deadlines.append(instance.reclaim_at)
+        node = s.burst_nodes.get(slot)
+        # Only a node that names this instance speaks for it
+        if node is not None and node.reclaim_at and node.instance_id == target:
+            deadlines.append(node.reclaim_at)
+        if not deadlines:
+            continue
+        deadline = min(deadlines)
+        if s.now >= deadline:
+            plan.add(
+                "reclaim",
+                slot,
+                f"reclaim deadline {deadline:%H:%M:%S} UTC passed",
+                instance_id=target,
+            )
+        else:
+            plan.reclaiming.add(slot)
+            plan.warned.add(target)
+            plan.add(
+                "hold",
+                slot,
+                f"{target} is being reclaimed, ends at {deadline:%H:%M:%S} UTC "
+                f"({_age(deadline, s.now):.0f}s left)",
+            )
 
 
 def _reconcile_with_ec2(s: Snapshot, plan: _Plan) -> None:
@@ -186,16 +267,27 @@ def _reconcile_with_ec2(s: Snapshot, plan: _Plan) -> None:
         return
     live_ids = _live_ids(s)
     for slot, claimed in s.claimed_slots.items():
+        if claimed.instance_id in plan.reclaimed:
+            continue
         # The recorded instance ended on its own: lifetime limit, failed boot or
         # reclaim. Matched by instance id, not slot.
         if (
             claimed.instance_id not in live_ids
             and _age(s.now, claimed.claimed_at) > settings.ORPHAN_GRACE_S
         ):
-            plan.add("free_slot", slot, "its EC2 instance is gone")
+            plan.add(
+                "free_slot",
+                slot,
+                "its EC2 instance is gone",
+                instance_id=claimed.instance_id,
+            )
     for slot, instance in s.instances.items():
         # Running in EC2 but not the instance burst_slots recorded for this
         # slot, e.g. the autoscaler crashed mid-launch
+        # A warned instance keeps its warning period even if it is an orphan.
+        # The reclaim rule ends it at the deadline.
+        if instance.instance_id in plan.reclaimed | plan.warned:
+            continue
         claimed = s.claimed_slots.get(slot)
         if (claimed is None or claimed.instance_id != instance.instance_id) and _age(
             s.now, instance.launched_at
@@ -212,6 +304,14 @@ def _reconcile_with_ec2(s: Snapshot, plan: _Plan) -> None:
     for extra in s.duplicates:
         if extra.instance_id in recorded:
             continue  # cannot happen: split_by_slot keeps the recorded one
+        if extra.reclaim_at is not None and s.now < extra.reclaim_at:
+            plan.add(
+                "hold",
+                extra.slot,
+                f"{extra.instance_id} is a second instance on this slot, "
+                f"kept until its reclaim deadline {extra.reclaim_at:%H:%M:%S} UTC",
+            )
+            continue
         if _age(s.now, extra.launched_at) > settings.ORPHAN_GRACE_S:
             plan.add(
                 "kill_duplicate",
@@ -231,13 +331,18 @@ def _check_booting(s: Snapshot, plan: _Plan) -> list[ClaimedSlot]:
     """Slots launched but not yet a Ready node. Give up on any that take too long."""
     booting = []
     for slot, claimed in s.claimed_slots.items():
-        if slot in plan.gone:
+        if slot in plan.gone or slot in plan.reclaiming:
             continue
         node = s.burst_nodes.get(slot)
         if node is not None and node.ready:
             continue
         if _age(s.now, claimed.claimed_at) > settings.BOOT_TIMEOUT_S:
-            plan.add("retire", slot, f"did not join within {settings.BOOT_TIMEOUT_S}s")
+            plan.add(
+                "retire",
+                slot,
+                f"did not join within {settings.BOOT_TIMEOUT_S}s",
+                instance_id=claimed.instance_id,
+            )
         else:
             booting.append(claimed)
     return booting
@@ -247,7 +352,10 @@ def _active_nodes(s: Snapshot, plan: _Plan) -> list[BurstNode]:
     return [
         node
         for slot, node in sorted(s.burst_nodes.items())
-        if slot in s.claimed_slots and slot not in plan.gone and node.ready
+        if slot in s.claimed_slots
+        and slot not in plan.gone
+        and slot not in plan.reclaiming
+        and node.ready
     ]
 
 
@@ -259,11 +367,21 @@ def _scale_down_empty(s: Snapshot, plan: _Plan) -> None:
             if node.empty_since is not None:
                 plan.add("clear_empty", node.slot)
         elif node.draining:
-            plan.add("retire", node.slot, "drained, campus PCs took over")
+            plan.add(
+                "retire",
+                node.slot,
+                "drained, campus PCs took over",
+                instance_id=s.claimed_slots[node.slot].instance_id,
+            )
         elif node.empty_since is None:
             plan.add("mark_empty", node.slot)
         elif _age(s.now, node.empty_since) >= settings.EMPTY_GRACE_S:
-            plan.add("retire", node.slot, f"no task pods for {settings.EMPTY_GRACE_S}s")
+            plan.add(
+                "retire",
+                node.slot,
+                f"no task pods for {settings.EMPTY_GRACE_S}s",
+                instance_id=s.claimed_slots[node.slot].instance_id,
+            )
 
 
 # ---------- scale up and down by demand ----------

@@ -12,8 +12,10 @@ import signal
 import threading
 from datetime import UTC, datetime
 
+from botocore.exceptions import ClientError
 from sqlalchemy.orm import Session
 
+from services.autoscaler.burst import config as burst_config
 from services.autoscaler.burst import launch as burst
 from services.autoscaler.burst.aws import ec2_client
 from services.autoscaler.controller import cluster, settings, slots
@@ -23,6 +25,7 @@ from services.autoscaler.controller.decide import (
     Instance,
     Snapshot,
     decide,
+    parse_utc,
     pending_grace,
     split_by_slot,
 )
@@ -38,15 +41,26 @@ def burst_instances(ec2) -> list[Instance]:
     for found in burst.find_instances(ec2):
         slot = burst.slot_of(found)
         if slot is not None:
+            tag = burst.tags_of(found).get(burst_config.RECLAIM_TAG_KEY)
             instances.append(
                 Instance(
                     found["InstanceId"],
                     found["LaunchTime"],
                     found["InstanceType"],
                     slot=slot,
+                    reclaim_at=parse_utc(tag) if tag is not None else None,
                 )
             )
     return instances
+
+
+def terminate_instance(ec2, instance_id: str) -> None:
+    """Terminate one instance. One that is already gone counts as done."""
+    try:
+        ec2.terminate_instances(InstanceIds=[instance_id])
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") != "InvalidInstanceID.NotFound":
+            raise
 
 
 def account_usage(ec2) -> AccountUsage:
@@ -104,6 +118,31 @@ def observe(db: Session, core, ec2, now: datetime) -> Snapshot:
     )
 
 
+def other_owner(snapshot: Snapshot, slot: int, instance_id: str) -> bool:
+    """Whether an instance other than `instance_id` holds or claims this slot."""
+    ids = set()
+    claimed = snapshot.claimed_slots.get(slot)
+    if claimed is not None:
+        ids.add(claimed.instance_id)
+    current = (snapshot.instances or {}).get(slot)
+    if current is not None:
+        ids.add(current.instance_id)
+    ids |= {i.instance_id for i in snapshot.duplicates if i.slot == slot}
+    return bool(ids - {instance_id})
+
+
+def remove_node_of(core, snapshot: Snapshot, slot: int, instance_id: str) -> None:
+    """Remove the slot's node and password, only if they are this instance's."""
+    log.info(
+        cluster.remove_burst_node(
+            core,
+            burst_config.node_name(slot),
+            instance_id,
+            other_owner(snapshot, slot, instance_id),
+        )
+    )
+
+
 def apply(action: Action, db: Session, core, ec2, snapshot: Snapshot) -> None:
     node = snapshot.burst_nodes.get(action.slot) if action.slot is not None else None
 
@@ -119,24 +158,39 @@ def apply(action: Action, db: Session, core, ec2, snapshot: Snapshot) -> None:
         instance_id = burst.launch(slot, instance_type=action.machine)
         slots.record_launch(row, instance_id)
     elif action.kind == "uncordon":
-        cluster.uncordon(core, node.name)
+        cluster.uncordon(core, node.name, node.uid)
     elif action.kind == "drain":
-        cluster.drain(core, node.name)
+        cluster.drain(core, node.name, node.uid)
     elif action.kind == "mark_empty":
-        cluster.mark_empty(core, node.name, snapshot.now)
+        cluster.mark_empty(core, node.name, snapshot.now, node.uid)
     elif action.kind == "clear_empty":
-        cluster.clear_empty(core, node.name)
+        cluster.clear_empty(core, node.name, node.uid)
     elif action.kind == "retire":
-        if node is not None:
-            cluster.cordon(core, node.name)
-        burst.terminate(action.slot)  # also removes the K8s node
-        slots.release(db, action.slot)
+        # Only the recorded instance. A second instance on the slot (perhaps in
+        # its warning period) is left alone and keeps counting until it ends.
+        # Cordon first so nothing new lands on it, but only if the node is this
+        # instance's right now (read fresh, patch pinned to its uid)
+        other = other_owner(snapshot, action.slot, action.instance_id)
+        name = burst_config.node_name(action.slot)
+        log.info(cluster.cordon_owned(core, name, action.instance_id, other))
+        terminate_instance(ec2, action.instance_id)
+        remove_node_of(core, snapshot, action.slot, action.instance_id)
+        claimed = snapshot.claimed_slots.get(action.slot)
+        if claimed is not None and claimed.instance_id == action.instance_id:
+            slots.release(db, action.slot)
     elif action.kind == "free_slot":
-        burst.remove_node(action.slot)
+        remove_node_of(core, snapshot, action.slot, action.instance_id)
         slots.release(db, action.slot)
     elif action.kind == "kill_orphan":
         ec2.terminate_instances(InstanceIds=[action.instance_id])
-        burst.remove_node(action.slot)
+        remove_node_of(core, snapshot, action.slot, action.instance_id)
+    elif action.kind == "reclaim":
+        # Only the instance that had the warning, and only its own node and slot
+        terminate_instance(ec2, action.instance_id)
+        remove_node_of(core, snapshot, action.slot, action.instance_id)
+        claimed = snapshot.claimed_slots.get(action.slot)
+        if claimed is not None and claimed.instance_id == action.instance_id:
+            slots.release(db, action.slot)
     elif action.kind == "kill_duplicate":
         # The node and slot belong to the instance that is kept
         ec2.terminate_instances(InstanceIds=[action.instance_id])

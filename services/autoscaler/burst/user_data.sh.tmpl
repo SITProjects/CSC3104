@@ -39,6 +39,14 @@ if ! ping -c1 -W2 {{HUB_WG_IP}} >/dev/null 2>&1; then
   exit 1
 fi
 
+# The node labels itself with its own instance id, so the autoscaler can tell
+# which machine a node and its reclaim warning belong to (IMDSv2)
+IMDS_TOKEN=$(curl -sf -X PUT http://169.254.169.254/latest/api/token \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+INSTANCE_ID=$(curl -sf -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+  http://169.254.169.254/latest/meta-data/instance-id)
+: "${INSTANCE_ID:?no instance id from instance metadata}"
+
 curl -sfL https://get.k3s.io | \
   INSTALL_K3S_VERSION='{{K3S_VERSION}}' K3S_URL='{{K3S_URL}}' K3S_TOKEN='{{K3S_TOKEN}}' \
   sh -s - agent \
@@ -48,6 +56,7 @@ curl -sfL https://get.k3s.io | \
     --node-label idlecloud/role=worker \
     --node-label idlecloud/pool=cloud \
     --node-label "idlecloud/burst-slot=$SLOT" \
-    --node-label "idlecloud/instance-type={{INSTANCE_TYPE}}"
+    --node-label "idlecloud/instance-type={{INSTANCE_TYPE}}" \
+    --node-label "idlecloud/instance-id=$INSTANCE_ID"
 
 echo "burst worker $NODE_NAME joined"

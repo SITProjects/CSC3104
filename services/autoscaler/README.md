@@ -202,15 +202,62 @@ Not changing an existing warning is best effort. The check and the tag write
 are two separate EC2 calls, so two runs at once can still overwrite the
 deadline. Only one person should run it at a time.
 
-For now the command only injects the warning, so the watcher taints the node
-and Kubernetes evicts its pods. Nothing ends the instance at the deadline yet
-(the autoscaler will do that in the next change). After an early live test,
-end the worker by hand with `launch down --slot 200`.
+**What the autoscaler does with a warning.** It reads the deadline from the
+EC2 tag and from the node annotation, and uses the earlier one. Each burst node
+labels itself with its EC2 instance id (`idlecloud/instance-id`) when it joins.
+A node annotation only counts when that label names the instance on the slot,
+so a warning left on an old node can never end a new machine.
+
+Until the deadline the worker is "reclaiming". It gives no room to waiting
+pods, and it is never reopened, drained or retired early. It still counts
+against the budget, because it still costs money. At the deadline the
+autoscaler terminates that instance, removes its node and frees its slot. The
+check runs every 30 seconds, so the machine can go up to 30 seconds late.
+
+**Removing a node safely.** When the autoscaler retires, reclaims or kills an
+orphan, it ends only that instance by its id, never every machine on the slot.
+Then, and when it frees a slot whose instance is gone, it removes the node and
+its K3s node password only if they belong to that instance. Before retiring, it
+cordons the node only if the node is that instance's at that moment. Every node
+change the autoscaler makes (cordon, drain, reopen, empty markers) is pinned to
+the node's uid, so it never lands on a replacement node with the same name. It checks this at the
+moment of removal, not from the start of the tick. A labelled node must name
+the instance. An older node without the label is removed only when no other
+instance holds or claims the slot. K3s can create a new worker's password
+before that worker's node exists, so the password is deleted only if the same
+owned node (same uid) is seen both before and after reading it. If there is no
+node, the node changes, or it is already gone at delete time, the password is
+kept. `launch` clears a leftover password by name before it starts a new worker
+on the slot. Both deletes carry a uid precondition. This needs `get` on the
+five node-password secrets (`k8s/autoscaler.yml`).
+
+K3s itself also deletes a node's password by name when the node is deleted. If
+a replacement's password ever appeared in that short gap, K3s would remove it,
+and the worker creates it again the next time it authenticates.
+
+Nothing ends a warned instance before its deadline. An orphan or a second
+instance on a slot with a warning is kept until the deadline, then ended. When
+the worker beside it is retired, the warned one keeps the slot and keeps
+counting against the budget until it ends.
+
+An injected warning ends the machine even if the watcher failed or the node is
+NotReady, because the tag is on the instance itself. A real Spot warning
+reaches the autoscaler only through the watcher's annotation. If the watcher
+never published it, AWS still takes the machine, and the normal cleanup frees
+its slot once EC2 shows it gone.
 
 Injected warnings only work on workers launched from the current launch
 template version, which makes instance tags readable through metadata. Updating
 the template does not change workers that are already running. The watcher logs
 at start whether tags are readable.
+
+**Rolling this out.** The instance id label comes from the boot script, so only
+workers launched after this change have it. A worker launched earlier from the
+current template can read tags but has no label. On such a worker an injected
+tag still ends the machine at the deadline, but the watcher's annotation is
+ignored, and its node is removed only when no other instance holds the slot.
+Before testing reclaim, end every running burst worker (`launch down --slot N`)
+so the autoscaler launches labelled ones.
 
 It uses only the Python standard library and runs from a ConfigMap on a small
 public Python image, so new burst nodes pull no project image.

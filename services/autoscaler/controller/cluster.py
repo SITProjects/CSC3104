@@ -1,13 +1,20 @@
 """Read the cluster state the rules need, and change burst nodes."""
 
+import logging
 from datetime import datetime
 
 from kubernetes import client
 from kubernetes import config as kube_config
+from kubernetes.client.rest import ApiException
 
 from services.autoscaler.burst import config as burst_config
 from services.autoscaler.controller import settings
-from services.autoscaler.controller.decide import BurstNode, NodeLoad, StuckPod
+from services.autoscaler.controller.decide import (
+    BurstNode,
+    NodeLoad,
+    StuckPod,
+    parse_utc,
+)
 
 
 def connect() -> client.CoreV1Api:
@@ -164,6 +171,13 @@ def read_nodes(
                 machine=labels.get(settings.TYPE_LABEL, ""),
                 ready_since=_ready_since(node),
                 load=load,
+                instance_id=labels.get(settings.INSTANCE_ID_LABEL, ""),
+                uid=node.metadata.uid or "",
+                reclaim_at=(
+                    parse_utc(notes[settings.RECLAIM_AT_ANNOTATION])
+                    if settings.RECLAIM_AT_ANNOTATION in notes
+                    else None
+                ),
             )
             continue
         taints = node.spec.taints or []
@@ -179,52 +193,154 @@ def read_nodes(
     return len(campus_free), campus_free, burst
 
 
-def _patch(core: client.CoreV1Api, name: str, body: dict) -> None:
-    core.patch_node(name, body)
+log = logging.getLogger("autoscaler")
 
 
-def drain(core, name: str) -> None:
+def _patch(core: client.CoreV1Api, name: str, body: dict, uid: str = "") -> bool:
+    """Patch node `name`. With a uid, only that exact node object is changed:
+    the API server rejects the patch (422) if the node was replaced since it was
+    read. Not resourceVersion, because the kubelet updates a node's status every
+    few seconds and that would fail almost every patch. False if skipped."""
+    if uid:
+        body = {**body, "metadata": {**body.get("metadata", {}), "uid": uid}}
+    try:
+        core.patch_node(name, body)
+    except ApiException as error:
+        if error.status in (404, 409, 422):
+            log.warning("node %s changed or is gone, not patched", name)
+            return False
+        raise
+    return True
+
+
+def drain(core, name: str, uid: str = "") -> None:
     """Cordon the node so it takes no new pods. Running pods carry on."""
-    _patch(
-        core,
-        name,
-        {
-            "spec": {"unschedulable": True},
-            "metadata": {"annotations": {settings.DRAINING_ANNOTATION: "true"}},
-        },
-    )
+    body = {
+        "spec": {"unschedulable": True},
+        "metadata": {"annotations": {settings.DRAINING_ANNOTATION: "true"}},
+    }
+    _patch(core, name, body, uid)
 
 
-def uncordon(core, name: str) -> None:
-    _patch(
-        core,
-        name,
-        {
-            "spec": {"unschedulable": False},
-            "metadata": {"annotations": {settings.DRAINING_ANNOTATION: None}},
-        },
-    )
+def uncordon(core, name: str, uid: str = "") -> None:
+    body = {
+        "spec": {"unschedulable": False},
+        "metadata": {"annotations": {settings.DRAINING_ANNOTATION: None}},
+    }
+    _patch(core, name, body, uid)
 
 
-def cordon(core, name: str) -> None:
-    _patch(core, name, {"spec": {"unschedulable": True}})
+def cordon(core, name: str, uid: str = "") -> bool:
+    return _patch(core, name, {"spec": {"unschedulable": True}}, uid)
 
 
-def mark_empty(core, name: str, since: datetime) -> None:
-    _patch(
-        core,
-        name,
-        {
-            "metadata": {
-                "annotations": {settings.EMPTY_SINCE_ANNOTATION: since.isoformat()}
-            }
-        },
-    )
+def mark_empty(core, name: str, since: datetime, uid: str = "") -> None:
+    note = {settings.EMPTY_SINCE_ANNOTATION: since.isoformat()}
+    _patch(core, name, {"metadata": {"annotations": note}}, uid)
 
 
-def clear_empty(core, name: str) -> None:
-    _patch(
-        core,
-        name,
-        {"metadata": {"annotations": {settings.EMPTY_SINCE_ANNOTATION: None}}},
-    )
+def clear_empty(core, name: str, uid: str = "") -> None:
+    note = {settings.EMPTY_SINCE_ANNOTATION: None}
+    _patch(core, name, {"metadata": {"annotations": note}}, uid)
+
+
+def cordon_owned(core, name: str, instance_id: str, other_owner: bool) -> str:
+    """Cordon node `name` only if it is `instance_id`'s right now. The ownership
+    is read fresh, and the patch is pinned to that node's uid."""
+    node = _read(lambda: core.read_node(name))
+    if node is None:
+        return f"no node {name} to cordon"
+    reason = _not_owned(node, instance_id, other_owner)
+    if reason:
+        return f"did not cordon {name}, {reason}"
+    if not cordon(core, name, node.metadata.uid):
+        return f"did not cordon {name}, it was replaced while checking"
+    return f"cordoned {name}"
+
+
+# ---------- removing a burst node safely ----------
+
+
+def _delete_options(uid: str) -> client.V1DeleteOptions:
+    # The API server deletes only the object with this uid, so an object made
+    # again under the same name in the meantime is never touched
+    return client.V1DeleteOptions(preconditions=client.V1Preconditions(uid=uid))
+
+
+def remove_burst_node(core, name: str, instance_id: str, other_owner: bool) -> str:
+    """Delete burst node `name` and its K3s node password, but only if they
+    belong to `instance_id`. Returns what happened, for the log.
+
+    Ownership is checked now, not from the tick's snapshot. A node labelled
+    idlecloud/instance-id belongs to that instance. An older node without the
+    label counts as this instance's only when no other instance holds or claims
+    the slot (`other_owner` is False).
+
+    The password secret has no owner of its own. K3s may create a new worker's
+    password before that worker registers its node, so a password is only
+    deleted when the owned node is seen both before and after reading it (same
+    uid). K3s refuses a second password for a name while one exists, and our
+    code never deletes a password without deleting its node first. So a
+    password read while that same node exists belongs to it. Both deletes
+    carry a uid precondition. If there is no node, the node changes, or its
+    delete finds it gone or replaced, the password is kept. `launch` clears a
+    leftover password by name before it starts a new worker on the slot.
+    """
+    secret = f"{name}.node-password.k3s"
+    node = _read(lambda: core.read_node(name))
+    if node is None:
+        return f"no node {name}, kept any password (ownership unknown)"
+    reason = _not_owned(node, instance_id, other_owner)
+    if reason:
+        return f"kept node {name}, {reason}"
+
+    password = _read(lambda: core.read_namespaced_secret(secret, "kube-system"))
+    again = _read(lambda: core.read_node(name))
+    if (
+        again is None
+        or again.metadata.uid != node.metadata.uid
+        or _not_owned(again, instance_id, other_owner)
+    ):
+        return f"kept node {name} and its password, the node changed while checking"
+
+    uid = node.metadata.uid
+    if not _delete(lambda: core.delete_node(name, body=_delete_options(uid))):
+        return f"kept the password of {name}, the node was already gone or replaced"
+    if password is not None:
+        _delete(
+            lambda: core.delete_namespaced_secret(
+                secret, "kube-system", body=_delete_options(password.metadata.uid)
+            )
+        )
+    return f"removed node {name} of {instance_id}"
+
+
+def _not_owned(node, instance_id: str, other_owner: bool) -> str:
+    """Why this node is not `instance_id`'s, or an empty string if it is."""
+    owner = (node.metadata.labels or {}).get(settings.INSTANCE_ID_LABEL)
+    if owner and owner != instance_id:
+        return f"it belongs to {owner}"
+    if not owner and other_owner:
+        return "it has no instance label and another instance holds the slot"
+    return ""
+
+
+def _read(call):
+    try:
+        return call()
+    except ApiException as error:
+        if error.status == 404:
+            return None
+        raise
+
+
+def _delete(call) -> bool:
+    """True only if this exact object was deleted now. False if it was already
+    gone (404) or the uid no longer matched (409)."""
+    try:
+        call()
+    except ApiException as error:
+        if error.status in (404, 409):
+            return False
+        raise
+    return True
