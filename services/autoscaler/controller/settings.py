@@ -49,7 +49,11 @@ class MachineType:
     name: str
     vcpu: int
     mem_mib: int
-    usd_per_hour: float  # On-Demand Linux, us-east-1
+    # On-Demand Linux, us-east-1. Spot workers are budgeted at this price too.
+    # We never set a Spot maximum price, so AWS caps Spot at the On-Demand
+    # price and this is a safe upper bound for compute. It is not the real
+    # cost per job.
+    usd_per_hour: float
 
     @property
     def cpu_m(self) -> int:
@@ -116,6 +120,16 @@ def cost_per_hour(machine: str) -> float | None:
     if not machine:
         return DEAREST.cost_per_hour
     return None
+
+
+# ---------- Spot or On-Demand ----------
+
+# on-demand, spot or auto (see burst/market.py). On-Demand by default until the
+# coordinator requeues evicted replicas. Without that, a real Spot reclaim
+# loses the running work.
+BURST_MARKET = os.environ.get("BURST_MARKET", "on-demand")
+# How long auto skips Spot after AWS has no Spot capacity (or quota) for it
+SPOT_COOLDOWN_S = _int("BURST_SPOT_COOLDOWN_S", 1800)
 
 
 # ---------- spending and quotas ----------

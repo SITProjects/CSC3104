@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 from services.autoscaler.burst import config
 from services.autoscaler.burst.aws import ec2_client
+from services.autoscaler.burst.market import MarketChooser
 from services.autoscaler.burst.slot_store import load_slot
 from services.autoscaler.burst.user_data import render_user_data
 
@@ -90,7 +91,7 @@ def launch_params(
             }
         ],
     }
-    if spot:  # used from step 4. Falls back to on-demand if AWS Academy blocks Spot.
+    if spot:  # BURST_MARKET and market.py decide when, and what happens if refused
         params["InstanceMarketOptions"] = {
             "MarketType": "spot",
             "SpotOptions": {
@@ -101,19 +102,35 @@ def launch_params(
     return params
 
 
-def launch(slot: int, spot: bool = False, instance_type: str | None = None) -> str:
+def launch(
+    slot: int,
+    spot: bool = False,
+    instance_type: str | None = None,
+    chooser: MarketChooser | None = None,
+) -> str:
+    """Start one burst worker on this slot. The chooser decides Spot or
+    On-Demand (see market.py). Without one, `spot` picks the market and a
+    refusal is raised as it is."""
+    instance_type = instance_type or config.INSTANCE_TYPE
+    if chooser is None:
+        chooser = MarketChooser("spot" if spot else "on-demand", cooldown_s=0)
     ec2 = _ec2()
     if find_instances(ec2, slot):
         raise RuntimeError(f"slot {slot} is already in use")
 
     wg_conf, token = load_slot(slot)
-    params = launch_params(slot, wg_conf, token, spot, instance_type=instance_type)
+
+    def params_for(use_spot: bool) -> dict:
+        return launch_params(
+            slot, wg_conf, token, use_spot, instance_type=instance_type
+        )
+
     # The last instance on this slot may have ended without `down` (lifetime limit,
     # failed boot or Spot reclaim). Clear its node so the new one is not rejected.
     remove_node(slot)
-    instance_id = ec2.run_instances(**params)["Instances"][0]["InstanceId"]
+    instance_id, market = chooser.launch(ec2, params_for, instance_type)
     print(
-        f"Launched {instance_id} ({params['InstanceType']}) as "
+        f"Launched {instance_id} ({instance_type}, {market}) as "
         f"{config.node_name(slot)} ({config.node_ip(slot)})"
     )
     return instance_id

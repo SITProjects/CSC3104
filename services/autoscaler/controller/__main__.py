@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from services.autoscaler.burst import config as burst_config
 from services.autoscaler.burst import launch as burst
 from services.autoscaler.burst.aws import ec2_client
+from services.autoscaler.burst.market import MarketChooser
 from services.autoscaler.controller import cluster, settings, slots
 from services.autoscaler.controller.decide import (
     AccountUsage,
@@ -36,6 +37,8 @@ log = logging.getLogger("autoscaler")
 
 # What reclaimed workers were running, kept across ticks (see rescue.py)
 RESCUE = RescueMemory()
+# Spot or On-Demand per launch, and what Spot refusals taught it (see market.py)
+MARKET = MarketChooser(settings.BURST_MARKET, settings.SPOT_COOLDOWN_S)
 
 
 def burst_instances(ec2) -> list[Instance]:
@@ -172,7 +175,7 @@ def apply(action: Action, db: Session, core, ec2, snapshot: Snapshot) -> None:
             return
         slot = slots.slot_number(row.ip)
         # An AWS error rolls the claim back
-        instance_id = burst.launch(slot, instance_type=action.machine)
+        instance_id = burst.launch(slot, instance_type=action.machine, chooser=MARKET)
         slots.record_launch(row, instance_id)
     elif action.kind == "uncordon":
         cluster.uncordon(core, node.name, node.uid)
@@ -264,11 +267,12 @@ def main() -> None:
     core = cluster.connect()
     ec2 = None if settings.DRY_RUN else ec2_client()
     log.info(
-        "autoscaler started%s: every %ss, sizes %s, budget US$%.4f/h, "
+        "autoscaler started%s: every %ss, sizes %s, market %s, budget US$%.4f/h, "
         "burst after %s to %ss stuck, retire after %ss empty",
         " (DRY RUN)" if settings.DRY_RUN else "",
         settings.INTERVAL_S,
         ", ".join(settings.CATALOG),
+        settings.BURST_MARKET,
         settings.BUDGET_USD_PER_HOUR,
         settings.MIN_PENDING_GRACE_S,
         settings.PENDING_GRACE_S,

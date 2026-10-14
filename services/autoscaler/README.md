@@ -27,6 +27,7 @@ controller in `controller/`, which calls the same functions on its own.
 | `burst/slot_store.py` | Reads the slot's `wg0.conf` and the K3s token |
 | `burst/launch_template.py` | Creates the launch template and a security group with no inbound rules |
 | `burst/launch.py` | `up`, `down` and `list` commands |
+| `burst/market.py` | Spot or On-Demand for each launch (`BURST_MARKET`) |
 | `controller/settings.py` | Machine sizes and prices, budget, AWS quotas, timings |
 | `controller/decide.py` | The scaling rules and bin packing, as pure functions |
 | `controller/cluster.py` | Reads task pods and nodes, cordons burst nodes |
@@ -312,3 +313,50 @@ this step. If the autoscaler restarts, the memory starts empty and only that
 normal path remains. If a replica is never requeued, the early machine stays
 empty and is retired after 5 minutes. Later, once the coordinator records each
 replica's node (`replicas.node_name`), that can replace the in-memory record.
+
+### Spot or On-Demand
+
+`BURST_MARKET` picks the market for each worker the autoscaler launches
+(`burst/market.py`):
+
+| Value | What happens |
+| --- | --- |
+| `on-demand` (default) | Never tries Spot |
+| `spot` | Spot only. A refused launch fails and the next tick tries again |
+| `auto` | Spot first. After a clear refusal the same launch runs once as On-Demand |
+
+On-Demand stays the default until the coordinator requeues evicted replicas.
+Without that, a real Spot reclaim loses the work that was running.
+
+In `auto`, the chooser remembers why Spot was refused:
+
+| AWS error on the Spot launch | Result |
+| --- | --- |
+| `AuthFailure.ServiceLinkedRoleCreationNotPermitted` | Spot needs a service-linked role these credentials cannot create. On-Demand for good |
+| `UnauthorizedOperation` | The same request is dry-run as On-Demand. If that is allowed, Spot was the problem: On-Demand for good for this size. If not, the error is raised |
+| `InsufficientInstanceCapacity`, `UnfulfillableCapacity` | No Spot capacity for this size. Spot is skipped for it for 30 minutes (`BURST_SPOT_COOLDOWN_S`) |
+| `MaxSpotInstanceCountExceeded` | The Spot vCPU quota is full. All T3 sizes share it, so every size skips Spot for 30 minutes |
+| Anything else | Nothing changes. The launch fails and the next tick tries again |
+
+"Anything else" covers expired credentials, a missing launch template, bad
+parameters and throttling, where On-Demand would fail the same way. It also
+covers `SpotMaxPriceTooLow`, because AWS leaves that Spot request open, so it
+could still start next to an On-Demand fallback.
+
+The fallback is safe only because it follows these specific refusals, which
+mean AWS started nothing. An error alone does not prove that. A network error
+or an AWS server error (HTTP 5xx) leaves the outcome unknown, so it never falls
+back. boto3 gives each call one ClientToken and reuses it on its own retries,
+but that protection ends with the call. Known limit: after an unknown outcome
+the slot claim rolls back, so a later launch in the same or a later tick can
+take the same slot and start another machine. Repeated timeouts can start
+several. They are cleaned up as orphans or duplicates once EC2 lists them, but
+EC2 listings can lag, so there is no firm time limit.
+
+The memory is kept in the process only. After a restart, one Spot launch may be
+refused again before the chooser switches. A Spot worker is budgeted at the
+On-Demand price. No maximum Spot price is set, so AWS never charges more than
+that. The budget is a safe upper bound for compute, not the real cost per job.
+
+The manual command `launch up --spot` still asks for Spot only, with no
+fallback.

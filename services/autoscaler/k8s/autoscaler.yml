@@ -174,6 +174,10 @@ spec:
             # minimum (3 of the cheapest machine). Raise it for heavy jobs.
             # - name: BURST_BUDGET_USD_PER_HOUR
             #   value: "0.30"
+            # on-demand (default), spot or auto. See "Spot or On-Demand" in the
+            # README. Use auto once evicted replicas are requeued.
+            # - name: BURST_MARKET
+            #   value: auto
           resources:
             requests:
               cpu: 50m
