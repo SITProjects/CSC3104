@@ -37,8 +37,38 @@ K3S_TOKEN_SECRET = "k3s-agent-token"  # key token
 # Safety net: the instance powers off (and so terminates) after this many minutes
 MAX_LIFETIME_MIN = int(os.environ.get("BURST_MAX_LIFETIME_MIN", "120"))
 
+# EC2 tags. The launch template exposes instance tags to the instance metadata
+# service (the Spot watcher reads them), and AWS then forbids "/" in tag keys.
+# So EC2 tags use "-" while Kubernetes labels keep the "idlecloud/" prefix.
 PROJECT_TAG = {"Key": "project", "Value": "idlecloud"}
-SLOT_TAG_KEY = "idlecloud/burst-slot"
+ROLE_TAG = {"Key": "idlecloud-role", "Value": "burst-worker"}
+SLOT_TAG_KEY = "idlecloud-burst-slot"
+# Slot tag used before metadata tags were enabled. Still read, so a worker
+# launched by older code stays visible until it ends (at most MAX_LIFETIME_MIN).
+# Safe to remove once no such worker can be running.
+LEGACY_SLOT_TAG_KEY = "idlecloud/burst-slot"
+
+# Injected Spot warning for testing (`launch reclaim`). The value is a UTC
+# deadline like 2026-11-01T12:02:00Z. The Spot watcher reads it through instance
+# metadata, so the name must match RECLAIM_TAG_KEY in spotwatch/watcher.py.
+RECLAIM_TAG_KEY = "reclaim-at"
+# A real Spot warning gives two minutes, so the injected one does too
+RECLAIM_WARNING_S = 120
+
+# Graceful node shutdown on burst workers (user_data.sh.tmpl). When the machine
+# powers off (Spot reclaim, terminate, lifetime limit), the kubelet gives task
+# pods up to SHUTDOWN_GRACE_S - CRITICAL_GRACE_S seconds to stop, then critical
+# pods (the Spot watcher) up to CRITICAL_GRACE_S. These are upper limits, not a
+# promise that a checkpoint is saved. Task pods ask for 30 s
+# (TERMINATION_GRACE_SECONDS in services/coordinator/k8s.py).
+SHUTDOWN_GRACE_S = 40
+CRITICAL_GRACE_S = 10
+# logind must allow at least SHUTDOWN_GRACE_S, or the kubelet's shutdown
+# manager does not start at all. Ubuntu's unattended-upgrades caps it at 30 s.
+LOGIND_DELAY_MAX_S = 45
+
+# Kubernetes node label with the slot number. user_data.sh.tmpl sets it at join.
+SLOT_LABEL_KEY = "idlecloud/burst-slot"
 
 
 def node_ip(slot: int) -> str:

@@ -1,0 +1,197 @@
+# Spot watcher: one pod on every burst node (idlecloud/pool=cloud).
+# Apply with kustomize, which also builds the ConfigMap from watcher.py:
+#   kubectl apply -k services/autoscaler/spotwatch
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spot-watcher
+  namespace: idlecloud-system
+---
+# Read and patch burst nodes only. A DaemonSet shares one account, so RBAC
+# cannot say "your own node". The admission policy below does that.
+# Keep resourceNames in step with SLOTS in burst/config.py.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spot-watcher
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    resourceNames: ["burst-200", "burst-201", "burst-202", "burst-203", "burst-204"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spot-watcher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spot-watcher
+subjects:
+  - kind: ServiceAccount
+    name: spot-watcher
+    namespace: idlecloud-system
+---
+# Own node only. A pod's service account token carries the name of the node the
+# pod runs on (Kubernetes 1.32+, signed by the API server, so the caller cannot
+# fake it). Only requests from the spot-watcher account are checked, so the
+# autoscaler, kubelets and admins are never affected. A failing rule names
+# itself in the error message.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: spot-watcher-own-node
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]  # a PATCH arrives here as an UPDATE
+        resources: ["nodes"]
+  matchConditions:
+    - name: only-the-spot-watcher
+      expression: >-
+        request.userInfo.username == "system:serviceaccount:idlecloud-system:spot-watcher"
+  variables:
+    - name: oldTaints
+      expression: oldObject.spec.?taints.orValue([])
+    - name: newTaints
+      expression: object.spec.?taints.orValue([])
+    - name: ownerTaint
+      expression: '{"key": "idlecloud/owner-active", "value": "true", "effect": "NoExecute"}'
+    - name: reclaimNotes
+      expression: '["idlecloud/reclaim-at", "idlecloud/reclaim-source", "idlecloud/reclaim-seen-at"]'
+    - name: oldNotes
+      expression: oldObject.metadata.?annotations.orValue({})
+    - name: newNotes
+      expression: object.metadata.?annotations.orValue({})
+  validations:
+    - expression: >-
+        "authentication.kubernetes.io/node-name" in request.userInfo.extra &&
+        request.userInfo.extra["authentication.kubernetes.io/node-name"][0] == object.metadata.name
+      message: spot-watcher may only change the node it runs on
+    # Beyond that, it may only add the exact owner-active taint and set the
+    # three reclaim annotations. Everything else must stay exactly as it was.
+    - expression: >-
+        variables.oldTaints.all(t, t in variables.newTaints) &&
+        variables.newTaints.all(n, n in variables.oldTaints || n == variables.ownerTaint) &&
+        variables.newTaints.size() <= variables.oldTaints.size() + 1
+      message: spot-watcher may only add the taint idlecloud/owner-active=true:NoExecute
+    - expression: >-
+        variables.oldNotes.all(k, k in variables.newNotes &&
+        (k in variables.reclaimNotes || variables.newNotes[k] == variables.oldNotes[k])) &&
+        variables.newNotes.all(k, k in variables.oldNotes || k in variables.reclaimNotes)
+      message: spot-watcher may only set the idlecloud/reclaim-at, -source and -seen-at annotations
+    - expression: >-
+        object.metadata.?labels.orValue({}) == oldObject.metadata.?labels.orValue({}) &&
+        object.metadata.?finalizers.orValue([]) == oldObject.metadata.?finalizers.orValue([]) &&
+        object.metadata.?ownerReferences.orValue([]) == oldObject.metadata.?ownerReferences.orValue([])
+      message: spot-watcher may not change labels, finalizers or owner references
+    - expression: >-
+        object.spec.?unschedulable.orValue(false) == oldObject.spec.?unschedulable.orValue(false) &&
+        object.spec.?providerID.orValue("") == oldObject.spec.?providerID.orValue("") &&
+        object.spec.?podCIDR.orValue("") == oldObject.spec.?podCIDR.orValue("") &&
+        object.spec.?podCIDRs.orValue([]) == oldObject.spec.?podCIDRs.orValue([]) &&
+        object.spec.?externalID.orValue("") == oldObject.spec.?externalID.orValue("")
+      message: spot-watcher may only change node taints, nothing else in the spec
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: spot-watcher-own-node
+spec:
+  policyName: spot-watcher-own-node
+  validationActions: [Deny]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: spot-watcher
+  namespace: idlecloud-system
+  labels:
+    app.kubernetes.io/name: spot-watcher
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spot-watcher
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spot-watcher
+    spec:
+      serviceAccountName: spot-watcher
+      nodeSelector:
+        idlecloud/pool: cloud
+      # The metadata service only answers one hop away (hop limit 1 keeps task
+      # pods out), so this pod uses the node's own network.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # Stay running on the node it tainted, to keep sending BUSY heartbeats
+      tolerations:
+        - key: idlecloud/owner-active
+          operator: Exists
+          effect: NoExecute
+      terminationGracePeriodSeconds: 5
+      # Critical, so on node shutdown the kubelet stops it in the last phase,
+      # after task pods (see SHUTDOWN_GRACE_S in burst/config.py). This only
+      # orders shutdown. Heartbeats still say BUSY only after a reclaim notice.
+      priorityClassName: system-node-critical
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: watcher
+          # AWS's mirror of the official image: close to the burst nodes, no
+          # Docker Hub pull limits. Pin it by digest before the first real run.
+          image: public.ecr.aws/docker/library/python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-u", "/app/watcher.py"]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # Coordinator heartbeats, to the Service in infra/k8s/base/coordinator.yml.
+            # The heartbeat endpoint itself is still member 3's work. Leave
+            # empty to turn heartbeats off.
+            - name: COORDINATOR_URL
+              value: http://coordinator.idlecloud-system.svc.cluster.local:8001
+          # No CPU request: the autoscaler sizes machines so a 2-core task fills
+          # a 2 vCPU machine exactly. The 32Mi is in its RESERVED_MEM_MIB.
+          resources:
+            requests:
+              cpu: "0"
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: code
+              mountPath: /app
+              readOnly: true
+            - name: coordinator-token
+              mountPath: /var/run/secrets/idlecloud
+              readOnly: true
+      volumes:
+        - name: code
+          configMap:
+            name: spot-watcher-code
+        # A token only the coordinator accepts (its own audience). The
+        # coordinator can check it with a TokenReview, which also names the node.
+        - name: coordinator-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: idlecloud-coordinator
+                  expirationSeconds: 3600
+                  path: token

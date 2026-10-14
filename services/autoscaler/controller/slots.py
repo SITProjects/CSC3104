@@ -73,6 +73,13 @@ def claim_free(db: Session, skip: set[int] | None = None) -> BurstSlot | None:
     ).scalar_one_or_none()
 
 
+def lock_slot(db: Session, slot: int) -> BurstSlot | None:
+    """Lock this exact slot's row, whatever it holds, or None if it does not exist."""
+    return db.execute(
+        select(BurstSlot).where(BurstSlot.ip == slot_ip(slot)).with_for_update()
+    ).scalar_one_or_none()
+
+
 def record_launch(row: BurstSlot, instance_id: str) -> None:
     slot = slot_number(row.ip)
     row.instance_id = instance_id
