@@ -152,10 +152,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            # Coordinator heartbeats. Confirm the Service name with member 1,
-            # and the endpoint with member 3. Leave empty to turn heartbeats off.
+            # Coordinator heartbeats, to the Service in infra/k8s/base/coordinator.yml.
+            # The heartbeat endpoint itself is still member 3's work. Leave
+            # empty to turn heartbeats off.
             - name: COORDINATOR_URL
-              value: http://idlecloud-coordinator.idlecloud-system.svc.cluster.local:8001
+              value: http://coordinator.idlecloud-system.svc.cluster.local:8001
           # No CPU request: the autoscaler sizes machines so a 2-core task fills
           # a 2 vCPU machine exactly. The 32Mi is in its RESERVED_MEM_MIB.
           resources:
