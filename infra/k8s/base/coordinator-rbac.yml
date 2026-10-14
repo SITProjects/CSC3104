@@ -1,0 +1,36 @@
+# Identity for the coordinator Pod (serviceAccountName in coordinator.yml).
+# Locally the coordinator uses the k3s admin kubeconfig instead, so this only
+# limits it once it runs inside the cluster. Apply after namespaces.yml.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: coordinator
+  namespace: idlecloud-system
+---
+# Launch and clean up replica Jobs, and follow their Pods, in idlecloud-jobs only
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: coordinator-jobs
+  namespace: idlecloud-jobs
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: coordinator-jobs
+  namespace: idlecloud-jobs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: coordinator-jobs
+subjects:
+  - kind: ServiceAccount
+    name: coordinator
+    namespace: idlecloud-system

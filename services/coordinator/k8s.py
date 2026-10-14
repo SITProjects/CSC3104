@@ -9,6 +9,7 @@ from shared.db.models import JobType, Replica, Task
 JOB_TTL_SECONDS = 600
 # time for worker to save checkpoint after terminate signal
 TERMINATION_GRACE_SECONDS = 30
+TOLERATION_SECONDS = 30
 
 
 def build_replica_job_manifest(
@@ -64,7 +65,23 @@ def build_replica_job_manifest(
                     "restartPolicy": "Never",
                     "automountServiceAccountToken": False,
                     "enableServiceLinks": False,
+                    "tolerations": [
+                        {
+                            "key": "node.kubernetes.io/not-ready",
+                            "operator": "Exists",
+                            "effect": "NoExecute",
+                            "tolerationSeconds": TOLERATION_SECONDS,
+                        },
+                        {
+                            "key": "node.kubernetes.io/unreachable",
+                            "operator": "Exists",
+                            "effect": "NoExecute",
+                            "tolerationSeconds": TOLERATION_SECONDS,
+                        },
+                    ],
                     "terminationGracePeriodSeconds": TERMINATION_GRACE_SECONDS,
+                    # campus PCs and burst workers only, never the control plane
+                    "nodeSelector": {"idlecloud/role": "worker"},
                     # replicas of the same task must land on different nodes for voting
                     "affinity": {
                         "podAntiAffinity": {

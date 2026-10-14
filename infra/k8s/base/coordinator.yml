@@ -1,0 +1,97 @@
+# Coordinator in idlecloud-system, for the AWS control plane. Apply after
+# namespaces.yml and coordinator-rbac.yml.
+#
+# Before applying, create in idlecloud-system:
+#   Secret idlecloud-db  key DATABASE_URL  (shared with the autoscaler)
+# and set S3_URL below to the bucket the worker Pods read and write.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coordinator
+  namespace: idlecloud-system
+  labels:
+    app.kubernetes.io/name: idlecloud-coordinator
+spec:
+  replicas: 1
+  # One scheduler loop at a time during a rollout
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: idlecloud-coordinator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: idlecloud-coordinator
+    spec:
+      # Its token is mounted for load_incluster_config(); see coordinator-rbac.yml
+      serviceAccountName: coordinator
+      # Run on the AWS control plane, never on a campus PC that may leave
+      nodeSelector:
+        idlecloud/role: control
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: coordinator
+          # Versioned, so a rebuilt image is picked up. Bump it on every rebuild.
+          image: idlecloud/coordinator:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8001
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: idlecloud-db
+                  key: DATABASE_URL
+            # Handed to worker Pods, which resolve the Service below through cluster DNS
+            - name: COORDINATOR_URL
+              value: http://coordinator.idlecloud-system.svc.cluster.local:8001
+            - name: S3_URL
+              value: https://BUCKET.s3.us-east-1.amazonaws.com  # set to the real bucket
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coordinator
+  namespace: idlecloud-system
+spec:
+  selector:
+    app.kubernetes.io/name: idlecloud-coordinator
+  ports:
+    - name: http
+      port: 8001
+      targetPort: http
