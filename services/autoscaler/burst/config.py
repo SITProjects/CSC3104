@@ -55,6 +55,18 @@ RECLAIM_TAG_KEY = "reclaim-at"
 # A real Spot warning gives two minutes, so the injected one does too
 RECLAIM_WARNING_S = 120
 
+# Graceful node shutdown on burst workers (user_data.sh.tmpl). When the machine
+# powers off (Spot reclaim, terminate, lifetime limit), the kubelet gives task
+# pods up to SHUTDOWN_GRACE_S - CRITICAL_GRACE_S seconds to stop, then critical
+# pods (the Spot watcher) up to CRITICAL_GRACE_S. These are upper limits, not a
+# promise that a checkpoint is saved. Task pods ask for 30 s
+# (TERMINATION_GRACE_SECONDS in services/coordinator/k8s.py).
+SHUTDOWN_GRACE_S = 40
+CRITICAL_GRACE_S = 10
+# logind must allow at least SHUTDOWN_GRACE_S, or the kubelet's shutdown
+# manager does not start at all. Ubuntu's unattended-upgrades caps it at 30 s.
+LOGIND_DELAY_MAX_S = 45
+
 # Kubernetes node label with the slot number. user_data.sh.tmpl sets it at join.
 SLOT_LABEL_KEY = "idlecloud/burst-slot"
 

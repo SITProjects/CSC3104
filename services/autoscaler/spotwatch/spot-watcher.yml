@@ -134,6 +134,10 @@ spec:
           operator: Exists
           effect: NoExecute
       terminationGracePeriodSeconds: 5
+      # Critical, so on node shutdown the kubelet stops it in the last phase,
+      # after task pods (see SHUTDOWN_GRACE_S in burst/config.py). This only
+      # orders shutdown. Heartbeats still say BUSY only after a reclaim notice.
+      priorityClassName: system-node-critical
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534

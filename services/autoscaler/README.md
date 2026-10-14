@@ -22,7 +22,7 @@ controller in `controller/`, which calls the same functions on its own.
 | File | What it does |
 | --- | --- |
 | `burst/config.py` | Instance type, slots 200 to 204, secret names, lifetime limit |
-| `burst/user_data.sh.tmpl` | Boot script: WireGuard, wait for the hub, join K3s |
+| `burst/user_data.sh.tmpl` | Boot script: WireGuard, graceful shutdown settings, join K3s, shutdown check |
 | `burst/user_data.py` | Fills the boot script for one slot and checks the inputs |
 | `burst/slot_store.py` | Reads the slot's `wg0.conf` and the K3s token |
 | `burst/launch_template.py` | Creates the launch template and a security group with no inbound rules |
@@ -277,6 +277,87 @@ Apply with kustomize, which builds the ConfigMap from `watcher.py`:
 ```sh
 kubectl apply -k services/autoscaler/spotwatch
 ```
+
+### Graceful shutdown on burst workers
+
+A burst machine can power off for three reasons: AWS takes back a Spot
+worker, the autoscaler terminates it, or it reaches its 2 hour lifetime. The
+boot script turns on the kubelet's graceful node shutdown, so pods get time to
+stop first (`burst/user_data.sh.tmpl`, values in `burst/config.py`):
+
+- Task pods get up to 30 s, then critical pods get up to 10 s
+  (`shutdownGracePeriod: 40s`, `shutdownGracePeriodCriticalPods: 10s`). These
+  are upper limits. A pod can finish sooner, and its own
+  `terminationGracePeriodSeconds` (30 s for task pods) can shorten it. They do
+  not promise that a checkpoint is saved.
+- The Spot watcher is `system-node-critical`, so it stops in the last phase,
+  after task pods. This only orders shutdown. Its heartbeats say BUSY only
+  after a reclaim notice, so a lifetime shutdown or a plain terminate can still
+  report IDLE.
+- The settings go in `/etc/idlecloud/kubelet.conf.d/50-graceful-shutdown.conf`,
+  passed with `--kubelet-arg config-dir=...`. K3s copies it into its own
+  kubelet drop-in folder. Checked with a real K3s v1.34.1 agent: the kubelet
+  logged 30 s for priority 0 and 10 s for critical priority.
+- The kubelet delays power-off with a logind delay lock. logind allows at most
+  `InhibitDelayMaxSec`. Ubuntu's unattended-upgrades sets 30 s in
+  `/usr/lib/systemd/logind.conf.d/unattended-upgrades-logind-maxdelay.conf`,
+  which is read after the kubelet's own setting. With that cap the kubelet's
+  shutdown manager does not start at all. The boot script writes a file with
+  the same name in `/etc` (45 s), which replaces it, reloads logind and checks
+  the live value before K3s starts.
+- After the join, the boot script waits up to 90 s for logind's live limit and
+  the kubelet's shutdown lock in delay mode. It logs
+  `graceful shutdown check: PASS` or `FAIL` in `/var/log/idlecloud-burst.log`.
+  A FAIL does not stop the worker. It only means pods are not given the extra
+  time.
+
+**Checking it on a real burst worker.** On the node:
+
+```sh
+grep "graceful shutdown check" /var/log/idlecloud-burst.log
+busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+  org.freedesktop.login1.Manager InhibitDelayMaxUSec   # t 45000000
+systemd-inhibit --list   # a kubelet line with WHAT shutdown, MODE delay
+```
+
+**Live tests.** Stop the autoscaler first, so it does not react
+(`kubectl -n idlecloud-system scale deploy/idlecloud-autoscaler --replicas=0`),
+and scale it back afterwards. Use a fresh worker for each test.
+
+On the worker under test, run two test pods in `idlecloud-jobs`, pinned to it
+with `nodeName`, both with `terminationGracePeriodSeconds: 60` (longer than
+either phase, so the kubelet's phase limit is what ends them):
+
+- an ordinary pod
+- a pod with `priorityClassName: system-node-critical`
+
+Each prints its Unix time every second, prints `TERM <time>` when SIGTERM
+arrives, and then deliberately keeps running. Follow both logs from your own
+machine and save them there (`kubectl logs -f <pod> > file`), so the
+timestamps survive the worker.
+
+Pass, for a shutdown through logind:
+
+- the ordinary pod prints TERM, then keeps printing for about 30 s
+- the critical pod prints TERM about 30 s after the ordinary pod's TERM, then
+  keeps printing for about 10 s
+- Fail: printing stops within a few seconds of TERM, or no TERM at all. A log
+  stream that drops early is inconclusive, not a pass.
+
+Run these separately, because they test different things:
+
+1. **Power-off.** `sudo systemctl poweroff` on the worker. This is the logind
+   path itself.
+2. **Plain EC2 terminate.** `aws ec2 terminate-instances --instance-ids <id>`.
+   AWS tries a graceful OS shutdown, which this test checks on our workers.
+   Do not use `launch down` here: it also deletes the node at once, which
+   changes what can be observed during shutdown.
+3. **`launch down --slot N`**, as an end-to-end check of the command only.
+4. **Injected reclaim** (`launch reclaim --slot N`, autoscaler running). This
+   tests eviction at the warning: the taint makes the pods get SIGTERM at the
+   warning, and each pod's own grace period applies (30 s for task pods, 60 s
+   for the test pods), not logind. It does not prove the shutdown handling
+   above.
 
 ### Starting the replacement early
 

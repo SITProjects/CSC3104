@@ -67,6 +67,11 @@ def render_user_data(
     if not INSTANCE_TYPE_RE.match(instance_type):
         raise ValueError(f"not an EC2 instance type: {instance_type!r}")
 
+    if not 0 < config.CRITICAL_GRACE_S < config.SHUTDOWN_GRACE_S:
+        raise ValueError("CRITICAL_GRACE_S must be above 0 and below SHUTDOWN_GRACE_S")
+    if config.LOGIND_DELAY_MAX_S < config.SHUTDOWN_GRACE_S:
+        raise ValueError("LOGIND_DELAY_MAX_S must be at least SHUTDOWN_GRACE_S")
+
     values = {
         "SLOT": str(slot),
         "NODE_IP": config.node_ip(slot),
@@ -78,6 +83,9 @@ def render_user_data(
         "MAX_LIFETIME_MIN": str(config.MAX_LIFETIME_MIN),
         "INSTANCE_TYPE": instance_type,
         "WG_CONF": _check_wg_conf(slot, wg_conf),
+        "SHUTDOWN_GRACE_S": str(int(config.SHUTDOWN_GRACE_S)),
+        "CRITICAL_GRACE_S": str(int(config.CRITICAL_GRACE_S)),
+        "LOGIND_DELAY_MAX_S": str(int(config.LOGIND_DELAY_MAX_S)),
     }
     script = TEMPLATE
     for name, value in values.items():

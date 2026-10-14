@@ -19,6 +19,86 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y wireguard-tools
 
+# ---- graceful node shutdown ----
+# On power-off the kubelet first stops task pods, then critical pods (the Spot
+# watcher), using a logind delay lock. Both periods are upper limits.
+install -d -m 755 /etc/idlecloud/kubelet.conf.d
+cat > /etc/idlecloud/kubelet.conf.d/50-graceful-shutdown.conf <<'KUBELETEOF'
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+shutdownGracePeriod: {{SHUTDOWN_GRACE_S}}s
+shutdownGracePeriodCriticalPods: {{CRITICAL_GRACE_S}}s
+KUBELETEOF
+
+# Ubuntu's unattended-upgrades caps logind's delay at 30 s in
+# /usr/lib/systemd/logind.conf.d/unattended-upgrades-logind-maxdelay.conf, and
+# that file is read after the kubelet's own 99-kubelet.conf. A file with the
+# same name in /etc replaces it. The package itself stays.
+install -d -m 755 /etc/systemd/logind.conf.d
+cat > /etc/systemd/logind.conf.d/unattended-upgrades-logind-maxdelay.conf <<'LOGINDEOF'
+[Login]
+InhibitDelayMaxSec={{LOGIND_DELAY_MAX_S}}
+LOGINDEOF
+
+# --- shutdown checks (begin) ---
+# Every probe has its own time limit, and every wait a real deadline, so a slow
+# or hung busctl or systemd-inhibit cannot stretch a wait.
+probe() {
+  timeout -k 1 3 "$@"
+}
+
+# logind's live limit in whole seconds, 0 if it cannot be read
+logind_delay_s() {
+  local raw
+  raw=$(probe busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+    org.freedesktop.login1.Manager InhibitDelayMaxUSec 2>/dev/null || true)
+  case "$raw" in
+    "t "[0-9]*) echo $(( ${raw#t } / 1000000 )) ;;
+    *) echo 0 ;;
+  esac
+}
+
+# Whether the kubelet holds its shutdown lock in delay mode. Columns:
+# WHO UID USER PID COMM WHAT WHY... MODE (WHY may contain spaces)
+kubelet_holds_delay_lock() {
+  probe systemd-inhibit --list --no-pager --no-legend 2>/dev/null |
+    awk '$1 == "kubelet" && $6 ~ /(^|:)shutdown(:|$)/ && $NF == "delay" { found = 1 }
+         END { exit !found }'
+}
+
+# Until $1 seconds have passed: wait for logind's live limit to reach $2 seconds
+wait_for_logind_delay() {
+  local deadline=$((SECONDS + $1))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ "$(logind_delay_s)" -ge "$2" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# Until $1 seconds have passed: wait for the live limit and the kubelet's lock
+wait_for_graceful_shutdown() {
+  local deadline=$((SECONDS + $1))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ "$(logind_delay_s)" -ge {{SHUTDOWN_GRACE_S}} ] && kubelet_holds_delay_lock; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+# --- shutdown checks (end) ---
+
+# Apply the new limit now, before K3s starts, and confirm the live value
+systemctl kill -s HUP systemd-logind || true
+if wait_for_logind_delay 15 {{SHUTDOWN_GRACE_S}}; then
+  echo "logind delay limit is $(logind_delay_s) s"
+else
+  echo "WARNING: logind delay limit is $(logind_delay_s) s, below {{SHUTDOWN_GRACE_S}} s"
+fi
+
 install -d -m 700 /etc/wireguard
 cat > /etc/wireguard/wg0.conf <<'WGEOF'
 {{WG_CONF}}
@@ -57,6 +137,17 @@ curl -sfL https://get.k3s.io | \
     --node-label idlecloud/pool=cloud \
     --node-label "idlecloud/burst-slot=$SLOT" \
     --node-label "idlecloud/instance-type={{INSTANCE_TYPE}}" \
-    --node-label "idlecloud/instance-id=$INSTANCE_ID"
+    --node-label "idlecloud/instance-id=$INSTANCE_ID" \
+    --kubelet-arg "config-dir=/etc/idlecloud/kubelet.conf.d"
 
 echo "burst worker $NODE_NAME joined"
+
+# Graceful shutdown only works if the kubelet's shutdown manager started. It
+# fails to start when logind's limit stays too low. The worker still runs
+# either way, so this only reports.
+if wait_for_graceful_shutdown 90; then
+  echo "graceful shutdown check: PASS (logind limit $(logind_delay_s) s, kubelet delay lock held)"
+else
+  echo "graceful shutdown check: FAIL (logind limit $(logind_delay_s) s). Inhibitor locks:"
+  probe systemd-inhibit --list --no-pager || true
+fi
