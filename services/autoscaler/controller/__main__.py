@@ -18,8 +18,8 @@ from sqlalchemy.orm import Session
 from services.autoscaler.burst import config as burst_config
 from services.autoscaler.burst import launch as burst
 from services.autoscaler.burst.aws import ec2_client
-from services.autoscaler.burst.market import MarketChooser
-from services.autoscaler.controller import cluster, settings, slots
+from services.autoscaler.burst.market import LaunchUnknown, MarketChooser
+from services.autoscaler.controller import cluster, pending, settings, slots
 from services.autoscaler.controller.decide import (
     AccountUsage,
     Action,
@@ -39,6 +39,8 @@ log = logging.getLogger("autoscaler")
 RESCUE = RescueMemory()
 # Spot or On-Demand per launch, and what Spot refusals taught it (see market.py)
 MARKET = MarketChooser(settings.BURST_MARKET, settings.SPOT_COOLDOWN_S)
+# Launches not yet committed to burst_slots, kept across ticks (see pending.py)
+PENDING = pending.PendingLaunches()
 
 
 def burst_instances(ec2) -> list[Instance]:
@@ -56,6 +58,7 @@ def burst_instances(ec2) -> list[Instance]:
                     found["InstanceType"],
                     slot=slot,
                     reclaim_at=parse_utc(tag) if tag is not None else None,
+                    client_token=found.get("ClientToken", ""),
                 )
             )
     return instances
@@ -72,8 +75,10 @@ def terminate_instance(ec2, instance_id: str) -> None:
 
 def account_usage(ec2) -> AccountUsage:
     """Every running instance in the region counts towards the AWS Academy quota,
-    including the control plane and anything teammates started."""
-    count, vcpus = 0, 0
+    including the control plane and anything teammates started. The ids and
+    slot tokens seen are kept, so decide can tell which of our workers this
+    listing already counts."""
+    count, vcpus, ids, slot_tokens = 0, 0, set(), set()
     pages = ec2.get_paginator("describe_instances").paginate(
         Filters=[{"Name": "instance-state-name", "Values": ["pending", "running"]}]
     )
@@ -83,7 +88,12 @@ def account_usage(ec2) -> AccountUsage:
                 cpu = instance.get("CpuOptions", {})
                 count += 1
                 vcpus += cpu.get("CoreCount", 1) * cpu.get("ThreadsPerCore", 1)
-    return AccountUsage(count, vcpus)
+                if "InstanceId" in instance:
+                    ids.add(instance["InstanceId"])
+                slot = burst.slot_of(instance)
+                if slot is not None and instance.get("ClientToken"):
+                    slot_tokens.add((slot, instance["ClientToken"]))
+    return AccountUsage(count, vcpus, frozenset(ids), frozenset(slot_tokens))
 
 
 def observe(db: Session, core, ec2, now: datetime) -> Snapshot:
@@ -134,6 +144,7 @@ def observe(db: Session, core, ec2, now: datetime) -> Snapshot:
         bound=bound,
         waiting=unplaced,
         finished=finished,
+        pending=PENDING.view(),
     )
     return dataclasses.replace(snapshot, rescue=RESCUE.update(snapshot, on_node))
 
@@ -169,14 +180,7 @@ def apply(action: Action, db: Session, core, ec2, snapshot: Snapshot) -> None:
     if action.kind == "hold":
         return  # nothing to do, the reason is already logged
     if action.kind == "launch":
-        row = slots.claim_free(db, skip=set(snapshot.instances or {}))
-        if row is None:
-            log.info("no free burst slot")
-            return
-        slot = slots.slot_number(row.ip)
-        # An AWS error rolls the claim back
-        instance_id = burst.launch(slot, instance_type=action.machine, chooser=MARKET)
-        slots.record_launch(row, instance_id)
+        launch_one(action, db, snapshot)
     elif action.kind == "uncordon":
         cluster.uncordon(core, node.name, node.uid)
     elif action.kind == "drain":
@@ -218,39 +222,89 @@ def apply(action: Action, db: Session, core, ec2, snapshot: Snapshot) -> None:
         raise ValueError(f"unknown action {action.kind}")
 
 
+def launch_one(action: Action, db: Session, snapshot: Snapshot) -> None:
+    """Claim a slot and start one worker. The slot is held in PENDING from just
+    before the first request until the instance id is committed, so no other
+    launch can take it while the answer is unknown or not saved yet."""
+    # Read held slots now, not from the snapshot: a launch earlier in this tick
+    # may have just reserved one
+    row = slots.claim_free(db, skip=set(snapshot.instances or {}) | PENDING.slots())
+    if row is None:
+        log.info("no free burst slot")
+        return
+    slot = slots.slot_number(row.ip)
+    entry = PENDING.reserve(slot, action.machine or "")
+
+    def on_request(request: dict, market: str) -> None:
+        entry.request, entry.market = request, market
+
+    try:
+        instance_id = burst.launch(
+            slot, instance_type=action.machine, chooser=MARKET, on_request=on_request
+        )
+    except LaunchUnknown as unknown:
+        # It may have started a machine. Keep the slot and settle it next tick.
+        log.warning(
+            "slot %s: %s. Slot held until its instance is found (token %s)",
+            slot,
+            unknown,
+            entry.client_token,
+        )
+        return
+    except Exception:
+        # A refusal, or a failure before any request: nothing started
+        PENDING.drop(slot)
+        raise
+    entry.found(instance_id)
+    slots.record_launch(row, instance_id)
+    entry.staged = True  # kept until the tick's transaction commits
+
+
 def tick(engine, core, ec2) -> None:
     now = datetime.now(UTC)
-    with Session(engine) as db, db.begin():
-        if not slots.try_lock(db):
-            log.info("another autoscaler copy is running this tick, skipping")
-            return
-        snapshot = observe(db, core, ec2, now)
-        log.info(
-            "pods waiting %d (unschedulable %d, burst after %.0fs), campus PCs taking pods %d, "
-            "burst slots in use %s, replicas from reclaimed workers %d",
-            snapshot.unscheduled_pods,
-            len(snapshot.unschedulable),
-            pending_grace(len(snapshot.unschedulable)),
-            snapshot.idle_campus_nodes,
-            sorted(snapshot.claimed_slots) or "none",
-            len(snapshot.rescue),
-        )
-        for action in decide(snapshot):
-            where = f" slot {action.slot}" if action.slot is not None else ""
-            what = f" {action.machine}" if action.machine else ""
-            if settings.DRY_RUN or action.kind == "hold":
-                prefix = "DRY RUN would " if settings.DRY_RUN else ""
-                log.info(
-                    "%s%s%s%s: %s", prefix, action.kind, what, where, action.reason
-                )
-                continue
-            log.info("%s%s%s: %s", action.kind, what, where, action.reason)
-            try:
-                # A savepoint per action, so one failure does not undo the others
-                with db.begin_nested():
-                    apply(action, db, core, ec2, snapshot)
-            except Exception:
-                log.exception("%s%s failed, will retry next tick", action.kind, where)
+    # A launch marked recorded last tick but still held was not committed
+    PENDING.begin_tick()
+    with Session(engine) as db:
+        with db.begin():
+            if not slots.try_lock(db):
+                log.info("another autoscaler copy is running this tick, skipping")
+                return
+            _act(db, core, ec2, now)
+        PENDING.committed()
+
+
+def _act(db: Session, core, ec2, now: datetime) -> None:
+    """One tick inside its transaction: settle held launches, observe, decide, act."""
+    if ec2 is not None and PENDING:
+        pending.resolve(db, ec2, PENDING)
+    snapshot = observe(db, core, ec2, now)
+    log.info(
+        "pods waiting %d (unschedulable %d, burst after %.0fs), campus PCs taking pods %d, "
+        "burst slots in use %s, replicas from reclaimed workers %d",
+        snapshot.unscheduled_pods,
+        len(snapshot.unschedulable),
+        pending_grace(len(snapshot.unschedulable)),
+        snapshot.idle_campus_nodes,
+        sorted(snapshot.claimed_slots) or "none",
+        len(snapshot.rescue),
+    )
+    for action in decide(snapshot):
+        where = f" slot {action.slot}" if action.slot is not None else ""
+        what = f" {action.machine}" if action.machine else ""
+        if settings.DRY_RUN or action.kind == "hold":
+            prefix = "DRY RUN would " if settings.DRY_RUN else ""
+            log.info("%s%s%s%s: %s", prefix, action.kind, what, where, action.reason)
+            continue
+        log.info("%s%s%s: %s", action.kind, what, where, action.reason)
+        try:
+            # A savepoint per action, so one failure does not undo the others
+            with db.begin_nested():
+                apply(action, db, core, ec2, snapshot)
+        except Exception:
+            PENDING.savepoint_failed()
+            log.exception("%s%s failed, will retry next tick", action.kind, where)
+        else:
+            PENDING.savepoint_done()
 
 
 def main() -> None:

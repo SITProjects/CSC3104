@@ -95,6 +95,18 @@ class ClaimedSlot:
 
 
 @dataclass(frozen=True)
+class PendingSlot:
+    """A launch not yet recorded in burst_slots (controller/pending.py). Its
+    slot is reserved, and it counts like a booting worker until recorded."""
+
+    slot: int
+    machine: str
+    client_token: str = ""
+    instance_id: str = ""  # known once AWS answered, before the row is written
+    found_at: datetime | None = None  # when instance_id became known
+
+
+@dataclass(frozen=True)
 class Instance:
     instance_id: str
     launched_at: datetime
@@ -102,6 +114,8 @@ class Instance:
     slot: int | None = None
     # Deadline from the EC2 tag reclaim-at, set by `launch reclaim`
     reclaim_at: datetime | None = None
+    # The idempotency token of the request that started it
+    client_token: str = ""
 
 
 @dataclass(frozen=True)
@@ -110,6 +124,10 @@ class AccountUsage:
 
     instances: int
     vcpus: int
+    # What this listing saw, so a worker another listing already shows is
+    # still reserved until this one counts it too
+    ids: frozenset[str] = frozenset()
+    slot_tokens: frozenset[tuple[int, str]] = frozenset()  # (slot, ClientToken)
 
 
 @dataclass
@@ -140,6 +158,8 @@ class Snapshot:
     # Replicas known to need no more work: their pod succeeded, or the
     # coordinator marks the replica, its task or its job as finished
     finished: set[str] = field(default_factory=set)
+    # Launches whose instance id is not in burst_slots yet (pending.py)
+    pending: list[PendingSlot] = field(default_factory=list)
 
 
 # ---------- what the loop should do ----------
@@ -215,6 +235,100 @@ def _live_ids(s: Snapshot) -> set[str]:
     return {i.instance_id for i in (s.instances or {}).values()} | {
         i.instance_id for i in s.duplicates
     }
+
+
+def _pending_owner(s: Snapshot, instance: Instance) -> PendingSlot | None:
+    """The held launch that started this instance: same instance id, or same
+    slot and same ClientToken. Such an instance is ours, only not recorded yet."""
+    for p in s.pending:
+        if p.instance_id and p.instance_id == instance.instance_id:
+            return p
+        if p.client_token and (p.slot, p.client_token) == (
+            instance.slot,
+            instance.client_token,
+        ):
+            return p
+    return None
+
+
+def _pending_unseen(s: Snapshot) -> list[PendingSlot]:
+    """Held launches EC2 does not list yet. Ones it lists are already counted
+    as live instances, so they are never counted twice."""
+    live = [*(s.instances or {}).values(), *s.duplicates]
+    seen = {id(owner) for i in live if (owner := _pending_owner(s, i)) is not None}
+    return [p for p in s.pending if id(p) not in seen]
+
+
+def _pending_room(s: Snapshot, plan: _Plan) -> list["_Bin"]:
+    """Room held launches can still give to waiting pods, by their real state.
+    Their price stays in the budget either way (_billed). Each check runs on
+    its own, so no one of them can hide another:
+    - its slot is reclaiming or being removed: none
+    - its own instance has a reclaim warning (it may be a second instance on
+      the slot, so the slot's state is not enough): none
+    - instance id known, but EC2 has not listed it for ORPHAN_GRACE_S: none,
+      it is most likely gone, whatever node is left behind
+    - its own node (by instance id) is draining or warned: none
+    - its own node is Ready: what is left on that node
+    - otherwise still booting: a whole empty machine of its size"""
+    bins = []
+    live = {} if s.instances is None else {i.instance_id: i for i in _live(s)}
+    for p in s.pending:
+        if p.slot in plan.reclaiming or p.slot in plan.gone:
+            continue
+        mine = live.get(p.instance_id) or next(
+            (i for i in live.values() if _pending_owner(s, i) is p), None
+        )
+        if mine is not None and mine.reclaim_at is not None:
+            continue
+        if (
+            s.instances is not None
+            and mine is None
+            and p.instance_id
+            and p.found_at is not None
+            and _age(s.now, p.found_at) > settings.ORPHAN_GRACE_S
+        ):
+            continue
+        instance_id = p.instance_id or (mine.instance_id if mine else "")
+        node = s.burst_nodes.get(p.slot)
+        if node is not None and instance_id and node.instance_id == instance_id:
+            if node.reclaim_at is not None or node.draining:
+                continue
+            if node.ready:
+                bins.append(_Bin.settling(node))
+                continue
+        bins.append(
+            _Bin(settings.KNOWN_TYPES.get(p.machine, settings.CHEAPEST), new=False)
+        )
+    return bins
+
+
+def _live(s: Snapshot) -> list[Instance]:
+    return [*(s.instances or {}).values(), *s.duplicates]
+
+
+def _missing_from_account(s: Snapshot, account: AccountUsage) -> list[str]:
+    """Sizes of our workers the account totals may not include yet, so the
+    quota check adds them. Decided by the account listing itself, not by the
+    burst listing, because the two are separate EC2 reads and can disagree.
+    - a held launch, unless the account listing saw its instance id or its
+      slot and ClientToken
+    - a just-recorded claim (within ORPHAN_GRACE_S), unless the account
+      listing saw its instance id"""
+    missing = []
+    for p in s.pending:
+        if p.instance_id and p.instance_id in account.ids:
+            continue
+        if p.client_token and (p.slot, p.client_token) in account.slot_tokens:
+            continue
+        missing.append(p.machine)
+    for c in s.claimed_slots.values():
+        if (
+            c.instance_id not in account.ids
+            and _age(s.now, c.claimed_at) <= settings.ORPHAN_GRACE_S
+        ):
+            missing.append(c.machine)
+    return missing
 
 
 def pending_grace(waiting: int) -> float:
@@ -333,6 +447,9 @@ def _reconcile_with_ec2(s: Snapshot, plan: _Plan) -> None:
         if instance.instance_id in plan.reclaimed | plan.warned:
             continue
         claimed = s.claimed_slots.get(slot)
+        if claimed is None and _pending_owner(s, instance) is not None:
+            plan.add("hold", slot, f"{instance.instance_id} started, not recorded yet")
+            continue
         if (claimed is None or claimed.instance_id != instance.instance_id) and _age(
             s.now, instance.launched_at
         ) > settings.ORPHAN_GRACE_S:
@@ -348,6 +465,11 @@ def _reconcile_with_ec2(s: Snapshot, plan: _Plan) -> None:
     for extra in s.duplicates:
         if extra.instance_id in recorded:
             continue  # cannot happen: split_by_slot keeps the recorded one
+        if _pending_owner(s, extra) is not None:
+            plan.add(
+                "hold", extra.slot, f"{extra.instance_id} started, not recorded yet"
+            )
+            continue
         if extra.reclaim_at is not None and s.now < extra.reclaim_at:
             plan.add(
                 "hold",
@@ -522,8 +644,9 @@ def _billed(s: Snapshot) -> list[tuple[str, str]]:
     has not caught up). After that, its instance is gone and the claim is freed.
     Without EC2 (dry run), every claimed slot counts.
     """
+    held = [(f"launch on slot {p.slot}", p.machine) for p in _pending_unseen(s)]
     if s.instances is None:
-        return [(c.instance_id, c.machine) for c in s.claimed_slots.values()]
+        return [(c.instance_id, c.machine) for c in s.claimed_slots.values()] + held
     live = [*s.instances.values(), *s.duplicates]
     billed = [(i.instance_id, i.machine) for i in live]
     live_ids = {i.instance_id for i in live}
@@ -533,7 +656,7 @@ def _billed(s: Snapshot) -> list[tuple[str, str]]:
         if c.instance_id not in live_ids
         and _age(s.now, c.claimed_at) <= settings.ORPHAN_GRACE_S
     ]
-    return billed
+    return billed + held
 
 
 def running_spend(s: Snapshot) -> tuple[float, list[str]]:
@@ -702,18 +825,31 @@ def _launch_for(
             "price table (settings.KNOWN_TYPES)",
         )
         return
-    free_slots = s.free_slots
+    # A held launch keeps its slot, though burst_slots still shows it free
+    held = {p.slot for p in s.pending}
+    free_slots = s.free_slots - len(held)
     if s.instances is not None:
         # A free slot whose old instance is still winding down cannot be used yet
-        free_slots -= len([slot for slot in s.instances if slot not in s.claimed_slots])
+        free_slots -= len(
+            [
+                slot
+                for slot in s.instances
+                if slot not in s.claimed_slots and slot not in held
+            ]
+        )
     instances = s.account.instances if s.account else None
     vcpus = s.account.vcpus if s.account else None
+    if s.account is not None:
+        for machine in _missing_from_account(s, s.account):
+            instances += 1
+            vcpus += settings.KNOWN_TYPES.get(machine, settings.DEAREST).vcpu
 
     # Plan, then take the first new machine. Accept it if the limits allow,
     # otherwise drop the pod that needed it. Then plan again with what is left.
     # Every round accepts a machine or drops a pod, so this always ends.
     pods = [p for p in stuck if smallest_fit(p) is not None]
     bins = [_Bin(_machine_of(c), new=False) for c in booting]
+    bins += _pending_room(s, plan)
     bins += [
         _Bin.settling(node)
         for node in _active_nodes(s, plan)

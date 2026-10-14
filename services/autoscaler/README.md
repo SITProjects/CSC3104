@@ -27,11 +27,12 @@ controller in `controller/`, which calls the same functions on its own.
 | `burst/slot_store.py` | Reads the slot's `wg0.conf` and the K3s token |
 | `burst/launch_template.py` | Creates the launch template and a security group with no inbound rules |
 | `burst/launch.py` | `up`, `down` and `list` commands |
-| `burst/market.py` | Spot or On-Demand for each launch (`BURST_MARKET`) |
+| `burst/market.py` | Spot or On-Demand for each launch (`BURST_MARKET`), and what a launch answer means |
 | `controller/settings.py` | Machine sizes and prices, budget, AWS quotas, timings |
 | `controller/decide.py` | The scaling rules and bin packing, as pure functions |
 | `controller/cluster.py` | Reads task pods and nodes, cordons burst nodes |
 | `controller/slots.py` | Claims and frees rows in the `burst_slots` table |
+| `controller/pending.py` | Holds a launch's slot until its instance is found and saved |
 | `controller/__main__.py` | The loop: observe, decide, act, every 30 seconds |
 | `Dockerfile`, `k8s/autoscaler.yml` | Image and Deployment with its permissions |
 
@@ -344,14 +345,10 @@ covers `SpotMaxPriceTooLow`, because AWS leaves that Spot request open, so it
 could still start next to an On-Demand fallback.
 
 The fallback is safe only because it follows these specific refusals, which
-mean AWS started nothing. An error alone does not prove that. A network error
-or an AWS server error (HTTP 5xx) leaves the outcome unknown, so it never falls
-back. boto3 gives each call one ClientToken and reuses it on its own retries,
-but that protection ends with the call. Known limit: after an unknown outcome
-the slot claim rolls back, so a later launch in the same or a later tick can
-take the same slot and start another machine. Repeated timeouts can start
-several. They are cleaned up as orphans or duplicates once EC2 lists them, but
-EC2 listings can lag, so there is no firm time limit.
+mean AWS started nothing. An error alone does not prove that. A network error,
+a timeout, an AWS server error, an unknown code or `SpotMaxPriceTooLow` leaves
+the outcome unknown. That never falls back. The launch is held instead (see
+"Launches with an unknown outcome" below).
 
 The memory is kept in the process only. After a restart, one Spot launch may be
 refused again before the chooser switches. A Spot worker is budgeted at the
@@ -360,3 +357,63 @@ that. The budget is a safe upper bound for compute, not the real cost per job.
 
 The manual command `launch up --spot` still asks for Spot only, with no
 fallback.
+
+### Launches with an unknown outcome
+
+A launch request can start a machine even when its answer is lost. If the
+slot were simply freed, the next launch could take it and start a second
+machine with the same WireGuard identity. So every launch is held in memory
+(`controller/pending.py`) from just before its first request until its
+instance id is committed to `burst_slots`.
+
+- A first launch request is sent with boto3's automatic retries turned off
+  (`aws.ONE_ATTEMPT`). Otherwise a timed-out attempt that started a machine,
+  followed by a refused retry, would look like a clean refusal. An error from
+  a client that may have retried is never trusted as a refusal. Replays of a
+  held launch use the normal client, which is safe because no error ever
+  settles a replay, and boto3's own retries reuse the same token.
+- Every request carries its own `ClientToken`, and the launch template is
+  pinned to its id and version at that moment, not `$Default`. A later
+  `launch_template.py` run cannot change what a replay starts. The On-Demand
+  fallback after a refusal is a new request with a new token.
+- While held, its slot is never claimed again, even within the same tick.
+  The planner counts its price in the budget until the EC2 burst listing shows
+  it, then as that live instance, never twice. It counts one instance and its
+  vCPUs in the account quota until the account listing itself shows it (the
+  two listings are separate reads and can disagree). Its room for pods follows
+  its real state: a whole machine while booting, what is left once its own
+  node is Ready, and nothing while draining or reclaimed, or when EC2 has not
+  listed its known instance for 2 minutes. Its own instance's reclaim warning
+  counts too, even when it is a second instance on the slot. Each check runs
+  on its own. It is never killed as an orphan.
+  It is outside the boot and orphan timeouts.
+- Each tick tries to settle it. If EC2 lists exactly one burst instance on that
+  slot with that token, it is adopted. Otherwise the identical request is sent
+  again with the same token. AWS then returns the instance the first request
+  started, or starts it now. Either way there is one machine.
+- A later error never settles it, not even a refusal. A refusal only shows that
+  the replay started nothing, not that the first request did not. So a held
+  launch is never released automatically. After 10 minutes, and every 10
+  minutes after that (`AUTOSCALER_PENDING_WARN_S`), the log warns with its
+  token. EC2 not listing an instance with that token is no proof that none
+  started, because listings lag, however long the search stays empty. A
+  restart drops the hold. It is a manual decision that accepts that risk, and
+  the duplicate checks then only catch a second machine once EC2 lists it.
+- AWS success is also held until the database commit. If the commit fails, the
+  next tick writes the same instance id again, with no new request. If the
+  commit worked but its reply was lost, the row already holds that instance,
+  and that counts as recorded. A row holding a different instance is never
+  overwritten.
+- A just-recorded worker also counts in the account quota until the account
+  listing shows it.
+
+Known limits. A held launch that can never succeed (for example, Spot capacity
+that never returns) keeps its slot, budget and room until someone restarts the
+autoscaler. The memory is in the process only. The autoscaler assumes one
+running copy at a time. One replica, the `Recreate` strategy and the advisory
+lock per tick make overlap unlikely, but do not prove it. After a restart, held
+launches are forgotten. A machine one of them started is then handled as an
+orphan once EC2 lists it, and its slot can be reused before that. Covering
+restarts needs the token stored in `burst_slots`, a follow-up with member 3.
+AWS does not document what a replay returns after the first request failed,
+or how long a token stays valid. A live test should check both.

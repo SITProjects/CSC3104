@@ -1,27 +1,36 @@
-"""Which EC2 market a burst worker uses: Spot or On-Demand (BURST_MARKET).
+"""Which EC2 market a burst worker uses (BURST_MARKET), and what a launch
+request's answer means.
 
 on-demand  Never tries Spot.
 spot       Spot only. A refused Spot launch fails, and the next tick retries.
-auto       Spot first. After a clear AWS refusal the same launch is repeated
-           once as On-Demand, and the chooser remembers why:
+auto       Spot first. After one of the refusals below the same launch is
+           repeated once as On-Demand, and the chooser remembers why:
            - Spot not allowed for the account: On-Demand for good.
            - Spot not allowed for one size (checked with a dry run): On-Demand
              for good for that size.
            - No Spot capacity for one size: that size waits a cooldown.
            - Spot quota used up: every size waits a cooldown (all T3 sizes
              share the account's Standard Spot vCPU quota).
-           Any other error changes nothing and is raised as before.
 
-The memory lives in this process only. After a restart one Spot launch may be
-refused again, and the chooser learns again. Time comes from a monotonic clock,
-so a change of the wall clock cannot end a cooldown early.
+Every answer to a launch request is one of three things:
+- started: AWS returned the instance.
+- refused: an error whose documented meaning is that AWS started nothing
+  (see REFUSED). Only these may fall back or be forgotten.
+- unknown: anything else, such as a network error, a timeout, an AWS server
+  error, an unrecognised code, or SpotMaxPriceTooLow (AWS leaves that request
+  open). LaunchUnknown carries the exact request, so the caller can keep it and
+  replay it with the same ClientToken (controller/pending.py).
+
+The chooser's memory lives in this process only. After a restart one Spot
+launch may be refused again, and the chooser learns again. Time comes from a
+monotonic clock, so a change of the wall clock cannot end a cooldown early.
 """
 
 import logging
 import time
 from collections.abc import Callable
 
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 
 log = logging.getLogger("autoscaler")
 
@@ -36,19 +45,89 @@ CHECK_WITH_DRY_RUN = {"UnauthorizedOperation"}
 NO_CAPACITY = {"InsufficientInstanceCapacity", "UnfulfillableCapacity"}
 # The Standard Spot vCPU quota is shared by all our sizes
 QUOTA_FULL = {"MaxSpotInstanceCountExceeded"}
-# Not handled on purpose: SpotMaxPriceTooLow leaves the Spot request open, so it
-# could still start later next to an On-Demand fallback. We never set a maximum
-# price, so the default (the On-Demand price) makes it very unlikely anyway.
+
+# Errors whose documented meaning is that the request was rejected and nothing
+# started: credentials and permissions, throttling, account limits, capacity,
+# and bad requests (codes starting with Invalid, Missing or Unsupported).
+REFUSED = (
+    NOT_ALLOWED
+    | CHECK_WITH_DRY_RUN
+    | NO_CAPACITY
+    | QUOTA_FULL
+    | {
+        "AuthFailure",
+        "Blocked",
+        "ExpiredToken",
+        "InvalidClientTokenId",
+        "MissingAuthenticationToken",
+        "OptInRequired",
+        "PendingVerification",
+        "RequestExpired",
+        "SignatureDoesNotMatch",
+        "RequestLimitExceeded",
+        "Throttling",
+        "InstanceLimitExceeded",
+        "VcpuLimitExceeded",
+        "InsufficientFreeAddressesInSubnet",
+    }
+)
+REFUSED_PREFIXES = ("Invalid", "Missing", "Unsupported")
+# Never a refusal, whatever the lists above say: the Spot request stays open
+# and may still start an instance later
+LEFT_OPEN = {"SpotMaxPriceTooLow"}
+
+
+class LaunchUnknown(Exception):
+    """A launch request whose outcome is unknown. It may have started an
+    instance. `request` is exactly what was sent, ClientToken included."""
+
+    def __init__(self, request: dict, market: str, cause: Exception):
+        super().__init__(f"launch outcome unknown ({market}): {cause!r}")
+        self.request = request
+        self.market = market
+        self.cause = cause
 
 
 def error_code(error: ClientError) -> str:
     return error.response.get("Error", {}).get("Code", "")
 
 
-def run(ec2, params: dict) -> str:
-    """One run_instances call. boto3 adds a ClientToken, so its own retries of
-    this call can never start a second instance."""
-    return ec2.run_instances(**params)["Instances"][0]["InstanceId"]
+def is_refusal(error: Exception) -> bool:
+    """Whether this error means AWS started nothing for this request. Only
+    true for a documented refusal. It says nothing about earlier requests."""
+    if not isinstance(error, ClientError):
+        return False
+    code = error_code(error)
+    if code in LEFT_OPEN:
+        return False
+    return code in REFUSED or code.startswith(REFUSED_PREFIXES)
+
+
+def single_attempt(ec2) -> bool:
+    """Whether this client makes exactly one attempt per call (aws.ONE_ATTEMPT).
+    A client without boto3 settings (a test fake) makes one."""
+    meta = getattr(ec2, "meta", None)
+    if meta is None:
+        return True
+    retries = getattr(meta.config, "retries", None) or {}
+    return retries.get("total_max_attempts") == 1
+
+
+def send(ec2, request: dict, market: str) -> str:
+    """One run_instances call. Returns the instance id, raises the ClientError
+    for a refusal, and LaunchUnknown for anything else.
+
+    An error is only trusted as a refusal when the client made one attempt.
+    With boto3's own retries, an earlier attempt may have timed out after
+    starting an instance, and only the last answer is reported."""
+    try:
+        return ec2.run_instances(**request)["Instances"][0]["InstanceId"]
+    except ParamValidationError:
+        raise  # boto3 rejected the request before sending it: nothing started
+    except Exception as error:
+        if is_refusal(error) and single_attempt(ec2):
+            raise
+        raise LaunchUnknown(request, market, error) from error
 
 
 def on_demand_allowed(ec2, params: dict) -> bool:
@@ -62,6 +141,10 @@ def on_demand_allowed(ec2, params: dict) -> bool:
     except BotoCoreError:
         return False
     return False  # a dry run always raises, so this is not expected
+
+
+def _ignore(request: dict, market: str) -> None:
+    return None
 
 
 class MarketChooser:
@@ -96,26 +179,37 @@ class MarketChooser:
         return until is None or now >= until
 
     def launch(
-        self, ec2, params_for: Callable[[bool], dict], instance_type: str
+        self,
+        ec2,
+        params_for: Callable[[bool], dict],
+        instance_type: str,
+        on_request: Callable[[dict, str], None] = _ignore,
     ) -> tuple[str, str]:
         """Start one instance. params_for(spot) builds the full request, the
-        same apart from the market. Returns (instance id, market used)."""
+        same apart from the market, with a new ClientToken each time.
+        on_request(request, market) is called just before each request is sent,
+        so the caller always holds the request that may have started a machine.
+        Returns (instance id, market used)."""
         if not self.wants_spot(instance_type):
-            return run(ec2, params_for(False)), "on-demand"
+            return self._send(ec2, params_for(False), "on-demand", on_request)
         try:
-            return run(ec2, params_for(True)), "spot"
+            return self._send(ec2, params_for(True), "spot", on_request)
         except ClientError as error:
-            # Only auto may fall back, and only after one of the specific
-            # refusals in _learn, which mean AWS started nothing. A ClientError
-            # alone does not prove that (an AWS 5xx may hide a launch), and
-            # network errors are not ClientErrors, so neither falls back.
+            # Only a refusal reaches here (send turns everything else into
+            # LaunchUnknown), and only auto may fall back after one it knows.
             if self.mode != "auto":
                 raise
             reason = self._learn(ec2, error, params_for, instance_type)
             if reason is None:
                 raise
             log.warning("Spot launch of %s refused: %s", instance_type, reason)
-        return run(ec2, params_for(False)), "on-demand"
+        # A new request with a new ClientToken. The Spot one started nothing.
+        return self._send(ec2, params_for(False), "on-demand", on_request)
+
+    @staticmethod
+    def _send(ec2, request: dict, market: str, on_request) -> tuple[str, str]:
+        on_request(request, market)
+        return send(ec2, request, market), market
 
     def _learn(
         self,

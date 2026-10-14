@@ -9,10 +9,12 @@ Run from the repo root:
 """
 
 import argparse
+import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from services.autoscaler.burst import config
-from services.autoscaler.burst.aws import ec2_client
+from services.autoscaler.burst.aws import ONE_ATTEMPT, ec2_client
 from services.autoscaler.burst.market import MarketChooser
 from services.autoscaler.burst.slot_store import load_slot
 from services.autoscaler.burst.user_data import render_user_data
@@ -23,6 +25,11 @@ LIVE_STATES = ["pending", "running", "shutting-down", "stopping", "stopped"]
 
 def _ec2():
     return ec2_client()
+
+
+def _launch_ec2():
+    """The client that sends run_instances: no automatic retries (see aws.py)."""
+    return ec2_client(ONE_ATTEMPT)
 
 
 def tags_of(instance: dict) -> dict[str, str]:
@@ -59,6 +66,18 @@ def find_instances(ec2, slot: int | None = None) -> list[dict]:
     return [i for i in found if slot_of(i) == slot]
 
 
+def pinned_template(ec2) -> dict:
+    """The launch template's id and current default version as fixed values.
+    A request that may be replayed later (controller/pending.py) must start
+    the same machine, even if launch_template.py changes the default meanwhile."""
+    found = ec2.describe_launch_templates(LaunchTemplateNames=[config.TEMPLATE_NAME])
+    template = found["LaunchTemplates"][0]
+    return {
+        "LaunchTemplateId": template["LaunchTemplateId"],
+        "Version": str(template["DefaultVersionNumber"]),
+    }
+
+
 def launch_params(
     slot: int,
     wg_conf: str,
@@ -66,12 +85,17 @@ def launch_params(
     spot: bool = False,
     k3s_version: str | None = None,
     instance_type: str | None = None,
+    template: dict | None = None,
+    client_token: str | None = None,
 ) -> dict:
     """The exact run_instances request for one burst worker. No AWS calls here.
-    instance_type overrides the launch template's default size."""
+    instance_type overrides the launch template's default size. template pins
+    the template version (see pinned_template). client_token makes the request
+    safe to replay: AWS starts at most one instance per token."""
     instance_type = instance_type or config.INSTANCE_TYPE
     params = {
-        "LaunchTemplate": {
+        "LaunchTemplate": template
+        or {
             "LaunchTemplateName": config.TEMPLATE_NAME,
             "Version": "$Default",
         },
@@ -91,6 +115,8 @@ def launch_params(
             }
         ],
     }
+    if client_token:
+        params["ClientToken"] = client_token
     if spot:  # BURST_MARKET and market.py decide when, and what happens if refused
         params["InstanceMarketOptions"] = {
             "MarketType": "spot",
@@ -107,10 +133,12 @@ def launch(
     spot: bool = False,
     instance_type: str | None = None,
     chooser: MarketChooser | None = None,
+    on_request: Callable[[dict, str], None] = lambda request, market: None,
 ) -> str:
     """Start one burst worker on this slot. The chooser decides Spot or
     On-Demand (see market.py). Without one, `spot` picks the market and a
-    refusal is raised as it is."""
+    refusal is raised as it is. on_request receives each exact request just
+    before it is sent. An unknown outcome raises market.LaunchUnknown."""
     instance_type = instance_type or config.INSTANCE_TYPE
     if chooser is None:
         chooser = MarketChooser("spot" if spot else "on-demand", cooldown_s=0)
@@ -119,16 +147,28 @@ def launch(
         raise RuntimeError(f"slot {slot} is already in use")
 
     wg_conf, token = load_slot(slot)
+    template = pinned_template(ec2)
 
     def params_for(use_spot: bool) -> dict:
+        # A new ClientToken for every new request. Only an exact replay of a
+        # request (pending.py) reuses its token.
         return launch_params(
-            slot, wg_conf, token, use_spot, instance_type=instance_type
+            slot,
+            wg_conf,
+            token,
+            use_spot,
+            instance_type=instance_type,
+            template=template,
+            client_token=uuid.uuid4().hex,
         )
 
     # The last instance on this slot may have ended without `down` (lifetime limit,
     # failed boot or Spot reclaim). Clear its node so the new one is not rejected.
     remove_node(slot)
-    instance_id, market = chooser.launch(ec2, params_for, instance_type)
+    launcher = _launch_ec2()
+    instance_id, market = chooser.launch(
+        launcher, params_for, instance_type, on_request
+    )
     print(
         f"Launched {instance_id} ({instance_type}, {market}) as "
         f"{config.node_name(slot)} ({config.node_ip(slot)})"

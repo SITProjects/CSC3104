@@ -37,6 +37,10 @@ ORPHAN_GRACE_S = _int("AUTOSCALER_ORPHAN_GRACE_S", 120)
 # How long after a reclaim deadline its replicas still count as demand for
 # proactive replacement. By then they should be requeued as waiting pods.
 RESCUE_KEEP_S = _int("AUTOSCALER_RESCUE_KEEP_S", 120)
+# A launch whose outcome is unknown keeps its slot until its instance is found
+# (controller/pending.py). It is never released automatically. After this long,
+# and again every time this passes, it is logged as a warning.
+PENDING_WARN_S = _int("AUTOSCALER_PENDING_WARN_S", 600)
 # Log what would happen, but change nothing in AWS, Kubernetes or the database
 DRY_RUN = os.environ.get("AUTOSCALER_DRY_RUN", "") == "1"
 
