@@ -21,7 +21,14 @@ services:
       # with --disable-agent, so no Pods start.
       COORDINATOR_URL: ${COORDINATOR_URL:-http://localhost:8001}
       S3_URL: ${S3_URL:-http://minio:9000/csc3104-local}
-      KUBECONFIG: /tmp/kubeconfig
+      KUBECONFIG: /tmp/kubeconfig,
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_PUBLIC_ENDPOINT_URL: http://localhost:19000
+      S3_BUCKET: csc3104-local
+      AWS_ACCESS_KEY_ID: csc3104-local
+      AWS_SECRET_ACCESS_KEY: csc3104-local-secret
+      AWS_DEFAULT_REGION: ap-southeast-1
+      AWS_EC2_METADATA_DISABLED: "true"
     depends_on:
       postgres:
         condition: service_healthy

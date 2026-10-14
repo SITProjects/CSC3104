@@ -9,7 +9,7 @@ services:
     environment:
       DATABASE_URL: postgresql://admin:password123@postgres:5432/csc3104
       S3_ENDPOINT_URL: http://minio:9000
-      S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
+      S3_PUBLIC_ENDPOINT_URL: http://localhost:19000
       S3_BUCKET: csc3104-local
       AWS_ACCESS_KEY_ID: csc3104-local
       AWS_SECRET_ACCESS_KEY: csc3104-local-secret

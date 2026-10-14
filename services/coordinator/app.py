@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 from contextlib import asynccontextmanager, suppress
@@ -11,8 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.settings import COORDINATOR_URL, S3_URL
 from services.coordinator.crud.jobs import get_job
+from services.coordinator.crud.replicas import get_replica_with_task
 from services.coordinator.scheduler import scheduler_loop
-from shared.db import JobView, session_manager
+from shared.db import JobType, JobView, Replica, Task, session_manager
 from shared.migrate import run_migrations
 
 from .crud import create_job, create_replicas, create_tasks, ensure_job_type_exists
@@ -24,6 +27,7 @@ from .models import (
     ProgressIn,
     ResultIn,
 )
+from .storage import presign
 
 log = logging.getLogger("coordinator")
 DbSession = Annotated[AsyncSession, Depends(session_manager.get_session)]
@@ -52,23 +56,39 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Coordinator", lifespan=lifespan)
 
-HASH = "a" * 64  # TODO: remove this once we have a real hash
 S3 = S3_URL
 
 
-def require_token(replica_id: int, authorization: str | None) -> None:
+async def require_token(
+    session: AsyncSession, replica_id: int, authorization: str | None
+) -> tuple[Replica, Task, JobType]:
     """
-    Checks that the request has the correct authorization token for the given id.
+    Checks the request's REPLICA_TOKEN against the hash stored for the replica.
 
     args:
+        session: The database session for this request.
         replica_id: The id of the replica making the request.
-        authorization: The value of the Authorization header from the request.
+        authorization: The value of the Authorization header, "Bearer <REPLICA_TOKEN>".
+    returns:
+        Replica: The replica the token belongs to.
     raises:
-        HTTPException: If the authorization header is missing or incorrect.
+        HTTPException: 401 if the replica does not exist or the token is missing or wrong.
     """
-    if authorization != f"Bearer {HASH}":
+    res = await get_replica_with_task(session, replica_id)
+    if res is None:
+        raise HTTPException(401, "Unauthorized")
+    replica, task, job_type = res
+    token = (authorization or "").removeprefix("Bearer ")
+    if (
+        not replica
+        or not replica.token_hash
+        or not hmac.compare_digest(
+            hashlib.sha256(token.encode()).hexdigest(), replica.token_hash
+        )
+    ):
         log.warning("unauthorized request for replica %d", replica_id)
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(401, "Unauthorized")
+    return replica, task, job_type
 
 
 @app.get("/internal/job/{id}")
@@ -115,77 +135,103 @@ async def create_jobs(req: CreateJobRequest, session: DbSession) -> CreateJobRes
 
 
 @app.get("/internal/replicas/{id}/manifest")
-def get_replica_manifest(id: int, authorization: str | None = Header(None)) -> Manifest:
+async def get_replica_manifest(
+    id: int, session: DbSession, authorization: str | None = Header(None)
+) -> Manifest:
     """
     Fetches the manifest for the given replica id.
 
     args:
         id: The id of the replica to fetch the manifest for.
-        authorization: The value of the Authorization header from the request.
+        session: The database session for this request.
+        authorization: The value of the Authorization header, "Bearer <REPLICA_TOKEN>".
     returns:
         Manifest: A mock manifest for the given replica id.
     """
-    require_token(id, authorization)
+    replica, task, job_type = await require_token(session, id, authorization)
+    if not task:
+        raise HTTPException(404, f"task {replica.task_id} not found")
+    prefix = f"jobs/{task.job_id}/replicas/{replica.id}"
+    first, last = task.input["pages"]
+    ttl = min(job_type.timeout_seconds + 300, 7 * 24 * 3600)
     return Manifest(
-        replica_id=id,
-        task_index=id % 2,
-        input={"pages": [1, 10]},
-        input_urls={"input.pdf": f"{S3}/input.pdf"},
-        output_upload_url=f"{S3}/replicas/{id}/result.json",
-        checkpoint_get_url=None if id % 2 == 0 else f"{S3}/checkpoint.json",
-        checkpoint_put_url=f"{S3}/replicas/{id}/checkpoint.json",
-        attempt=1,
+        replica_id=replica.id,
+        task_index=task.task_index,
+        attempt=replica.attempt,
+        input=task.input,
+        input_urls={
+            f"{p:04d}.png": presign(
+                "get_object", f"jobs/{task.job_id}/pages/{p:04d}.png", ttl
+            )
+            for p in range(first, last + 1)
+        },
+        output_upload_url=presign("put_object", f"{prefix}/result.json", ttl),
+        checkpoint_get_url=presign("get_object", f"{prefix}/checkpoint.json", ttl)
+        if replica.attempt > 1
+        else None,
+        checkpoint_put_url=presign("put_object", f"{prefix}/checkpoint.json", ttl),
     )
 
 
 @app.post("/internal/replicas/{id}/progress")
-def report_progress(
-    id: int, body: ProgressIn, authorization: str | None = Header(None)
+async def report_progress(
+    id: int,
+    body: ProgressIn,
+    session: DbSession,
+    authorization: str | None = Header(None),
 ) -> Ack:
     """
     Reports the progress of the given replica id.
 
     args:
         id: The id of the replica reporting progress.
+        session: The database session for this request.
         body: The progress report from the replica.
-        authorization: The value of the Authorization header from the request.
+        authorization: The value of the Authorization header, "Bearer <REPLICA_TOKEN>".
     returns:
         Ack: An acknowledgment of the progress report.
     """
-    require_token(id, authorization)
+    await require_token(session, id, authorization)
     return Ack()
 
 
 @app.post("/internal/replicas/{id}/result")
-def report_result(
-    id: int, body: ResultIn, authorization: str | None = Header(None)
+async def report_result(
+    id: int,
+    body: ResultIn,
+    session: DbSession,
+    authorization: str | None = Header(None),
 ) -> Ack:
     """
     Reports the result of the given replica id.
 
     args:
         id: The id of the replica reporting the result.
+        session: The database session for this request.
         body: The result report from the replica.
-        authorization: The value of the Authorization header from the request.
+        authorization: The value of the Authorization header, "Bearer <REPLICA_TOKEN>".
     returns:
         Ack: An acknowledgment of the result report.
     """
-    require_token(id, authorization)
+    await require_token(session, id, authorization)
     return Ack()
 
 
 @app.post("/internal/replicas/{id}/evicted")
-def report_evicted(id: int, authorization: str | None = Header(None)) -> Ack:
+async def report_evicted(
+    id: int, session: DbSession, authorization: str | None = Header(None)
+) -> Ack:
     """
     Reports that the given replica has been evicted.
 
     args:
         id: The id of the replica that has been evicted.
-        authorization: The value of the Authorization header from the request.
+        session: The database session for this request.
+        authorization: The value of the Authorization header, "Bearer <REPLICA_TOKEN>".
     returns:
         Ack: An acknowledgment of the evicted report.
     """
-    require_token(id, authorization)
+    await require_token(session, id, authorization)
     return Ack()
 
 
