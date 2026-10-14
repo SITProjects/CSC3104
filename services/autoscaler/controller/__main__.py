@@ -29,9 +29,13 @@ from services.autoscaler.controller.decide import (
     pending_grace,
     split_by_slot,
 )
+from services.autoscaler.controller.rescue import RescueMemory, finished_replicas
 from shared.migrate import run_migrations
 
 log = logging.getLogger("autoscaler")
+
+# What reclaimed workers were running, kept across ticks (see rescue.py)
+RESCUE = RescueMemory()
 
 
 def burst_instances(ec2) -> list[Instance]:
@@ -81,6 +85,15 @@ def account_usage(ec2) -> AccountUsage:
 
 def observe(db: Session, core, ec2, now: datetime) -> Snapshot:
     pods = cluster.task_pods(core)
+    on_node, bound, unplaced, succeeded = cluster.pod_places(pods)
+    # Remembered replicas that need no more work are never replaced. The lookup
+    # is optional, so a failure only skips it (a savepoint keeps the tick alive).
+    finished = set(succeeded)
+    try:
+        with db.begin_nested():
+            finished |= finished_replicas(db, RESCUE.candidates(on_node))
+    except Exception:
+        log.warning("could not read replica states, skipping that check", exc_info=True)
     waiting, unschedulable = cluster.unscheduled_pods(pods, now)
     idle_campus, campus_free, burst_nodes = cluster.read_nodes(
         core, cluster.node_loads(pods)
@@ -103,7 +116,7 @@ def observe(db: Session, core, ec2, now: datetime) -> Snapshot:
             machine = burst_nodes[slot].machine
         claimed[slot] = dataclasses.replace(row, machine=machine)
 
-    return Snapshot(
+    snapshot = Snapshot(
         now=now,
         unscheduled_pods=waiting,
         unschedulable=unschedulable,
@@ -115,7 +128,11 @@ def observe(db: Session, core, ec2, now: datetime) -> Snapshot:
         account=account,
         campus_free=campus_free,
         duplicates=duplicates,
+        bound=bound,
+        waiting=unplaced,
+        finished=finished,
     )
+    return dataclasses.replace(snapshot, rescue=RESCUE.update(snapshot, on_node))
 
 
 def other_owner(snapshot: Snapshot, slot: int, instance_id: str) -> bool:
@@ -207,12 +224,13 @@ def tick(engine, core, ec2) -> None:
         snapshot = observe(db, core, ec2, now)
         log.info(
             "pods waiting %d (unschedulable %d, burst after %.0fs), campus PCs taking pods %d, "
-            "burst slots in use %s",
+            "burst slots in use %s, replicas from reclaimed workers %d",
             snapshot.unscheduled_pods,
             len(snapshot.unschedulable),
             pending_grace(len(snapshot.unschedulable)),
             snapshot.idle_campus_nodes,
             sorted(snapshot.claimed_slots) or "none",
+            len(snapshot.rescue),
         )
         for action in decide(snapshot):
             where = f" slot {action.slot}" if action.slot is not None else ""

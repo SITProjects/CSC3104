@@ -11,7 +11,9 @@ from services.autoscaler.burst import config as burst_config
 from services.autoscaler.controller import settings
 from services.autoscaler.controller.decide import (
     BurstNode,
+    CampusRoom,
     NodeLoad,
+    PodInfo,
     StuckPod,
     parse_utc,
 )
@@ -101,9 +103,45 @@ def unscheduled_pods(pods, now: datetime) -> tuple[int, list[StuckPod]]:
                 mem_mib=mem,
                 # replicas of one task share this label, so they need different nodes
                 group=labels.get(settings.TASK_LABEL, pod.metadata.name),
+                replica=_replica(pod),
             )
         )
     return waiting, unschedulable
+
+
+def _replica(pod) -> str:
+    labels = pod.metadata.labels or {}
+    return labels.get(settings.REPLICA_LABEL, pod.metadata.name)
+
+
+def pod_places(
+    pods,
+) -> tuple[dict[str, list[PodInfo]], dict[str, set[str]], set[str], set[str]]:
+    """Where each task pod's replica is: the pods on each node, the nodes each
+    replica has a pod on, the replicas whose pod has no node yet, and the
+    replicas whose pod succeeded. Pods that are being deleted still count where
+    they are, so a reclaimed worker's pods are remembered until really gone."""
+    on_node: dict[str, list[PodInfo]] = {}
+    bound: dict[str, set[str]] = {}
+    waiting: set[str] = set()
+    succeeded: set[str] = set()
+    for pod in pods:
+        replica = _replica(pod)
+        if pod.status.phase == "Succeeded":
+            succeeded.add(replica)
+        if pod.status.phase not in ("Pending", "Running"):
+            continue
+        if not pod.spec.node_name:
+            waiting.add(replica)
+            continue
+        cpu, mem = _pod_requests(pod)
+        labels = pod.metadata.labels or {}
+        group = labels.get(settings.TASK_LABEL, pod.metadata.name)
+        on_node.setdefault(pod.spec.node_name, []).append(
+            PodInfo(replica, group, cpu, mem, pod.spec.node_name)
+        )
+        bound.setdefault(replica, set()).add(pod.spec.node_name)
+    return on_node, bound, waiting, succeeded
 
 
 def node_loads(pods) -> dict[str, NodeLoad]:
@@ -185,9 +223,11 @@ def read_nodes(
         if _is_ready(node) and not node.spec.unschedulable and not owner_active:
             allocatable = node.status.allocatable or {}
             campus_free.append(
-                (
+                CampusRoom(
                     cpu_millicores(allocatable.get("cpu", "0")) - load.cpu_m,
                     memory_mib(allocatable.get("memory", "0")) - load.mem_mib,
+                    node.metadata.name,
+                    frozenset(load.groups),
                 )
             )
     return len(campus_free), campus_free, burst

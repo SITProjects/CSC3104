@@ -9,6 +9,7 @@ within the free slots, the hourly budget and the AWS account quota.
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import NamedTuple
 
 from services.autoscaler.controller import settings
 from services.autoscaler.controller.settings import CATALOG, MachineType
@@ -23,6 +24,28 @@ class StuckPod:
     cpu_m: int
     mem_mib: float
     group: str  # replicas of one task share a group and need different nodes
+    replica: str = ""  # the coordinator's replica id, from the pod label
+
+
+@dataclass(frozen=True)
+class PodInfo:
+    """A task pod's replica, task and requests, as remembered from a tick."""
+
+    replica: str
+    group: str
+    cpu_m: int
+    mem_mib: float
+    node: str = ""  # the node it was on
+    instance: str = ""  # the warned instance that node ran on (rescue.py sets it)
+
+
+class CampusRoom(NamedTuple):
+    """Free room on a campus PC that takes pods, and the tasks already on it."""
+
+    cpu_m: int
+    mem_mib: float
+    name: str = ""
+    groups: frozenset = frozenset()
 
 
 @dataclass
@@ -102,11 +125,21 @@ class Snapshot:
     # None when EC2 was not checked (dry run).
     instances: dict[int, Instance] | None = None
     account: AccountUsage | None = None
-    # Free (cpu_m, mem_mib) on each campus PC that takes pods
-    campus_free: list[tuple[int, float]] = field(default_factory=list)
+    # Free room on each campus PC that takes pods
+    campus_free: list[CampusRoom] = field(default_factory=list)
     # Extra live instances on a slot that already has one in `instances`.
     # Should never happen, but each still costs money.
     duplicates: list[Instance] = field(default_factory=list)
+    # Proactive replacement. `rescue` holds replicas that ran on a worker when
+    # its reclaim warning arrived (rescue.py remembers them). `bound` maps each
+    # replica to the nodes it has a pod on, and `waiting` lists replicas whose
+    # pod has no node yet.
+    rescue: list[PodInfo] = field(default_factory=list)
+    bound: dict[str, set[str]] = field(default_factory=dict)
+    waiting: set[str] = field(default_factory=set)
+    # Replicas known to need no more work: their pod succeeded, or the
+    # coordinator marks the replica, its task or its job as finished
+    finished: set[str] = field(default_factory=set)
 
 
 # ---------- what the loop should do ----------
@@ -211,6 +244,31 @@ def decide(s: Snapshot) -> list[Action]:
     return plan.actions
 
 
+def reclaim_deadlines(s: Snapshot) -> dict[int, tuple[str, datetime]]:
+    """Each slot with a reclaim warning: the warned instance and its deadline.
+
+    The deadline is the earlier of the EC2 tag on the instance and the node
+    annotation. The annotation only counts when the node's instance label names
+    this same instance, so an old node can never end a new machine.
+    """
+    found = {}
+    instances = s.instances or {}
+    for slot in sorted(set(s.claimed_slots) | set(instances)):
+        instance = instances.get(slot)
+        claimed = s.claimed_slots.get(slot)
+        target = instance.instance_id if instance else claimed.instance_id
+        deadlines = []
+        if instance is not None and instance.reclaim_at is not None:
+            deadlines.append(instance.reclaim_at)
+        node = s.burst_nodes.get(slot)
+        # Only a node that names this instance speaks for it
+        if node is not None and node.reclaim_at and node.instance_id == target:
+            deadlines.append(node.reclaim_at)
+        if deadlines:
+            found[slot] = (target, min(deadlines))
+    return found
+
+
 def _handle_reclaims(s: Snapshot, plan: _Plan) -> None:
     """Burst workers with a reclaim warning.
 
@@ -228,21 +286,7 @@ def _handle_reclaims(s: Snapshot, plan: _Plan) -> None:
     the instance is terminated, its node removed and its slot freed. The check
     runs every INTERVAL_S, so it can be up to one interval late.
     """
-    instances = s.instances or {}
-    for slot in sorted(set(s.claimed_slots) | set(instances)):
-        instance = instances.get(slot)
-        claimed = s.claimed_slots.get(slot)
-        target = instance.instance_id if instance else claimed.instance_id
-        deadlines = []
-        if instance is not None and instance.reclaim_at is not None:
-            deadlines.append(instance.reclaim_at)
-        node = s.burst_nodes.get(slot)
-        # Only a node that names this instance speaks for it
-        if node is not None and node.reclaim_at and node.instance_id == target:
-            deadlines.append(node.reclaim_at)
-        if not deadlines:
-            continue
-        deadline = min(deadlines)
+    for slot, (target, deadline) in reclaim_deadlines(s).items():
         if s.now >= deadline:
             plan.add(
                 "reclaim",
@@ -402,6 +446,13 @@ class _Bin:
         self.cpu_left, self.mem_left = self.machine.cpu_m, self.machine.free_mem_mib
 
     @classmethod
+    def room(cls, cpu_m: float, mem_mib: float, groups) -> "_Bin":
+        """Free room on an existing node, such as a campus PC."""
+        b = cls(settings.CHEAPEST, new=False)
+        b.cpu_left, b.mem_left, b.groups = cpu_m, mem_mib, set(groups)
+        return b
+
+    @classmethod
     def settling(cls, node: "BurstNode") -> "_Bin":
         """A node that just turned Ready, minus what already runs on it."""
         b = cls(settings.KNOWN_TYPES.get(node.machine, settings.CHEAPEST), new=False)
@@ -501,16 +552,32 @@ def running_spend(s: Snapshot) -> tuple[float, list[str]]:
 def _scale_by_demand(s: Snapshot, plan: _Plan, booting: list[ClaimedSlot]) -> None:
     active = _active_nodes(s, plan)
     grace = pending_grace(len(s.unschedulable))
-    stuck = [p for p in s.unschedulable if p.waited_s >= grace]
+    rescued = {r.replica for r in s.rescue}
+    # A requeued replica from a reclaimed worker does not wait for a campus PC
+    stuck = [p for p in s.unschedulable if p.waited_s >= grace or p.replica in rescued]
+    replace, outstanding = _rescue_demand(s, plan, active)
+    demand = stuck + replace
 
-    if stuck:
+    if demand:
+        reason = f"{len(stuck)} task pods stuck for over {grace:.0f}s"
+        if replace:
+            reason = (
+                f"{len(replace)} replicas on reclaimed workers need a new place"
+                + (f", {reason}" if stuck else "")
+            )
         # Reopen nodes we were draining before paying for new ones
         draining = [node for node in active if node.draining]
         if draining:
             for node in draining:
-                plan.add("uncordon", node.slot, f"{len(stuck)} task pods stuck again")
+                plan.add("uncordon", node.slot, reason)
             return
-        _launch_for(stuck, s, plan, booting)
+        _launch_for(demand, s, plan, booting, reason)
+        return
+
+    # While rescued replicas still need a place, their room was just planned on
+    # campus PCs and healthy burst workers. Draining now would take that room
+    # away and reopen it on the next tick, so wait until they are placed.
+    if outstanding:
         return
 
     # Campus PCs have room again and nothing is waiting: start emptying one burst
@@ -532,17 +599,90 @@ def _scale_by_demand(s: Snapshot, plan: _Plan, booting: list[ClaimedSlot]) -> No
             )
 
 
+def _rescue_demand(
+    s: Snapshot, plan: _Plan, active: list[BurstNode]
+) -> tuple[list[StuckPod], bool]:
+    """Replicas from reclaimed workers that still need room elsewhere. Returns
+    the ones that need new machines, and whether any still need a place.
+
+    A remembered replica counts while it is not finished, has no pod waiting,
+    and has no pod on a healthy node. Each counts once, by replica id. Free room
+    on campus PCs and on healthy burst workers is used first, with replicas of
+    one task on different nodes. What is left needs new machines.
+    """
+    leaving = _leaving_nodes(s, plan)
+    needed, seen = [], set()
+    for r in s.rescue:
+        if r.replica in seen or r.replica in s.waiting or r.replica in s.finished:
+            continue
+        seen.add(r.replica)
+        # Placed once it has a pod on any node that is not leaving
+        if not s.bound.get(r.replica, set()) - leaving:
+            needed.append(r)
+    if not needed:
+        return [], False
+
+    rooms = []
+    for room in map(CampusRoom._make, s.campus_free):
+        rooms.append(_Bin.room(room.cpu_m, room.mem_mib, room.groups))
+    for node in active:
+        # Nodes that just turned Ready are counted by _launch_for instead, so
+        # their room is never promised twice
+        if not node.draining and not _settling(s, node):
+            rooms.append(_Bin.settling(node))
+    left = []
+    for r in sorted(needed, key=lambda r: (r.cpu_m, r.mem_mib), reverse=True):
+        pod = StuckPod(
+            f"replica-{r.replica}", 0, r.cpu_m, r.mem_mib, r.group, r.replica
+        )
+        target = next((b for b in rooms if b.takes(pod)), None)
+        if target is None:
+            left.append(pod)
+        else:
+            target.place(pod)
+    return left, True
+
+
+def _leaving_nodes(s: Snapshot, plan: _Plan) -> set[str]:
+    """Names of nodes whose pods do not count as placed: reclaimed workers,
+    including ones already deleted. A node name is reused when a new worker
+    joins the same slot. If the node now under that name runs a different
+    instance and is not itself being reclaimed, it is a healthy replacement."""
+    leaving = {
+        s.burst_nodes[slot].name
+        for slot in plan.reclaiming | plan.gone
+        if slot in s.burst_nodes
+    }
+    by_name = {node.name: node for node in s.burst_nodes.values()}
+    for r in s.rescue:
+        now = by_name.get(r.node)
+        replaced = now is not None and now.instance_id not in ("", r.instance)
+        if not replaced:
+            leaving.add(r.node)
+    return leaving
+
+
+def _settling(s: Snapshot, node: BurstNode) -> bool:
+    """Turned Ready less than READY_SETTLE_S ago."""
+    return (
+        node.ready_since is not None
+        and _age(s.now, node.ready_since) < settings.READY_SETTLE_S
+    )
+
+
 def _campus_can_take(s: Snapshot, node: BurstNode) -> bool:
     if node.load.smallest is None:
         return False
     cpu, mem = node.load.smallest
-    return any(
-        free_cpu >= cpu and free_mem >= mem for free_cpu, free_mem in s.campus_free
-    )
+    return any(room[0] >= cpu and room[1] >= mem for room in s.campus_free)
 
 
 def _launch_for(
-    stuck: list[StuckPod], s: Snapshot, plan: _Plan, booting: list[ClaimedSlot]
+    stuck: list[StuckPod],
+    s: Snapshot,
+    plan: _Plan,
+    booting: list[ClaimedSlot],
+    reason: str,
 ) -> None:
     too_big = [p.name for p in stuck if smallest_fit(p) is None]
     if too_big:
@@ -577,9 +717,7 @@ def _launch_for(
     bins += [
         _Bin.settling(node)
         for node in _active_nodes(s, plan)
-        if not node.draining
-        and node.ready_since is not None
-        and _age(s.now, node.ready_since) < settings.READY_SETTLE_S
+        if not node.draining and _settling(s, node)
     ]
     unaffordable: list[str] = []
     while True:
@@ -604,12 +742,7 @@ def _launch_for(
             unaffordable.append(f"{first.opener.name} needs a {machine.name}")
             pods.remove(first.opener)
             continue
-        plan.add(
-            "launch",
-            None,
-            f"{len(stuck)} task pods stuck for over {pending_grace(len(s.unschedulable)):.0f}s",
-            machine=machine.name,
-        )
+        plan.add("launch", None, reason, machine=machine.name)
         bins.append(_Bin(machine, new=False))
         free_slots -= 1
         spend += machine.cost_per_hour

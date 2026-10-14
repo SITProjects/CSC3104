@@ -275,3 +275,40 @@ Apply with kustomize, which builds the ConfigMap from `watcher.py`:
 ```sh
 kubectl apply -k services/autoscaler/spotwatch
 ```
+
+### Starting the replacement early
+
+A new worker takes 2 to 3 minutes to boot, longer than the 2-minute warning.
+So the autoscaler does not wait for the evicted pods to come back as stuck
+pods. The moment a worker is warned, it counts the replicas that worker was
+running as demand and plans room for them at once (`controller/rescue.py`
+and `decide._rescue_demand`):
+
+- Every tick it remembers which replicas (by the `idlecloud/replica-id` pod
+  label) each node ran, and which instance that node ran on, because the
+  watcher's taint may evict them before the next tick. When an instance is
+  warned, it keeps the replicas of that instance only, even if its node is
+  already deleted. They are kept until 2 minutes after the deadline
+  (`AUTOSCALER_RESCUE_KEEP_S`).
+- A replica stops counting once it has a pod on a healthy node, a pod waiting
+  for a node, or needs no more work: its pod succeeded, or the coordinator marks
+  the replica DONE or FAILED, its task VERIFIED or FAILED, or its job COMPLETED,
+  FAILED or CANCELLED. A new worker that reuses the old node name counts as
+  healthy. A waiting pod is handled by the normal scale-up, but without the
+  usual wait for a campus PC. Each replica counts once.
+- Free room on campus PCs comes first, then healthy burst workers, then workers
+  still booting, then new machines. Replicas of one task always go to different
+  nodes. No burst worker is drained while rescued replicas still wait, so the
+  room just planned for them is not taken away. The budget, quotas and free
+  slots apply as usual, and the warned worker still counts against the budget
+  until it is gone. With the minimum budget the replacement therefore waits
+  until then.
+
+This is only a speed-up, and it does not move any work by itself. Running an
+evicted replica again is the coordinator's job (member 3). On main today the
+coordinator only acknowledges an eviction report and does not requeue it yet.
+Once it creates the new pods, the normal scale-up places them, with or without
+this step. If the autoscaler restarts, the memory starts empty and only that
+normal path remains. If a replica is never requeued, the early machine stays
+empty and is retired after 5 minutes. Later, once the coordinator records each
+replica's node (`replicas.node_name`), that can replace the in-memory record.

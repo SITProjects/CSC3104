@@ -34,6 +34,9 @@ BOOT_TIMEOUT_S = _int("AUTOSCALER_BOOT_TIMEOUT_S", 600)
 # An EC2 instance or slot row younger than this is never treated as an orphan,
 # so a launch that is still being recorded is not cleaned up by mistake
 ORPHAN_GRACE_S = _int("AUTOSCALER_ORPHAN_GRACE_S", 120)
+# How long after a reclaim deadline its replicas still count as demand for
+# proactive replacement. By then they should be requeued as waiting pods.
+RESCUE_KEEP_S = _int("AUTOSCALER_RESCUE_KEEP_S", 120)
 # Log what would happen, but change nothing in AWS, Kubernetes or the database
 DRY_RUN = os.environ.get("AUTOSCALER_DRY_RUN", "") == "1"
 
@@ -138,6 +141,7 @@ ACCOUNT_MAX_VCPU = _int("AWS_MAX_VCPU", 32)
 ROLE_LABEL = "idlecloud/role"
 POOL_LABEL = "idlecloud/pool"
 TASK_LABEL = "idlecloud/task-id"
+REPLICA_LABEL = "idlecloud/replica-id"  # set by the coordinator on each pod
 TYPE_LABEL = "idlecloud/instance-type"
 # The EC2 instance id a burst node runs on, set by the node itself at join
 INSTANCE_ID_LABEL = "idlecloud/instance-id"
