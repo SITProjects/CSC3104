@@ -259,7 +259,7 @@ def launch_one(action: Action, db: Session, snapshot: Snapshot) -> None:
         PENDING.drop(slot)
         raise
     entry.found(instance_id)
-    slots.record_launch(row, instance_id)
+    slots.record_launch(db, row, instance_id)
     entry.staged = True  # kept until the tick's transaction commits
 
 

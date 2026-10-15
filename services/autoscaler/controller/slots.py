@@ -6,12 +6,16 @@ import os
 from datetime import UTC, datetime
 
 from sqlalchemy import Engine, create_engine, func, select, text, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from services.autoscaler.burst import config as burst_config
 from services.autoscaler.controller import settings
 from services.autoscaler.controller.model import ClaimedSlot
-from shared.db.models import BurstSlot
+from shared.db.models import BurstSlot, Node
+
+# We own burst workers, so each new machine starts fully trusted (plan step 5)
+BURST_TRUST = 1.0
 
 
 def connect() -> Engine:
@@ -80,11 +84,33 @@ def lock_slot(db: Session, slot: int) -> BurstSlot | None:
     ).scalar_one_or_none()
 
 
-def record_launch(row: BurstSlot, instance_id: str) -> None:
+def record_launch(db: Session, row: BurstSlot, instance_id: str) -> None:
+    """Save a new machine on its slot and reset its node's trust, in the same
+    transaction. A replay of an instance the row already holds never comes
+    here, so a machine's earned score is never reset. It only runs again for
+    the same instance if the first transaction rolled back."""
     slot = slot_number(row.ip)
     row.instance_id = instance_id
     row.node_name = burst_config.node_name(slot)
     row.claimed_at = datetime.now(UTC)
+    reset_trust(db, row.node_name)
+
+
+def reset_trust(db: Session, name: str) -> None:
+    """Node names are reused per slot, so a new machine must not inherit the
+    old one's score. Only trust_score changes. The counters, state and
+    heartbeat belong to the verifier and the coordinator.
+
+    An error here fails the caller's savepoint like any slot error. The launch
+    then stays held with its instance id, and the record is retried next tick
+    with no new EC2 launch (see pending.py)."""
+    db.execute(
+        insert(Node)
+        .values(name=name, trust_score=BURST_TRUST)
+        .on_conflict_do_update(
+            index_elements=[Node.name], set_={"trust_score": BURST_TRUST}
+        )
+    )
 
 
 def release(db: Session, slot: int) -> None:
