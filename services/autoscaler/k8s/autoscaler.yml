@@ -180,6 +180,12 @@ spec:
             # README. Use auto once evicted replicas are requeued.
             # - name: BURST_MARKET
             #   value: auto
+            # Lifetime limit for each worker (default 120). Shorten only for
+            # the live demo. See "Lifetime limit" in the README.
+            # - name: BURST_MAX_LIFETIME_MIN
+            #   value: "15"
+            # - name: AUTOSCALER_RETIRE_CORDON_LEAD_S
+            #   value: "300"
           resources:
             requests:
               cpu: 50m

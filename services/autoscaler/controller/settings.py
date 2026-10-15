@@ -41,6 +41,18 @@ RESCUE_KEEP_S = _int("AUTOSCALER_RESCUE_KEEP_S", 120)
 # (controller/pending.py). It is never released automatically. After this long,
 # and again every time this passes, it is logged as a warning.
 PENDING_WARN_S = _int("AUTOSCALER_PENDING_WARN_S", 600)
+# Lifetime limit (controller/lifetime.py). No burst worker runs longer than
+# MAX_LIFETIME_S after its EC2 launch time. RETIRE_CORDON_LEAD_S before that it
+# takes no new pods, so running ones can finish. RETIRE_WARN_LEAD_S before that
+# it gets the same warning as a Spot reclaim.
+MAX_LIFETIME_S = burst_config.MAX_LIFETIME_MIN * 60
+RETIRE_CORDON_LEAD_S = _int("AUTOSCALER_RETIRE_CORDON_LEAD_S", 600)
+RETIRE_WARN_LEAD_S = burst_config.RECLAIM_WARNING_S
+if not 0 < RETIRE_WARN_LEAD_S <= RETIRE_CORDON_LEAD_S < MAX_LIFETIME_S:
+    raise ValueError(
+        "need 0 < warning lead <= cordon lead < lifetime, got "
+        f"{RETIRE_WARN_LEAD_S}, {RETIRE_CORDON_LEAD_S}, {MAX_LIFETIME_S} seconds"
+    )
 # Log what would happen, but change nothing in AWS, Kubernetes or the database
 DRY_RUN = os.environ.get("AUTOSCALER_DRY_RUN", "") == "1"
 

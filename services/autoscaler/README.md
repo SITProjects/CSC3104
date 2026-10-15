@@ -30,6 +30,7 @@ controller in `controller/`, which calls the same functions on its own.
 | `burst/market.py` | Spot or On-Demand for each launch (`BURST_MARKET`), and what a launch answer means |
 | `controller/settings.py` | Machine sizes and prices, budget, AWS quotas, timings |
 | `controller/decide.py` | The scaling rules and bin packing, as pure functions |
+| `controller/lifetime.py` | The 2 hour lifetime limit, worked out from the EC2 launch time |
 | `controller/cluster.py` | Reads task pods and nodes, cordons burst nodes |
 | `controller/slots.py` | Claims and frees rows in the `burst_slots` table |
 | `controller/pending.py` | Holds a launch's slot until its instance is found and saved |
@@ -44,14 +45,17 @@ controller in `controller/`, which calls the same functions on its own.
    `slot-204`. Each value is the full `wg0.conf` for that peer.
 3. A Secret `k3s-agent-token` in `idlecloud-system` with key `token`.
 4. The K3s server version, for `K3S_VERSION`.
+5. `ec2:CreateTags` on the control plane's role (LabRole), for the lifetime
+   warning. Without it the worker still ends on time, only without the warning.
 
 ## Security choices
 
 Burst nodes have no IAM role, because workers never hold AWS keys. IMDSv2 is
 required with a hop limit of 1, so pods cannot reach the metadata service. The
 security group has no inbound rules, since all cluster traffic comes through the
-WireGuard tunnel the node opens itself. Every instance terminates itself after
-120 minutes, even if the autoscaler is down.
+WireGuard tunnel the node opens itself. The autoscaler ends every worker at
+120 minutes (see "Lifetime limit"), and each instance also terminates itself
+after 120 minutes of uptime, even if the autoscaler is down.
 
 Known limit: the slot's WireGuard private key and the K3s token travel in EC2
 user data. Anyone with `ec2:DescribeInstanceAttribute` in the AWS account can
@@ -211,7 +215,8 @@ A node annotation only counts when that label names the instance on the slot,
 so a warning left on an old node can never end a new machine.
 
 Until the deadline the worker is "reclaiming". It gives no room to waiting
-pods, and it is never reopened, drained or retired early. It still counts
+pods, and it is never reopened, drained or retired early (only the lifetime
+limit may cordon it, see "Lifetime limit"). It still counts
 against the budget, because it still costs money. At the deadline the
 autoscaler terminates that instance, removes its node and frees its slot. The
 check runs every 30 seconds, so the machine can go up to 30 seconds late.
@@ -467,7 +472,8 @@ instance id is committed to `burst_slots`.
   listed its known instance for 2 minutes. Its own instance's reclaim warning
   counts too, even when it is a second instance on the slot. Each check runs
   on its own. It is never killed as an orphan.
-  It is outside the boot and orphan timeouts.
+  It is outside the boot and orphan timeouts. Its instance still ends at the
+  lifetime limit like any worker, and the slot stays held after that.
 - Each tick tries to settle it. If EC2 lists exactly one burst instance on that
   slot with that token, it is adopted. Otherwise the identical request is sent
   again with the same token. AWS then returns the instance the first request
@@ -498,3 +504,48 @@ orphan once EC2 lists it, and its slot can be reused before that. Covering
 restarts needs the token stored in `burst_slots`, a follow-up with member 3.
 AWS does not document what a replay returns after the first request failed,
 or how long a token stays valid. A live test should check both.
+
+## Lifetime limit (Step 5a)
+
+Cost control from the plan: no burst worker runs longer than 2 hours. The
+autoscaler retires each worker in three stages, all worked out from the
+instance's EC2 launch time (`controller/lifetime.py`). Nothing is stored, so a
+restarted autoscaler keeps the same schedule.
+
+| Time after launch | What happens |
+| --- | --- |
+| 110 min | The node is cordoned. Running pods carry on, nothing new starts. It is never reopened, even when pods are waiting, and its room is never counted for waiting or rescued pods. If it empties, it is retired straight away |
+| 118 min | The instance gets the EC2 tag `reclaim-at` = launch time + 120 min, the same warning as `launch reclaim`. The Spot watcher then taints the node, writes its annotations and reports BUSY. Its replicas get replacement workers early, as for a Spot warning |
+| 120 min | The reclaim rule terminates that exact instance, removes its own node and frees its slot |
+
+Why it is safe:
+
+- **Earliest deadline wins.** A Spot warning or an injected one that ends
+  sooner is kept. A later tag is moved earlier, never later.
+- **The end does not depend on the warning.** The 120 minute end comes from the
+  launch time, so it still happens if the tag write fails, the watcher is
+  not running or the node is gone.
+- **Only the right machine.** The cordon only touches a node whose
+  `idlecloud/instance-id` label names the aged instance, pinned to its uid.
+  The end only targets that instance id. A young replacement on the same slot
+  is never touched.
+- **Every live burst instance is covered.** A second instance on a slot, an
+  orphan and a launch still being recorded all end at their limit too.
+- **Backstop.** The boot script's `shutdown -h +120` counts from boot, which is
+  after the launch time, so the autoscaler normally acts first.
+
+120 minutes is a target. A tick runs every 30 seconds plus the time it takes,
+so the end can be up to one tick late, longer if AWS calls fail. Work evicted
+at 118 minutes is only recovered once the coordinator requeues evicted
+replicas (member 3).
+
+Settings: `BURST_MAX_LIFETIME_MIN` (default 120, also used by the boot script),
+`AUTOSCALER_RETIRE_CORDON_LEAD_S` (default 600). The warning lead is the Spot
+warning's 120 s. The autoscaler refuses to start unless
+warning lead <= cordon lead < lifetime.
+
+**Live demo.** Run the autoscaler with `BURST_MAX_LIFETIME_MIN=15` and
+`AUTOSCALER_RETIRE_CORDON_LEAD_S=300`, then start a worker with a long-running
+task pod. Expect the cordon at 10 minutes, the `reclaim-at` tag and the
+watcher's taint at 13 minutes, and termination at 15 minutes. Check with
+`kubectl get node burst-200 -o yaml`, `launch list` and the autoscaler log.
