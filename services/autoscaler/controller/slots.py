@@ -10,7 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from services.autoscaler.burst import config as burst_config
-from services.autoscaler.controller import settings
+from services.autoscaler.controller import settings, usage
 from services.autoscaler.controller.model import ClaimedSlot
 from shared.db.models import BurstSlot, Node
 
@@ -84,15 +84,19 @@ def lock_slot(db: Session, slot: int) -> BurstSlot | None:
     ).scalar_one_or_none()
 
 
-def record_launch(db: Session, row: BurstSlot, instance_id: str) -> None:
-    """Save a new machine on its slot and reset its node's trust, in the same
-    transaction. A replay of an instance the row already holds never comes
-    here, so a machine's earned score is never reset. It only runs again for
-    the same instance if the first transaction rolled back."""
+def record_launch(
+    db: Session, row: BurstSlot, instance_id: str, machine: str, market: str = ""
+) -> None:
+    """Save a new machine on its slot, start its cost record and reset its
+    node's trust, all in the same transaction. A replay of an instance the row
+    already holds never comes here, so a machine's earned score is never
+    reset. It only runs again for the same instance if the first transaction
+    rolled back."""
     slot = slot_number(row.ip)
     row.instance_id = instance_id
     row.node_name = burst_config.node_name(slot)
     row.claimed_at = datetime.now(UTC)
+    usage.start_machine(db, instance_id, slot, row.node_name, machine, market)
     reset_trust(db, row.node_name)
 
 
@@ -114,6 +118,12 @@ def reset_trust(db: Session, name: str) -> None:
 
 
 def release(db: Session, slot: int) -> None:
+    """Free the slot and close the cost record of the machine it held."""
+    instance_id = db.execute(
+        select(BurstSlot.instance_id).where(BurstSlot.ip == slot_ip(slot))
+    ).scalar_one_or_none()
+    if instance_id is not None:
+        usage.end_machine(db, instance_id)
     db.execute(
         update(BurstSlot)
         .where(BurstSlot.ip == slot_ip(slot))

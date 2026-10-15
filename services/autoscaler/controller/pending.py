@@ -149,7 +149,7 @@ def record(db: Session, entry: PendingLaunch) -> bool:
             entry.instance_id,
         )
         return False
-    slots.record_launch(db, row, entry.instance_id)
+    slots.record_launch(db, row, entry.instance_id, entry.machine, entry.market)
     entry.staged = True
     return True
 
