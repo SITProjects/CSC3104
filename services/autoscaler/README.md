@@ -621,3 +621,10 @@ autoscaler ends is still in the budget but not in these views. The end time
 comes from releasing the slot, so it is approximate and can be a tick late. A finished pod is deleted 10 minutes after it
 ends, so if the autoscaler is down longer than that, the run is missing and
 its cost shows as unattributed.
+
+`unattributed_usd` can be negative. The CPU share uses the machine size from
+settings, not the node's real allocatable CPU, and a run with no finish time
+counts until it was last seen, which can be later than it really ended if its
+pod status was stale. A negative value means the estimated records disagree,
+not that idle time cost less than nothing. It is left unclamped, so attributed
+plus unattributed still equals the total.
