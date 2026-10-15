@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import NamedTuple
 
-from services.autoscaler.controller import settings
+from services.autoscaler.controller import lifetime, settings
 from services.autoscaler.controller.settings import CATALOG, MachineType
 
 # ---------- what the loop observed ----------
@@ -168,12 +168,14 @@ class Snapshot:
 @dataclass(frozen=True)
 class Action:
     # launch, uncordon, drain, mark_empty, clear_empty, retire, free_slot,
-    # kill_orphan, kill_duplicate, reclaim, or hold (nothing to do, only logged)
+    # kill_orphan, kill_duplicate, reclaim, warn_retire,
+    # or hold (nothing to do, only logged)
     kind: str
     slot: int | None = None
     reason: str = ""
     instance_id: str | None = None
     machine: str | None = None
+    deadline: datetime | None = None  # warn_retire: the reclaim-at tag to write
 
 
 @dataclass
@@ -182,11 +184,15 @@ class _Plan:
     gone: set[int] = field(default_factory=set)  # slots being removed this tick
     # Slots with a reclaim warning whose deadline has not passed. They give no
     # room and are never reopened, drained or retired by the normal rules.
+    # Only the lifetime rule may cordon one (_retire_by_age).
     reclaiming: set[int] = field(default_factory=set)
     # Instances reclaimed this tick, so no other rule acts on them again
     reclaimed: set[str] = field(default_factory=set)
     # Instances inside their warning period. Nothing ends them before the deadline.
     warned: set[str] = field(default_factory=set)
+    # Slots whose worker is near its lifetime limit (lifetime.py). They give no
+    # room and are never reopened. Worked out from the launch time every tick.
+    retiring: set[int] = field(default_factory=set)
 
     def add(self, kind: str, slot: int | None = None, reason: str = "", **extra):
         self.actions.append(Action(kind, slot, reason, **extra))
@@ -274,12 +280,15 @@ def _pending_room(s: Snapshot, plan: _Plan) -> list["_Bin"]:
     bins = []
     live = {} if s.instances is None else {i.instance_id: i for i in _live(s)}
     for p in s.pending:
-        if p.slot in plan.reclaiming or p.slot in plan.gone:
+        if p.slot in plan.reclaiming or p.slot in plan.gone or p.slot in plan.retiring:
             continue
         mine = live.get(p.instance_id) or next(
             (i for i in live.values() if _pending_owner(s, i) is p), None
         )
         if mine is not None and mine.reclaim_at is not None:
+            continue
+        # Its own instance near its lifetime limit, even beside a young primary
+        if mine is not None and lifetime.retiring(mine.launched_at, s.now):
             continue
         if (
             s.instances is not None
@@ -351,6 +360,7 @@ def smallest_fit(pod: StuckPod) -> MachineType | None:
 def decide(s: Snapshot) -> list[Action]:
     plan = _Plan()
     _handle_reclaims(s, plan)
+    _retire_by_age(s, plan)
     _reconcile_with_ec2(s, plan)
     booting = _check_booting(s, plan)
     _scale_down_empty(s, plan)
@@ -361,9 +371,12 @@ def decide(s: Snapshot) -> list[Action]:
 def reclaim_deadlines(s: Snapshot) -> dict[int, tuple[str, datetime]]:
     """Each slot with a reclaim warning: the warned instance and its deadline.
 
-    The deadline is the earlier of the EC2 tag on the instance and the node
-    annotation. The annotation only counts when the node's instance label names
-    this same instance, so an old node can never end a new machine.
+    The deadline is the earliest of the EC2 tag on the instance, the node
+    annotation and, once the warning is due, the instance's lifetime limit
+    (lifetime.py). The annotation only counts when the node's instance label
+    names this same instance, so an old node can never end a new machine. The
+    lifetime limit comes from the EC2 launch time, so it holds even when the tag
+    write failed or no watcher runs.
     """
     found = {}
     instances = s.instances or {}
@@ -374,6 +387,8 @@ def reclaim_deadlines(s: Snapshot) -> dict[int, tuple[str, datetime]]:
         deadlines = []
         if instance is not None and instance.reclaim_at is not None:
             deadlines.append(instance.reclaim_at)
+        if instance is not None and lifetime.warning_due(instance.launched_at, s.now):
+            deadlines.append(lifetime.end_of_life(instance.launched_at))
         node = s.burst_nodes.get(slot)
         # Only a node that names this instance speaks for it
         if node is not None and node.reclaim_at and node.instance_id == target:
@@ -416,6 +431,50 @@ def _handle_reclaims(s: Snapshot, plan: _Plan) -> None:
                 slot,
                 f"{target} is being reclaimed, ends at {deadline:%H:%M:%S} UTC "
                 f"({_age(deadline, s.now):.0f}s left)",
+            )
+
+
+def _retire_by_age(s: Snapshot, plan: _Plan) -> None:
+    """Workers near their lifetime limit (lifetime.py). The end itself is
+    handled by the reclaim rule, through reclaim_deadlines.
+
+    - Cordon: the node takes no new pods. Only a node whose instance label
+      names this instance, pinned to its uid, so a replacement is never touched.
+      It is never reopened, because this runs again every tick. This also
+      covers a node that is already being reclaimed, so it takes no new pods
+      even when the tag write failed and no watcher taint arrives.
+    - Warning: write reclaim-at = the end of life on the instance, unless it
+      already has the same or an earlier deadline. The Spot watcher then runs
+      its normal reclaim handling. Repeated each tick until EC2 shows the tag.
+    """
+    for slot, instance in (s.instances or {}).items():
+        if instance.instance_id in plan.reclaimed:
+            continue
+        end = lifetime.end_of_life(instance.launched_at)
+        if not lifetime.retiring(instance.launched_at, s.now):
+            continue
+        plan.retiring.add(slot)
+        if lifetime.warning_due(instance.launched_at, s.now) and (
+            instance.reclaim_at is None or instance.reclaim_at > end
+        ):
+            plan.add(
+                "warn_retire",
+                slot,
+                f"{instance.instance_id} reaches its lifetime limit at "
+                f"{end:%H:%M:%S} UTC",
+                instance_id=instance.instance_id,
+                deadline=end,
+            )
+        node = s.burst_nodes.get(slot)
+        if (
+            node is not None
+            and node.instance_id == instance.instance_id
+            and not node.draining
+        ):
+            plan.add(
+                "drain",
+                slot,
+                f"lifetime limit at {end:%H:%M:%S} UTC, no new pods",
             )
 
 
@@ -465,6 +524,15 @@ def _reconcile_with_ec2(s: Snapshot, plan: _Plan) -> None:
     for extra in s.duplicates:
         if extra.instance_id in recorded:
             continue  # cannot happen: split_by_slot keeps the recorded one
+        # Past its lifetime it ends whatever else holds it
+        if lifetime.expired(extra.launched_at, s.now):
+            plan.add(
+                "kill_duplicate",
+                extra.slot,
+                "a second instance on this slot, past its lifetime limit",
+                instance_id=extra.instance_id,
+            )
+            continue
         if _pending_owner(s, extra) is not None:
             plan.add(
                 "hold", extra.slot, f"{extra.instance_id} started, not recorded yet"
@@ -509,7 +577,8 @@ def _check_booting(s: Snapshot, plan: _Plan) -> list[ClaimedSlot]:
                 f"did not join within {settings.BOOT_TIMEOUT_S}s",
                 instance_id=claimed.instance_id,
             )
-        else:
+        elif slot not in plan.retiring:
+            # Near its lifetime limit it gives no room, even while booting
             booting.append(claimed)
     return booting
 
@@ -536,7 +605,9 @@ def _scale_down_empty(s: Snapshot, plan: _Plan) -> None:
             plan.add(
                 "retire",
                 node.slot,
-                "drained, campus PCs took over",
+                "emptied before its lifetime limit"
+                if node.slot in plan.retiring
+                else "drained, campus PCs took over",
                 instance_id=s.claimed_slots[node.slot].instance_id,
             )
         elif node.empty_since is None:
@@ -689,7 +760,10 @@ def _scale_by_demand(s: Snapshot, plan: _Plan, booting: list[ClaimedSlot]) -> No
                 + (f", {reason}" if stuck else "")
             )
         # Reopen nodes we were draining before paying for new ones
-        draining = [node for node in active if node.draining]
+        # Never one near its lifetime limit
+        draining = [
+            node for node in active if node.draining and node.slot not in plan.retiring
+        ]
         if draining:
             for node in draining:
                 plan.add("uncordon", node.slot, reason)
@@ -711,7 +785,10 @@ def _scale_by_demand(s: Snapshot, plan: _Plan, booting: list[ClaimedSlot]) -> No
         candidates = [
             node
             for node in active
-            if not node.draining and node.task_pods > 0 and _campus_can_take(s, node)
+            if not node.draining
+            and node.slot not in plan.retiring
+            and node.task_pods > 0
+            and _campus_can_take(s, node)
         ]
         if candidates:
             node = min(candidates, key=lambda n: n.task_pods)
@@ -751,7 +828,11 @@ def _rescue_demand(
     for node in active:
         # Nodes that just turned Ready are counted by _launch_for instead, so
         # their room is never promised twice
-        if not node.draining and not _settling(s, node):
+        if (
+            not node.draining
+            and node.slot not in plan.retiring
+            and not _settling(s, node)
+        ):
             rooms.append(_Bin.settling(node))
     left = []
     for r in sorted(needed, key=lambda r: (r.cpu_m, r.mem_mib), reverse=True):
@@ -853,7 +934,7 @@ def _launch_for(
     bins += [
         _Bin.settling(node)
         for node in _active_nodes(s, plan)
-        if not node.draining and _settling(s, node)
+        if not node.draining and node.slot not in plan.retiring and _settling(s, node)
     ]
     unaffordable: list[str] = []
     while True:

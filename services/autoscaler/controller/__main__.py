@@ -215,6 +215,11 @@ def apply(action: Action, db: Session, core, ec2, snapshot: Snapshot) -> None:
         claimed = snapshot.claimed_slots.get(action.slot)
         if claimed is not None and claimed.instance_id == action.instance_id:
             slots.release(db, action.slot)
+    elif action.kind == "warn_retire":
+        # Lifetime limit (lifetime.py): the same warning as a Spot reclaim, so
+        # the watcher taints the node and reports BUSY. The deadline comes from
+        # the launch time, so a retry writes the same value.
+        burst.tag_reclaim(ec2, action.instance_id, action.deadline)
     elif action.kind == "kill_duplicate":
         # The node and slot belong to the instance that is kept
         ec2.terminate_instances(InstanceIds=[action.instance_id])
@@ -322,7 +327,8 @@ def main() -> None:
     ec2 = None if settings.DRY_RUN else ec2_client()
     log.info(
         "autoscaler started%s: every %ss, sizes %s, market %s, budget US$%.4f/h, "
-        "burst after %s to %ss stuck, retire after %ss empty",
+        "burst after %s to %ss stuck, retire after %ss empty, "
+        "lifetime %ss (no new pods %ss before, warning %ss before)",
         " (DRY RUN)" if settings.DRY_RUN else "",
         settings.INTERVAL_S,
         ", ".join(settings.CATALOG),
@@ -331,6 +337,9 @@ def main() -> None:
         settings.MIN_PENDING_GRACE_S,
         settings.PENDING_GRACE_S,
         settings.EMPTY_GRACE_S,
+        settings.MAX_LIFETIME_S,
+        settings.RETIRE_CORDON_LEAD_S,
+        settings.RETIRE_WARN_LEAD_S,
     )
     while not stop.is_set():
         try:

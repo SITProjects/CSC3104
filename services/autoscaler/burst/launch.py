@@ -235,6 +235,17 @@ def metadata_problem(instance: dict) -> str | None:
     return None
 
 
+def tag_reclaim(ec2, instance_id: str, deadline: datetime) -> str:
+    """Write the reclaim-at tag the Spot watcher reads, as a UTC time like
+    2026-11-01T12:02:00Z. Writing the same value again changes nothing.
+    Returns the value written."""
+    value = deadline.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ec2.create_tags(
+        Resources=[instance_id], Tags=[{"Key": config.RECLAIM_TAG_KEY, "Value": value}]
+    )
+    return value
+
+
 def reclaim(slot: int) -> str:
     """Inject a Spot reclaim warning by tagging the worker on this slot with a
     deadline two minutes from now. Only the warning is fake. The Spot watcher on
@@ -267,10 +278,7 @@ def reclaim(slot: int) -> str:
         )
 
     deadline = datetime.now(UTC) + timedelta(seconds=config.RECLAIM_WARNING_S)
-    value = deadline.strftime("%Y-%m-%dT%H:%M:%SZ")
-    ec2.create_tags(
-        Resources=[instance_id], Tags=[{"Key": config.RECLAIM_TAG_KEY, "Value": value}]
-    )
+    value = tag_reclaim(ec2, instance_id, deadline)
     print(
         f"Reclaim warning set on {instance_id} ({config.node_name(slot)}), "
         f"deadline {value}"
