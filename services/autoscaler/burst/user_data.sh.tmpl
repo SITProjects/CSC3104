@@ -135,6 +135,7 @@ curl -sfL https://get.k3s.io | \
     --flannel-iface wg0 \
     --node-label idlecloud/role=worker \
     --node-label idlecloud/pool=cloud \
+    --node-label idlecloud/trust=high \
     --node-label "idlecloud/burst-slot=$SLOT" \
     --node-label "idlecloud/instance-type={{INSTANCE_TYPE}}" \
     --node-label "idlecloud/instance-id=$INSTANCE_ID" \

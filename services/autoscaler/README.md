@@ -16,6 +16,25 @@ A burst worker is an EC2 `t3.small` that joins the K3s cluster through WireGuard
 like a campus PC. It gets the labels `idlecloud/role=worker` and
 `idlecloud/pool=cloud`, so the coordinator's Jobs run on it with no changes.
 
+We own burst workers, so each one starts fully trusted (plan step 5). This
+prepares them to act as tie-breakers for disputed tasks. A worker joins with
+`idlecloud/trust=high`. When the autoscaler records a new machine on a slot, it
+also sets that node's `trust_score` to 1.0 in the same transaction. Node names
+are reused per slot, so this stops a new machine inheriting an old one's score.
+Only the score changes. The agree and disagree counters, state and heartbeat
+stay as the verifier and coordinator left them. If this write fails, the launch
+stays held and is recorded again next tick, with no new EC2 launch.
+
+Tie-breaking still needs work outside the autoscaler:
+
+- The autoscaler's database user needs INSERT and UPDATE on `nodes`.
+- The coordinator must schedule the extra replicas of DISPUTED tasks. Today
+  its scheduler skips them.
+- The coordinator's Jobs prefer `trust=high` for every replica, so ordinary
+  replicas also prefer burst workers. They need a stronger preference for
+  campus PCs (for example `idlecloud/pool NotIn [cloud]` at weight 100 and
+  trust at weight 20), or burst workers stay busy and cost more.
+
 Step 2 builds the launch template and a manual launch command. Step 3 adds the
 controller in `controller/`, which calls the same functions on its own.
 
