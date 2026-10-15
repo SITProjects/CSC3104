@@ -9,7 +9,7 @@ services:
     environment:
       DATABASE_URL: postgresql://admin:password123@postgres:5432/csc3104
       S3_ENDPOINT_URL: http://minio:9000
-      S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
+      S3_PUBLIC_ENDPOINT_URL: http://localhost:19000
       S3_BUCKET: csc3104-local
       AWS_ACCESS_KEY_ID: csc3104-local
       AWS_SECRET_ACCESS_KEY: csc3104-local-secret
@@ -71,6 +71,9 @@ services:
           sleep 2
         done
         mc mb --ignore-existing local/csc3104-local
+        # the coordinator signs URLs with this user's keys, not the root account
+        mc admin user add local csc3104-local csc3104-local-secret
+        mc admin policy attach local readwrite --user csc3104-local || true
     depends_on:
       minio:
         condition: service_started

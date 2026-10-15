@@ -1,7 +1,7 @@
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 JobStatus = Literal["PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
 TaskStatus = Literal["PENDING", "RUNNING", "VOTING", "VERIFIED", "DISPUTED", "FAILED"]
@@ -11,9 +11,49 @@ NodeState = Literal["IDLE", "BUSY", "OFFLINE"]
 
 # ---- request / response models (move to shared/ once the team agrees) ----
 
+# caps the presigned URLs in one manifest
+MAX_FILES_PER_TASK = 50
+
 
 class TaskIn(BaseModel):
-    input: dict[str, Any] = Field(examples=[{"pages": [1, 10]}])
+    input: dict[str, Any] = Field(
+        examples=[{"files": ["pages/0001.png", "pages/0002.png"], "lang": "eng"}]
+    )
+
+    @field_validator("input")
+    @classmethod
+    def check_files(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """
+        Checks the optional "files", the objects this task's worker may download.
+
+        Names are relative to jobs/{job_id}/ and are presigned into the manifest's
+        input_urls. Everything else in input belongs to the job type and is passed
+        to the worker untouched.
+
+        args:
+            value: The task's input.
+        returns:
+            dict: The same input, unchanged.
+        raises:
+            ValueError: If files is not a list of at most MAX_FILES_PER_TASK safe names.
+        """
+        files = value.get("files")
+        if files is None:
+            return value  # job types with no input files, e.g. "test"
+        if not isinstance(files, list) or len(files) > MAX_FILES_PER_TASK:
+            raise ValueError(
+                f'"files" must be a list of at most {MAX_FILES_PER_TASK} names'
+            )
+        for key in files:
+            # relative to jobs/{job_id}/, so a task can never get URLs for another job
+            if (
+                not isinstance(key, str)
+                or not key
+                or key.startswith("/")
+                or ".." in key.split("/")
+            ):
+                raise ValueError(f'"files" has an invalid key: {key!r}')
+        return value
 
 
 class CreateJobRequest(BaseModel):
