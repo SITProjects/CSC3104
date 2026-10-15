@@ -29,7 +29,9 @@ controller in `controller/`, which calls the same functions on its own.
 | `burst/launch.py` | `up`, `down` and `list` commands |
 | `burst/market.py` | Spot or On-Demand for each launch (`BURST_MARKET`), and what a launch answer means |
 | `controller/settings.py` | Machine sizes and prices, budget, AWS quotas, timings |
-| `controller/decide.py` | The scaling rules and bin packing, as pure functions |
+| `controller/model.py` | The records the loop fills and the rules read: pods, nodes, slots, instances, actions |
+| `controller/decide.py` | The scaling rules, as pure functions |
+| `controller/packing.py` | Bin packing: which new machines the waiting pods need |
 | `controller/lifetime.py` | The 2 hour lifetime limit, worked out from the EC2 launch time |
 | `controller/cluster.py` | Reads task pods and nodes, cordons burst nodes |
 | `controller/slots.py` | Claims and frees rows in the `burst_slots` table |

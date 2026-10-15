@@ -9,7 +9,7 @@ from kubernetes.client.rest import ApiException
 
 from services.autoscaler.burst import config as burst_config
 from services.autoscaler.controller import settings
-from services.autoscaler.controller.decide import (
+from services.autoscaler.controller.model import (
     BurstNode,
     CampusRoom,
     NodeLoad,
