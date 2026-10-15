@@ -3,8 +3,8 @@ This module allows the worker pods to save checkpoints to S3 when they receive a
 """
 
 import json
+import signal
 import sys
-from signal import signal
 from typing import NoReturn
 from urllib import error, request
 

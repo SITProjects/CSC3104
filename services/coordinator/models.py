@@ -1,7 +1,7 @@
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 JobStatus = Literal["PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
 TaskStatus = Literal["PENDING", "RUNNING", "VOTING", "VERIFIED", "DISPUTED", "FAILED"]
@@ -10,11 +10,30 @@ NodeState = Literal["IDLE", "BUSY", "OFFLINE"]
 
 
 # ---- request / response models (move to shared/ once the team agrees) ----
+MAX_FILES_PER_TASK = 50
 
 
 class TaskIn(BaseModel):
-    input: dict[str, Any] = Field(examples=[{"pages": [1, 10]}])
-
+    input: dict[str, Any] = Field(
+        examples=[{"files": ["pages/0001.png", "pages/0002.png"], "lang": "eng"}]
+    )
+    @field_validator("input")
+    @classmethod
+    def check_filed(cls, value: dict[str, Any]) -> dict[str, Any]:
+        files = value.get("files"):
+        if not files:
+            return value
+        if not isinstance(files, list) or len(files) > MAX_FILES_PER_TASK:
+            raise ValueError("input.files must be a list")
+        for key in files:
+            if (
+                not isinstance(key, str)
+                or not key
+                or key.startswith("/")
+                or ".." in key.split("/")
+            ):
+                raise ValueError(f'"files" has an invalid key: {key!r}')
+            return value
 
 class CreateJobRequest(BaseModel):
     email: str = Field(examples=["user@example.com"])

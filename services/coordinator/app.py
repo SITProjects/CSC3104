@@ -152,7 +152,6 @@ async def get_replica_manifest(
     if not task:
         raise HTTPException(404, f"task {replica.task_id} not found")
     prefix = f"jobs/{task.job_id}/replicas/{replica.id}"
-    first, last = task.input["pages"]
     ttl = min(job_type.timeout_seconds + 300, 7 * 24 * 3600)
     return Manifest(
         replica_id=replica.id,
@@ -160,10 +159,8 @@ async def get_replica_manifest(
         attempt=replica.attempt,
         input=task.input,
         input_urls={
-            f"{p:04d}.png": presign(
-                "get_object", f"jobs/{task.job_id}/pages/{p:04d}.png", ttl
-            )
-            for p in range(first, last + 1)
+            f: presign("get_object", f"jobs/{task.job_id}/{f}", ttl)
+            for f in task.input.get("files", [])
         },
         output_upload_url=presign("put_object", f"{prefix}/result.json", ttl),
         checkpoint_get_url=presign("get_object", f"{prefix}/checkpoint.json", ttl)
