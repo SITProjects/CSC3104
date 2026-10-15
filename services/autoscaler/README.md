@@ -55,6 +55,7 @@ controller in `controller/`, which calls the same functions on its own.
 | `controller/cluster.py` | Reads task pods and nodes, cordons burst nodes |
 | `controller/slots.py` | Claims and frees rows in the `burst_slots` table |
 | `controller/pending.py` | Holds a launch's slot until its instance is found and saved |
+| `controller/usage.py` | Saves burst machines and the task pods that ran on them, for cost |
 | `controller/__main__.py` | The loop: observe, decide, act, every 30 seconds |
 | `Dockerfile`, `k8s/autoscaler.yml` | Image and Deployment with its permissions |
 
@@ -68,6 +69,9 @@ controller in `controller/`, which calls the same functions on its own.
 4. The K3s server version, for `K3S_VERSION`.
 5. `ec2:CreateTags` on the control plane's role (LabRole), for the lifetime
    warning. Without it the worker still ends on time, only without the warning.
+6. The autoscaler's database user needs INSERT and UPDATE on `nodes`, and
+   SELECT, INSERT and UPDATE on `burst_machines` and `burst_runs`. It has them
+   already if it applies the migrations itself.
 
 ## Security choices
 
@@ -571,3 +575,49 @@ also needs a smaller cordon lead. The error names both settings.
 task pod. Expect the cordon at 10 minutes, the `reclaim-at` tag and the
 watcher's taint at 13 minutes, and termination at 15 minutes. Check with
 `kubectl get node burst-200 -o yaml`, `launch list` and the autoscaler log.
+
+## Estimated burst cost (Step 5c)
+
+Member 5's admin page shows burst workers and cost per job from three SQL
+views (`shared/migrations/004_burst_cost.sql`). Every figure is an estimate.
+
+| View | One row per | Columns of note |
+| --- | --- | --- |
+| `burst_machine_cost` | Burst machine | `running`, `total_usd`, `attributed_usd`, `unattributed_usd` |
+| `burst_job_cost` | Job | `usd`, `runs`, `has_estimated_runs`, `has_unknown_price` |
+| `burst_run_cost` | Task pod on a burst machine | `usd`, `estimated`, `attempt` |
+
+**What is recorded.** When a launch is saved on a slot, the machine gets a row
+in `burst_machines` in the same transaction. The row keeps the hourly rate the
+budget uses (On-Demand price plus the EBS disk), so later price changes never
+rewrite history. For Spot this is an upper bound, since AWS caps Spot at the
+On-Demand price and Spot prices move over time. The launch time is corrected
+from EC2 each tick. The end time is set when the slot is released, which is
+when the autoscaler ends the machine or sees it gone.
+
+Each tick, every task pod on a burst node is saved in `burst_runs` by its pod
+uid, with its job, task, replica, attempt, CPU request and container start and
+finish times. A requeued replica is a new pod, so each attempt keeps its own
+history. Seeing a saved pod again only fills a missing finish time and moves
+`last_seen_at`, by pod uid, so a finish still arrives after its node is gone or
+reused. A new pod is only linked to a machine that was running when the pod
+started, so an old pod is never charged to the new machine on its name.
+If saving fails, the error is logged, the tick carries on and the same pods
+are saved next tick.
+
+**How cost is split.** A run costs its time on the machine, times the
+machine's rate, times the share of the machine's allocatable CPU it requested.
+This is cost allocated by requested CPU, not measured CPU use. A lone 1 CPU
+run on a 2 CPU machine pays half the machine's cost for that time. A fully
+packed machine is fully attributed. Boot, idle and unrequested CPU, runs with
+no known job and any work the autoscaler never saw are `unattributed_usd`, so
+`attributed_usd` always equals the jobs' costs on that machine. A run with no
+finish time counts up to when it was last seen and is marked estimated. A
+machine with no known rate shows NULL, not zero.
+
+**Limits.** Only machines recorded on a slot are listed. Workers already
+running when this was rolled out have no row. An orphan or a duplicate the
+autoscaler ends is still in the budget but not in these views. The end time
+comes from releasing the slot, so it is approximate and can be a tick late. A finished pod is deleted 10 minutes after it
+ends, so if the autoscaler is down longer than that, the run is missing and
+its cost shows as unattributed.

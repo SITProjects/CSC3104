@@ -53,7 +53,7 @@ def memory_mib(value: str) -> float:
     return float(value) / 1024**2  # plain bytes
 
 
-def _pod_requests(pod) -> tuple[int, float]:
+def pod_requests(pod) -> tuple[int, float]:
     cpu, mem = 0, 0.0
     for container in pod.spec.containers:
         requests = (container.resources and container.resources.requests) or {}
@@ -93,7 +93,7 @@ def unscheduled_pods(pods, now: datetime) -> tuple[int, list[StuckPod]]:
         since = (
             condition.last_transition_time if condition else None
         ) or pod.metadata.creation_timestamp
-        cpu, mem = _pod_requests(pod)
+        cpu, mem = pod_requests(pod)
         labels = pod.metadata.labels or {}
         unschedulable.append(
             StuckPod(
@@ -134,7 +134,7 @@ def pod_places(
         if not pod.spec.node_name:
             waiting.add(replica)
             continue
-        cpu, mem = _pod_requests(pod)
+        cpu, mem = pod_requests(pod)
         labels = pod.metadata.labels or {}
         group = labels.get(settings.TASK_LABEL, pod.metadata.name)
         on_node.setdefault(pod.spec.node_name, []).append(
@@ -149,7 +149,7 @@ def node_loads(pods) -> dict[str, NodeLoad]:
     loads: dict[str, NodeLoad] = {}
     for pod in pods:
         if pod.spec.node_name and pod.status.phase in ("Pending", "Running"):
-            cpu, mem = _pod_requests(pod)
+            cpu, mem = pod_requests(pod)
             labels = pod.metadata.labels or {}
             loads.setdefault(pod.spec.node_name, NodeLoad()).add(
                 cpu, mem, labels.get(settings.TASK_LABEL, pod.metadata.name)

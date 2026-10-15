@@ -19,7 +19,7 @@ from services.autoscaler.burst import config as burst_config
 from services.autoscaler.burst import launch as burst
 from services.autoscaler.burst.aws import ec2_client
 from services.autoscaler.burst.market import LaunchUnknown, MarketChooser
-from services.autoscaler.controller import cluster, pending, settings, slots
+from services.autoscaler.controller import cluster, pending, settings, slots, usage
 from services.autoscaler.controller.decide import decide, pending_grace, split_by_slot
 from services.autoscaler.controller.model import (
     AccountUsage,
@@ -111,6 +111,13 @@ def observe(db: Session, core, ec2, now: datetime) -> Snapshot:
     )
     live = burst_instances(ec2) if ec2 is not None else None
     account = account_usage(ec2) if ec2 is not None else None
+    # Cost records are bookkeeping. A failure only skips them for this tick,
+    # and the same pods are seen again next tick (savepoint keeps the tick alive).
+    try:
+        with db.begin_nested():
+            usage.record(db, pods, burst_nodes, live or [], now)
+    except Exception:
+        log.warning("could not save burst usage, retrying next tick", exc_info=True)
     rows = slots.claimed(db)
     instances, duplicates = (None, []) if live is None else split_by_slot(live, rows)
 
@@ -259,7 +266,7 @@ def launch_one(action: Action, db: Session, snapshot: Snapshot) -> None:
         PENDING.drop(slot)
         raise
     entry.found(instance_id)
-    slots.record_launch(db, row, instance_id)
+    slots.record_launch(db, row, instance_id, entry.machine, entry.market)
     entry.staged = True  # kept until the tick's transaction commits
 
 
