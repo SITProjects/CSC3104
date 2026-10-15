@@ -21,7 +21,8 @@ from sqlalchemy.orm import Session
 
 from services.autoscaler.burst import config as burst_config
 from services.autoscaler.controller import settings
-from services.autoscaler.controller.decide import PodInfo, Snapshot, reclaim_deadlines
+from services.autoscaler.controller.decide import reclaim_deadlines
+from services.autoscaler.controller.model import PodInfo, Snapshot
 
 BURST_NODES = [burst_config.node_name(slot) for slot in burst_config.SLOTS]
 

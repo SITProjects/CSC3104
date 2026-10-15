@@ -20,15 +20,13 @@ from services.autoscaler.burst import launch as burst
 from services.autoscaler.burst.aws import ec2_client
 from services.autoscaler.burst.market import LaunchUnknown, MarketChooser
 from services.autoscaler.controller import cluster, pending, settings, slots
-from services.autoscaler.controller.decide import (
+from services.autoscaler.controller.decide import decide, pending_grace, split_by_slot
+from services.autoscaler.controller.model import (
     AccountUsage,
     Action,
     Instance,
     Snapshot,
-    decide,
     parse_utc,
-    pending_grace,
-    split_by_slot,
 )
 from services.autoscaler.controller.rescue import RescueMemory, finished_replicas
 from shared.migrate import run_migrations

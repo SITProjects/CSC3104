@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session
 from services.autoscaler.burst import launch as burst
 from services.autoscaler.burst.market import send
 from services.autoscaler.controller import settings, slots
-from services.autoscaler.controller.decide import PendingSlot
+from services.autoscaler.controller.model import PendingSlot
 
 log = logging.getLogger("autoscaler")
 

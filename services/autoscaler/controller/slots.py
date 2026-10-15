@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from services.autoscaler.burst import config as burst_config
 from services.autoscaler.controller import settings
-from services.autoscaler.controller.decide import ClaimedSlot
+from services.autoscaler.controller.model import ClaimedSlot
 from shared.db.models import BurstSlot
 
 
