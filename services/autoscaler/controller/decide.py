@@ -53,6 +53,13 @@ class _Plan:
         if kind == "reclaim" and extra.get("instance_id"):
             self.reclaimed.add(extra["instance_id"])
 
+    def closed(self, slot: int) -> bool:
+        """No new work may go to this slot's worker: it is being removed,
+        reclaimed or retired. Every rule that promises room asks this. A closed
+        worker may still need cleanup and still costs money, so the cleanup and
+        budget rules do not use it."""
+        return slot in self.gone or slot in self.reclaiming or slot in self.retiring
+
 
 def _age(now: datetime, since: datetime) -> float:
     return (now - since).total_seconds()
@@ -104,13 +111,22 @@ def _pending_unseen(s: Snapshot) -> list[PendingSlot]:
     return [p for p in s.pending if id(p) not in seen]
 
 
+def _instance_closed(s: Snapshot, instance: Instance) -> bool:
+    """This instance itself is going away: it has a reclaim warning or is near
+    its lifetime limit. Checked per instance, because a second instance on a
+    slot can differ from the slot's own state."""
+    return instance.reclaim_at is not None or lifetime.retiring(
+        instance.launched_at, s.now
+    )
+
+
 def _pending_room(s: Snapshot, plan: _Plan) -> list["Bin"]:
     """Room held launches can still give to waiting pods, by their real state.
     Their price stays in the budget either way (_billed). Each check runs on
     its own, so no one of them can hide another:
-    - its slot is reclaiming or being removed: none
-    - its own instance has a reclaim warning (it may be a second instance on
-      the slot, so the slot's state is not enough): none
+    - its slot is closed (plan.closed): none
+    - its own instance is going away (_instance_closed, it may be a second
+      instance on the slot, so the slot's state is not enough): none
     - instance id known, but EC2 has not listed it for ORPHAN_GRACE_S: none,
       it is most likely gone, whatever node is left behind
     - its own node (by instance id) is draining or warned: none
@@ -119,15 +135,12 @@ def _pending_room(s: Snapshot, plan: _Plan) -> list["Bin"]:
     bins = []
     live = {} if s.instances is None else {i.instance_id: i for i in _live(s)}
     for p in s.pending:
-        if p.slot in plan.reclaiming or p.slot in plan.gone or p.slot in plan.retiring:
+        if plan.closed(p.slot):
             continue
         mine = live.get(p.instance_id) or next(
             (i for i in live.values() if _pending_owner(s, i) is p), None
         )
-        if mine is not None and mine.reclaim_at is not None:
-            continue
-        # Its own instance near its lifetime limit, even beside a young primary
-        if mine is not None and lifetime.retiring(mine.launched_at, s.now):
+        if mine is not None and _instance_closed(s, mine):
             continue
         if (
             s.instances is not None
@@ -406,8 +419,8 @@ def _check_booting(s: Snapshot, plan: _Plan) -> list[ClaimedSlot]:
                 f"did not join within {settings.BOOT_TIMEOUT_S}s",
                 instance_id=claimed.instance_id,
             )
-        elif slot not in plan.retiring:
-            # Near its lifetime limit it gives no room, even while booting
+        elif not plan.closed(slot):
+            # A retiring worker still gets the boot timeout, but gives no room
             booting.append(claimed)
     return booting
 
@@ -420,6 +433,15 @@ def _active_nodes(s: Snapshot, plan: _Plan) -> list[BurstNode]:
         and slot not in plan.gone
         and slot not in plan.reclaiming
         and node.ready
+    ]
+
+
+def _open_nodes(s: Snapshot, plan: _Plan) -> list[BurstNode]:
+    """Ready burst workers that can take new work: not closed, not draining."""
+    return [
+        node
+        for node in _active_nodes(s, plan)
+        if not plan.closed(node.slot) and not node.draining
     ]
 
 
@@ -503,7 +525,7 @@ def _scale_by_demand(s: Snapshot, plan: _Plan, booting: list[ClaimedSlot]) -> No
     rescued = {r.replica for r in s.rescue}
     # A requeued replica from a reclaimed worker does not wait for a campus PC
     stuck = [p for p in s.unschedulable if p.waited_s >= grace or p.replica in rescued]
-    replace, outstanding = _rescue_demand(s, plan, active)
+    replace, outstanding = _rescue_demand(s, plan)
     demand = stuck + replace
 
     if demand:
@@ -513,10 +535,10 @@ def _scale_by_demand(s: Snapshot, plan: _Plan, booting: list[ClaimedSlot]) -> No
                 f"{len(replace)} replicas on reclaimed workers need a new place"
                 + (f", {reason}" if stuck else "")
             )
-        # Reopen nodes we were draining before paying for new ones
-        # Never one near its lifetime limit
+        # Reopen nodes we were draining before paying for new ones, never a
+        # closed one
         draining = [
-            node for node in active if node.draining and node.slot not in plan.retiring
+            node for node in active if node.draining and not plan.closed(node.slot)
         ]
         if draining:
             for node in draining:
@@ -538,11 +560,8 @@ def _scale_by_demand(s: Snapshot, plan: _Plan, booting: list[ClaimedSlot]) -> No
     if s.campus_free and s.unscheduled_pods == 0:
         candidates = [
             node
-            for node in active
-            if not node.draining
-            and node.slot not in plan.retiring
-            and node.task_pods > 0
-            and _campus_can_take(s, node)
+            for node in _open_nodes(s, plan)
+            if node.task_pods > 0 and _campus_can_take(s, node)
         ]
         if candidates:
             node = min(candidates, key=lambda n: n.task_pods)
@@ -553,9 +572,7 @@ def _scale_by_demand(s: Snapshot, plan: _Plan, booting: list[ClaimedSlot]) -> No
             )
 
 
-def _rescue_demand(
-    s: Snapshot, plan: _Plan, active: list[BurstNode]
-) -> tuple[list[StuckPod], bool]:
+def _rescue_demand(s: Snapshot, plan: _Plan) -> tuple[list[StuckPod], bool]:
     """Replicas from reclaimed workers that still need room elsewhere. Returns
     the ones that need new machines, and whether any still need a place.
 
@@ -579,14 +596,10 @@ def _rescue_demand(
     rooms = []
     for room in map(CampusRoom._make, s.campus_free):
         rooms.append(Bin.room(room.cpu_m, room.mem_mib, room.groups))
-    for node in active:
+    for node in _open_nodes(s, plan):
         # Nodes that just turned Ready are counted by _launch_for instead, so
         # their room is never promised twice
-        if (
-            not node.draining
-            and node.slot not in plan.retiring
-            and not _settling(s, node)
-        ):
+        if not _settling(s, node):
             rooms.append(Bin.settling(node))
     left = []
     for r in sorted(needed, key=lambda r: (r.cpu_m, r.mem_mib), reverse=True):
@@ -685,11 +698,7 @@ def _launch_for(
     pods = [p for p in stuck if smallest_fit(p) is not None]
     bins = [Bin(_machine_of(c), new=False) for c in booting]
     bins += _pending_room(s, plan)
-    bins += [
-        Bin.settling(node)
-        for node in _active_nodes(s, plan)
-        if not node.draining and node.slot not in plan.retiring and _settling(s, node)
-    ]
+    bins += [Bin.settling(node) for node in _open_nodes(s, plan) if _settling(s, node)]
     unaffordable: list[str] = []
     while True:
         wanted = pack(pods, bins)
