@@ -2,8 +2,15 @@
 # namespaces.yml and coordinator-rbac.yml.
 #
 # Before applying, create in idlecloud-system:
-#   Secret idlecloud-db  key DATABASE_URL  (shared with the autoscaler)
-# and set S3_URL below to the bucket the worker Pods read and write.
+#   Secret idlecloud-db     key DATABASE_URL  (shared with the autoscaler)
+#   Secret idlecloud-minio  keys access-key, secret-key  (the MinIO user that
+#                           presigns, e.g. csc3104-local with the readwrite policy)
+# MinIO must run on the control plane, listening on its WireGuard IP, with the
+# bucket below created.
+#
+# Moving to real S3 later: set S3_BUCKET to the real bucket, and delete
+# S3_PUBLIC_ENDPOINT_URL and both AWS_* variables. boto3 then signs for real S3
+# with the control-plane instance role (LabRole), like the autoscaler.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -51,8 +58,27 @@ spec:
             # Handed to worker Pods, which resolve the Service below through cluster DNS
             - name: COORDINATOR_URL
               value: http://coordinator.idlecloud-system.svc.cluster.local:8001
-            - name: S3_URL
-              value: https://BUCKET.s3.us-east-1.amazonaws.com  # set to the real bucket
+            # Bucket name only, never a URL
+            - name: S3_BUCKET
+              value: csc3104-local
+            # MinIO as worker Pods reach it: the control plane's WireGuard IP
+            # (HUB_WG_IP in services/autoscaler/burst/config.py). Presigned URLs are
+            # signed for this host, so it must be exactly what workers use.
+            - name: S3_PUBLIC_ENDPOINT_URL
+              value: http://10.10.0.1:9000
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: idlecloud-minio
+                  key: access-key
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: idlecloud-minio
+                  key: secret-key
+            # MinIO ignores the region, but boto3 needs one to sign
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
           readinessProbe:
             httpGet:
               path: /healthz

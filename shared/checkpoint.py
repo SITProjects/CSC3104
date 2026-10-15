@@ -1,5 +1,10 @@
 """
-This module allows the worker pods to save checkpoints to S3 when they receive a termination signal.
+Checkpoint helpers for worker Pods. Standard library only, so a worker image can
+copy this one file.
+
+The worker loads the previous attempt's checkpoint at start, saves after every
+unit of work, and on SIGTERM saves once more, reports /evicted and exits. All
+storage goes through the presigned URLs in the replica manifest.
 """
 
 import json
@@ -59,7 +64,9 @@ def load(
         not isinstance(envelop, dict)
         or envelop.get("v") != VERSION
         or envelop.get("task_index") != manifest["task_index"]
-        or envelop.get("attempt") != manifest["attempt"]
+        # written by an earlier attempt of this replica, never a later one
+        or not isinstance(envelop.get("attempt"), int)
+        or envelop["attempt"] >= manifest["attempt"]
         or not isinstance(envelop.get("state"), dict)
     ):
         return None

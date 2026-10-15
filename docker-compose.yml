@@ -7,6 +7,7 @@ services:
       - ./services/coordinator:/app/services/coordinator
       - ./shared:/app/shared
       - ./core:/app/core
+      - ./scripts:/app/scripts # dev-replica.py
       - k3s-config:/k3s-config:ro
     # k3s writes its kubeconfig with server 127.0.0.1; point it at the k3-server service
     command: >-
@@ -20,10 +21,11 @@ services:
       # worker nodes can reach (e.g. the coordinator host's WireGuard IP). Locally, k3s runs
       # with --disable-agent, so no Pods start.
       COORDINATOR_URL: ${COORDINATOR_URL:-http://localhost:8001}
-      S3_URL: ${S3_URL:-http://minio:9000/csc3104-local}
       KUBECONFIG: /tmp/kubeconfig
       S3_ENDPOINT_URL: http://minio:9000
-      S3_PUBLIC_ENDPOINT_URL: http://localhost:19000
+      # presigned URLs are signed for this host, so it must be the one workers use;
+      # localhost:9000 lets `docker run` workers and curl on this machine reach MinIO
+      S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
       S3_BUCKET: csc3104-local
       AWS_ACCESS_KEY_ID: csc3104-local
       AWS_SECRET_ACCESS_KEY: csc3104-local-secret
@@ -110,6 +112,9 @@ services:
           sleep 2
         done
         mc mb --ignore-existing local/csc3104-local
+        # the coordinator signs URLs with this user's keys, not the root account
+        mc admin user add local csc3104-local csc3104-local-secret
+        mc admin policy attach local readwrite --user csc3104-local || true
     depends_on:
       minio:
         condition: service_started

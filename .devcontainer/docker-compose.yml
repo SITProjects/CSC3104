@@ -71,6 +71,9 @@ services:
           sleep 2
         done
         mc mb --ignore-existing local/csc3104-local
+        # the coordinator signs URLs with this user's keys, not the root account
+        mc admin user add local csc3104-local csc3104-local-secret
+        mc admin policy attach local readwrite --user csc3104-local || true
     depends_on:
       minio:
         condition: service_started

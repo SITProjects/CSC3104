@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from kubernetes import client, config
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.settings import COORDINATOR_URL, S3_URL
+from core.settings import COORDINATOR_URL
 from services.coordinator.crud.jobs import get_job
 from services.coordinator.crud.replicas import get_replica_with_task
 from services.coordinator.scheduler import scheduler_loop
@@ -55,8 +55,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Coordinator", lifespan=lifespan)
-
-S3 = S3_URL
 
 
 async def require_token(
@@ -146,11 +144,11 @@ async def get_replica_manifest(
         session: The database session for this request.
         authorization: The value of the Authorization header, "Bearer <REPLICA_TOKEN>".
     returns:
-        Manifest: A mock manifest for the given replica id.
+        Manifest: The manifest with presigned URLs for this replica's current attempt.
+    raises:
+        HTTPException: 401 if the token is missing or wrong.
     """
     replica, task, job_type = await require_token(session, id, authorization)
-    if not task:
-        raise HTTPException(404, f"task {replica.task_id} not found")
     prefix = f"jobs/{task.job_id}/replicas/{replica.id}"
     ttl = min(job_type.timeout_seconds + 300, 7 * 24 * 3600)
     return Manifest(
