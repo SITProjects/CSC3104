@@ -50,8 +50,10 @@ RETIRE_CORDON_LEAD_S = _int("AUTOSCALER_RETIRE_CORDON_LEAD_S", 600)
 RETIRE_WARN_LEAD_S = burst_config.RECLAIM_WARNING_S
 if not 0 < RETIRE_WARN_LEAD_S <= RETIRE_CORDON_LEAD_S < MAX_LIFETIME_S:
     raise ValueError(
-        "need 0 < warning lead <= cordon lead < lifetime, got "
-        f"{RETIRE_WARN_LEAD_S}, {RETIRE_CORDON_LEAD_S}, {MAX_LIFETIME_S} seconds"
+        f"lifetime settings do not fit: need {RETIRE_WARN_LEAD_S} s (Spot warning) "
+        f"<= AUTOSCALER_RETIRE_CORDON_LEAD_S ({RETIRE_CORDON_LEAD_S} s) "
+        f"< BURST_MAX_LIFETIME_MIN ({burst_config.MAX_LIFETIME_MIN} min = "
+        f"{MAX_LIFETIME_S} s). A shorter lifetime needs a smaller cordon lead."
     )
 # Log what would happen, but change nothing in AWS, Kubernetes or the database
 DRY_RUN = os.environ.get("AUTOSCALER_DRY_RUN", "") == "1"

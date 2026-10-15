@@ -539,10 +539,11 @@ so the end can be up to one tick late, longer if AWS calls fail. Work evicted
 at 118 minutes is only recovered once the coordinator requeues evicted
 replicas (member 3).
 
-Settings: `BURST_MAX_LIFETIME_MIN` (default 120, also used by the boot script),
-`AUTOSCALER_RETIRE_CORDON_LEAD_S` (default 600). The warning lead is the Spot
-warning's 120 s. The autoscaler refuses to start unless
-warning lead <= cordon lead < lifetime.
+Settings: `BURST_MAX_LIFETIME_MIN` (minutes, default 120, also used by the boot
+script) and `AUTOSCALER_RETIRE_CORDON_LEAD_S` (seconds, default 600). The
+warning lead is the Spot warning's 120 s. The autoscaler refuses to start
+unless 120 s <= cordon lead < lifetime, so a lifetime of 10 minutes or less
+also needs a smaller cordon lead. The error names both settings.
 
 **Live demo.** Run the autoscaler with `BURST_MAX_LIFETIME_MIN=15` and
 `AUTOSCALER_RETIRE_CORDON_LEAD_S=300`, then start a worker with a long-running
