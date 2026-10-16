@@ -17,6 +17,7 @@ async def ensure_job_type_exists(session: AsyncSession, job_type: str) -> None:
 
 async def create_job(session: AsyncSession, req: CreateJobRequest) -> Job:
     job = Job(
+        id=req.job_id or uuid.uuid4(),
         owner_email=req.email,
         job_type=req.job_type,
         params=req.params,
