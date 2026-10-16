@@ -23,7 +23,7 @@ async def create_event(
         job_id: The job it concerns.
         task_id: The task it concerns.
         node_name: The node involved, if known.
-        details: Extra information, stored in the JSONB detail column.
+        detail: Extra information, stored in the JSONB detail column.
     """
     event = Event(
         type=event_type,

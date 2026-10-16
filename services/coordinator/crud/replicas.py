@@ -99,7 +99,7 @@ async def get_replica_with_task(
         .where(Replica.id == replica_id)
     )
     if lock:
-        stmt = stmt.with_for_update(of=Replica)
+        stmt = stmt.with_for_update(of=(Replica, Task))
     row = (await session.execute(stmt)).one_or_none()
     if row is None:
         return None
@@ -167,7 +167,9 @@ async def recover_replicas(session: AsyncSession) -> None:
         replica.ended_at = None
     await session.flush()
     for task_id in affected_task_ids:
-        await set_voting(session, task_id)
+        task = await session.get(Task, task_id)
+        if task is not None:
+            await set_voting(session, task)
 
 
 async def schedule_replica(session: AsyncSession, replica: Replica, token: str) -> None:
