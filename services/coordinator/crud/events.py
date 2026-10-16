@@ -14,9 +14,16 @@ async def create_event(
     details: str | None = None,
 ) -> None:
     """
-    Creates an event for a given replica.
+    Records an event in the events table, e.g. a replica eviction.
+
+    args:
+        session: The database session for this request.
+        event_type: What happened, e.g. "replica_evicted".
+        job_id: The job it concerns.
+        task_id: The task it concerns.
+        node_name: The node involved, if known.
+        details: Extra information, stored in the JSONB detail column.
     """
-    # Assuming you have an Event model defined in your database
     event = Event(
         type=event_type,
         job_id=job_id,

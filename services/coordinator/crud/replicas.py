@@ -19,6 +19,16 @@ from shared.db.models import (
 async def create_replicas(
     session: AsyncSession, tasks: list[Task], replicas_per_task: int
 ) -> list[Replica]:
+    """
+    Creates the replicas for new tasks, all SCHEDULED at attempt 1.
+
+    args:
+        session: The database session for this request.
+        tasks: The tasks to create replicas for.
+        replicas_per_task: How many replicas each task gets, for voting.
+    returns:
+        list[Replica]: The new replicas, with ids assigned.
+    """
     replicas = [
         Replica(task_id=task.id, attempt=1, status=ReplicaStatus.SCHEDULED)
         for task in tasks
@@ -33,7 +43,17 @@ async def fetch_scheduled_replicas(
     session: AsyncSession, limit: int
 ) -> list[tuple[Replica, Task, JobType]]:
     """
-    Fetches list of scheduled replicas from database, up to specified limit
+    Fetches SCHEDULED replicas of active jobs and tasks for the scheduler to launch.
+
+    Rows already locked by another scheduler are skipped, so two coordinators
+    never launch the same replica.
+
+    args:
+        session: The scheduler's database session.
+        limit: The most replicas to return.
+    returns:
+        list[tuple[Replica, Task, JobType]]: Each replica with its task and job type,
+            oldest first.
     """
     stmt = (
         select(Replica, Task, JobType)
@@ -57,6 +77,18 @@ async def fetch_scheduled_replicas(
 async def get_replica_with_task(
     session: AsyncSession, replica_id: int, lock: bool
 ) -> tuple[Replica, Task, JobType] | None:
+    """
+    Fetches a replica together with its task and job type, in one query.
+
+    args:
+        session: The database session for this request.
+        replica_id: The id of the replica.
+        lock: Lock the replica row (FOR UPDATE) until the transaction ends, for
+            endpoints that change it.
+    returns:
+        tuple[Replica, Task, JobType] | None: The replica, its task and job type, or
+            None if the replica does not exist.
+    """
     stmt = (
         select(Replica, Task, JobType)
         .join(Replica.task)
@@ -75,12 +107,15 @@ async def get_replica_with_task(
 
 async def evict_replica(session: AsyncSession, replica: Replica) -> None:
     """
-    Evicts a replica from the database by setting its status to EVICTED.
+    Stops a replica whose Pod reported an eviction.
+
+    The replica becomes EVICTED, so recover_replicas reruns it on the next
+    scheduler tick, or FAILED once it has used RETRY_ATTEMPTS attempts. Either
+    way its token stops working, so the dying Pod cannot report anything else.
 
     args:
         session: The database session for this request.
-        replica_id: The id of the replica to evict.
-        replica: The Replica object to evict.
+        replica: The RUNNING replica to stop, locked by the caller.
     """
     replica.token_hash = None
     replica.node_name = None
@@ -94,11 +129,15 @@ async def evict_replica(session: AsyncSession, replica: Replica) -> None:
 
 async def recover_replicas(session: AsyncSession) -> None:
     """
-    Recovers a replica from the database by setting its status to SCHEDULED.
+    Puts EVICTED and LOST replicas of running tasks back in the queue.
+
+    Each one keeps its id and moves to the next attempt, so the new Pod's
+    manifest points at the same checkpoint and the work resumes. A replica that
+    has used RETRY_ATTEMPTS attempts becomes FAILED instead. Called at the start
+    of every scheduler tick.
 
     args:
-        session: The database session for this request.
-        replica_id: The id of the replica to recover.
+        session: The scheduler's database session.
     """
     stmt = (
         select(Replica)
@@ -127,12 +166,15 @@ async def recover_replicas(session: AsyncSession) -> None:
 
 async def schedule_replica(session: AsyncSession, replica: Replica, token: str) -> None:
     """
-    Schedules replicas for a list of tasks by creating Replica objects in the database.
+    Records that a replica's Kubernetes Job was created: RUNNING with a new token.
+
+    Only the token's hash is stored. The Pod gets the token itself as
+    REPLICA_TOKEN and sends it on every call.
 
     args:
-        session: The database session for this request.
-        tasks: A list of Task objects to schedule replicas for.
-        replicas_per_task: The number of replicas to create for each task.
+        session: The scheduler's database session.
+        replica: The replica that was just launched.
+        token: The plain token given to the Pod.
     """
     replica.status = ReplicaStatus.RUNNING
     replica.token_hash = hashlib.sha256(token.encode()).hexdigest()
@@ -149,12 +191,16 @@ async def mark_replica_done(
     exit_code: int,
 ) -> None:
     """
-    Marks a replica as done by updating its status, progress, result hash, exit code, and ended_at timestamp.
+    Records a replica's result: DONE, progress 100, its result hash and exit code.
+
+    Call set_voting afterwards to move the task on once all replicas finished.
 
     args:
-        replica: The Replica object to mark as done.
-        result_hash: The hash of the result produced by the replica.
-        exit_code: The exit code of the replica process.
+        session: The database session for this request.
+        replica: The RUNNING replica that finished, locked by the caller.
+        task: The replica's task.
+        result_hash: SHA-256 hex of the replica's result.json, compared when voting.
+        exit_code: The worker's exit code.
     """
     if task is None:
         raise ValueError(f"task {replica.task_id} not found")
