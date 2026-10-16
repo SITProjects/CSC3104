@@ -2,6 +2,7 @@ import uuid
 
 from fastapi import HTTPException
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -16,16 +17,19 @@ async def ensure_job_type_exists(session: AsyncSession, job_type: str) -> None:
 
 
 async def create_job(session: AsyncSession, req: CreateJobRequest) -> Job:
-    job = Job(
-        id=req.job_id or uuid.uuid4(),
-        owner_email=req.email,
-        job_type=req.job_type,
-        params=req.params,
-        status=JobStatus.PENDING,
-        task_count=len(req.tasks),
-        replicas_per_task=req.replicas_per_task,
-    )
-    session.add(job)
+    try:
+        job = Job(
+            id=req.job_id or uuid.uuid4(),
+            owner_email=req.email,
+            job_type=req.job_type,
+            params=req.params,
+            status=JobStatus.PENDING,
+            task_count=len(req.tasks),
+            replicas_per_task=req.replicas_per_task,
+        )
+        session.add(job)
+    except IntegrityError as e:
+        raise HTTPException(409, f"job_id {req.job_id!r} already exists") from e
     await session.flush()  # assigns job.id
     return job
 
