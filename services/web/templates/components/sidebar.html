@@ -1,0 +1,30 @@
+{% from 'components/ui.html' import icon %}
+<aside class="navbar navbar-vertical navbar-expand-lg" aria-label="Main navigation">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="{{ urls.dashboard }}" aria-label="IdleCloud home">
+      <span class="brand-mark" aria-hidden="true">{{ icon('cloud') }}</span>
+      IdleCloud<span class="badge bg-blue-lt ms-2 small">LAB</span>
+    </a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#sidebar-menu" aria-controls="sidebar-menu" aria-expanded="false" aria-label="Toggle navigation"><span class="navbar-toggler-icon"></span></button>
+    <div class="collapse navbar-collapse" id="sidebar-menu">
+      <div class="w-100">
+        <div class="text-secondary small text-uppercase fw-semibold px-3 mb-2 mt-4">Workspace</div>
+        <!-- Navigation routes render templates only; service integration is deferred. -->
+        <ul class="navbar-nav">
+          {% for key, label, symbol in [('dashboard','Overview','grid'), ('jobs','Jobs','file'), ('upload','New OCR job','upload'), ('nodes','Compute nodes','server'), ('costs','Cloud costs','chart')] %}
+          <li class="nav-item {{ 'active' if active == key else '' }}">
+            <a class="nav-link" href="{{ urls[key] }}" {% if active == key %}aria-current="page"{% endif %}>
+              <span class="nav-link-icon" aria-hidden="true">{{ icon(symbol) }}</span>
+              <span class="nav-link-title">{{ label }}</span>
+            </a>
+          </li>
+          {% endfor %}
+        </ul>
+        <div class="sidebar-note mx-3 mt-5 p-3 rounded bg-blue-lt">
+          <div class="fw-semibold mb-1">Spare compute. Shared potential.</div>
+          <div class="small">Put idle campus resources to work, one document at a time.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</aside>

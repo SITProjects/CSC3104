@@ -1,0 +1,60 @@
+{% from 'components/ui.html' import badge, empty, money, progress, timestamp %}
+<div class="card mb-4"><div class="card-body"><div class="row align-items-center g-3">
+  <div class="col">
+    <div class="d-flex align-items-center gap-2 mb-2">{{ badge(job.status) }}</div>
+    <h2 class="mb-1 text-break">{{ job.filename }}</h2>
+    <div class="text-secondary small">{{ job.owner_email }} · {{ job.page_count|default('Unknown', true) }} pages</div>
+    <div class="text-secondary small font-monospace mt-2 text-break">{{ job.id }}</div>
+  </div>
+  <div class="col-auto">
+    <!-- TODO: Enable downloads only after verified output is available from the verifier. -->
+    <button class="btn" type="button" disabled aria-describedby="download-note">Download not connected</button>
+    <div class="small text-secondary mt-2" id="download-note">Preview only</div>
+  </div>
+</div></div></div>
+{% if job.error|default(none) %}<div class="alert alert-danger" role="alert">{{ job.error }}</div>{% endif %}
+{% set pages = job.page_count|default(0, true) %}
+{% set rendered = job.rendered_pages|default(0) %}
+{% set tasks = job.tasks|default([]) %}
+{% set verified = job.verified_tasks|default(0) %}
+<div class="row row-cards mb-4">
+  <div class="col-md-4">{{ progress('Page preparation', rendered ~ ' / ' ~ (pages or '—') ~ ' pages', (rendered * 100 / pages)|int if pages else 0) }}</div>
+  <div class="col-md-4">{{ progress('OCR processing', job.processing_percent|default(0) ~ '% processed', job.processing_percent|default(0), 'purple') }}</div>
+  <div class="col-md-4">{{ progress('Verification', verified ~ ' / ' ~ tasks|length ~ ' tasks', (verified * 100 / tasks|length)|int if tasks else 0, 'green') }}</div>
+</div>
+<div class="row row-cards">
+  <div class="col-lg-8">
+    <div class="card mb-3">
+      <div class="card-header"><h2 class="card-title">Tasks & replicas</h2><span class="badge bg-secondary-lt ms-auto">{{ tasks|length }} tasks</span></div>
+      {% if tasks %}
+      <div class="table-responsive"><table class="table table-vcenter card-table">
+        <thead><tr><th>Task</th><th>Status</th><th>Replica / node</th><th>Attempt</th><th>Progress</th></tr></thead>
+        <tbody>{% for task in tasks %}{% for replica in task.replicas %}
+          <tr>
+            <td>{% if loop.first %}<span class="fw-medium">Task {{ task.index + 1 }}</span><div class="small text-secondary">{{ task.pages }} pages · {{ task.cpu }} CPU · {{ task.memory }} MiB</div>{% endif %}</td>
+            <td>{{ badge(replica.status) }}{% if loop.first %}<div class="small text-secondary mt-1">Task: {{ task.status|title }}</div>{% endif %}</td>
+            <td><span class="small">#{{ replica.id }}</span><div class="small text-secondary">{{ replica.node or 'Awaiting assignment' }}</div></td>
+            <td>{{ replica.attempt }}</td><td>{{ replica.progress }}%</td>
+          </tr>
+        {% else %}<tr><td>Task {{ task.index + 1 }}</td><td>{{ badge(task.status) }}</td><td colspan="3" class="text-secondary">No replicas assigned</td></tr>{% endfor %}{% endfor %}</tbody>
+      </table></div>
+      {% else %}{{ empty('Tasks have not started','Tasks will appear here once processing is connected.') }}{% endif %}
+    </div>
+    <div class="card">
+      <div class="card-header"><h2 class="card-title">Activity</h2></div>
+      <div class="card-body">
+        {% if job.events|default([]) %}<ul class="list-group list-group-flush">{% for event in job.events %}<li class="list-group-item px-0"><div>{{ event.message }}</div><div class="small text-secondary">{{ timestamp(event.time) }}</div></li>{% endfor %}</ul>
+        {% else %}<p class="text-secondary mb-0">No processing events recorded yet.</p>{% endif %}
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card mb-3"><div class="card-header"><h2 class="card-title">Render batches</h2></div>
+      <div class="list-group list-group-flush">{% for batch in job.batches|default([]) %}<div class="list-group-item d-flex justify-content-between"><span>Pages {{ batch.start }}–{{ batch.end }}</span>{{ badge(batch.state) }}</div>{% else %}<div class="card-body text-secondary">No render batches available.</div>{% endfor %}</div>
+    </div>
+    <div class="card"><div class="card-body"><div class="subheader mb-2">Estimated burst cost</div>
+      <div class="h2">{{ money(job.cost.usd) if job.cost|default(none) else 'No recorded usage' }}</div>
+      <p class="text-secondary small mb-0">{% if job.cost|default(none) and job.cost.has_unknown_price %}Some prices are unknown. Known costs may be partial.{% else %}Based on recorded cloud runs and requested CPU share.{% endif %}</p>
+    </div></div>
+  </div>
+</div>

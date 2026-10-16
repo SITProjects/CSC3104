@@ -1,0 +1,32 @@
+{% extends 'base.html' %}
+{% from 'components/ui.html' import empty, money %}
+{% set title = 'Cloud costs' %}
+{% set active = 'costs' %}
+{% set data = data|default({}) %}
+{% set machines = data.get('machines', []) %}
+{% set jobs = data.get('jobs', []) %}
+{% block subtitle %}Understand cloud usage and how it is attributed to jobs.{% endblock %}
+{% block content %}
+<!-- TODO: Supply the existing burst_machine_cost and burst_job_cost view results. -->
+<div class="alert alert-info mb-4">All amounts are estimates in USD, not billing totals. Unknown prices stay unknown; attribution can reflect incomplete usage records.</div>
+<div class="row row-cards mb-4">
+  <div class="col-md-6"><div class="card"><div class="card-body"><div class="subheader mb-2">Recorded machine cost</div><div class="h1 metric-number">{{ money(data.get('known_total')) }}</div><div class="text-secondary small">{{ 'Partial total: some machine prices are unknown.' if data.get('has_unknown_price') else 'Sum of known machine estimates.' }}</div></div></div></div>
+  <div class="col-md-6"><div class="card"><div class="card-body"><div class="subheader mb-2">Recorded machines</div><div class="h1 metric-number">{{ machines|length }}</div><div class="text-secondary small">Includes running and ended burst machines.</div></div></div></div>
+</div>
+<div class="card mb-4"><div class="card-header"><h2 class="card-title">Burst machines</h2></div>
+  {% if machines %}<div class="table-responsive"><table class="table table-vcenter card-table">
+    <thead><tr><th>Machine</th><th>Type / market</th><th>State</th><th>Total</th><th>Attributed</th><th>Unattributed</th></tr></thead>
+    <tbody>{% for machine in machines %}<tr>
+      <td>{{ machine.node_name }}<div class="text-secondary small">{{ machine.instance_id }}</div></td><td>{{ machine.machine }}<div class="text-secondary small">{{ machine.market or 'Not reported' }}</div></td>
+      <td><span class="badge {{ 'bg-green-lt' if machine.running else 'bg-secondary-lt' }}">{{ 'Running' if machine.running else 'Ended' }}</span></td>
+      <td>{{ money(machine.total_usd) }}</td><td>{{ money(machine.attributed_usd) }}</td><td>{{ money(machine.unattributed_usd) }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>{% else %}{{ empty('No cloud usage available','Cost estimates will appear here when the existing cost views are connected.') }}{% endif %}
+</div>
+<div class="card"><div class="card-header"><h2 class="card-title">Cost by job</h2></div>
+  {% if jobs %}<div class="table-responsive"><table class="table table-vcenter card-table">
+    <thead><tr><th>Job</th><th>Runs</th><th>Estimated cost</th><th>Record notes</th></tr></thead>
+    <tbody>{% for job in jobs %}<tr><td><a href="{{ job.url|default('/jobs/' ~ job.job_id) }}" class="font-monospace">{{ job.job_id }}</a></td><td>{{ job.runs }}</td><td>{{ money(job.usd) }}</td><td>{{ 'Unknown prices. ' if job.has_unknown_price else '' }}{{ 'Some runs have no recorded finish.' if job.has_estimated_runs else 'Recorded runs finished.' }}</td></tr>{% endfor %}</tbody>
+  </table></div>{% else %}<div class="card-body text-secondary">No cloud runs have been attributed to a job.</div>{% endif %}
+</div>
+{% endblock %}

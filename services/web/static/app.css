@@ -1,0 +1,14 @@
+/* Tabler supplies layout and components; these are the app-specific details. */
+:root { --tblr-font-sans-serif: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+body { background: #f6f8fb; }
+.brand-mark { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: 10px; color: white; background: #206bc4; margin-right: 9px; }
+.navbar-brand { font-size: 1.35rem; letter-spacing: -.04em; }
+.navbar-brand .badge { font-size: .6rem; letter-spacing: .08em; }
+.metric-number { font-size: 2rem; letter-spacing: -.04em; }
+.upload-area { border: 2px dashed #cbd5e1; background: #f8fafc; }
+.upload-area.dragging { border-color: #206bc4; background: #edf5ff; }
+.upload-area .form-control { max-width: 440px; margin-inline: auto; background: white; }
+.skip-link:focus { position: fixed; top: 8px; left: 8px; padding: 12px; background: white; z-index: 2000; }
+@media (min-width: 992px) { .navbar-vertical .navbar-brand { padding-block: 1.6rem; } .navbar-vertical .nav-link { padding-block: .8rem; } }
+@media (max-width: 991px) { .sidebar-note { display: none; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }

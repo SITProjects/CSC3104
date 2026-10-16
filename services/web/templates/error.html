@@ -1,0 +1,9 @@
+{% extends 'base.html' %}
+{% set title = 'Something needs attention' %}
+{% block content %}
+<div class="card"><div class="empty">
+  <div class="empty-header">{{ code|default('—') }}</div>
+  <p class="empty-title">{{ message|default('This page is not available yet.') }}</p>
+  <div class="empty-action"><a href="{{ urls.dashboard }}" class="btn btn-primary">Back to overview</a></div>
+</div></div>
+{% endblock %}

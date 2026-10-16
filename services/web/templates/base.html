@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="IdleCloud — shared campus compute for document processing.">
+  <title>{{ title|default('IdleCloud') }} · IdleCloud</title>
+  {% set assets = static_url|default('/static') %}
+  <link rel="stylesheet" href="{{ assets }}/vendor/tabler/tabler.min.css">
+  <link rel="stylesheet" href="{{ assets }}/app.css">
+  <script defer src="{{ assets }}/vendor/tabler/tabler.min.js"></script>
+  <script defer src="{{ assets }}/app.js"></script>
+</head>
+<body>
+{% set urls = urls|default({'dashboard':'/', 'jobs':'/jobs', 'upload':'/upload', 'nodes':'/nodes', 'costs':'/costs'}) %}
+{% set active = active|default('') %}
+<a class="visually-hidden-focusable skip-link" href="#main">Skip to content</a>
+<div class="page">
+  {% include 'components/sidebar.html' %}
+  <div class="page-wrapper">
+    <header class="navbar navbar-expand-md d-print-none">
+      <div class="container-xl">
+        <span class="text-secondary small">Campus Idle-Compute Cloud</span>
+        <div class="ms-auto d-flex align-items-center gap-2">
+          <span class="badge bg-secondary-lt">UI preview</span>
+          <span class="avatar avatar-sm bg-blue-lt" aria-hidden="true">IC</span>
+        </div>
+      </div>
+    </header>
+    <main id="main" tabindex="-1">
+      <!-- TODO: Replace preview notice when service integrations are implemented. -->
+      <div class="container-xl pt-3">
+        <div class="alert alert-info mb-0 py-2 small" role="note">
+          <div><strong>UI preview.</strong> Uploads, live progress, and downloads are not connected.
+          {% if preview_data|default(false) %}Displayed records are sample data.{% endif %}</div>
+        </div>
+      </div>
+      <div class="page-header d-print-none">
+        <div class="container-xl"><div class="row align-items-center g-3">
+          <div class="col-12 col-md">
+            <div class="page-pretitle">{% block eyebrow %}Workspace{% endblock %}</div>
+            <h1 class="page-title">{{ title|default('IdleCloud') }}</h1>
+            <p class="text-secondary mt-2 mb-0">{% block subtitle %}{% endblock %}</p>
+          </div>
+          <div class="col-12 col-md-auto ms-auto">{% block actions %}{% endblock %}</div>
+        </div></div>
+      </div>
+      <div class="page-body"><div class="container-xl">{% block content %}{% endblock %}</div></div>
+    </main>
+    <footer class="footer footer-transparent d-print-none mt-auto">
+      <div class="container-xl d-flex justify-content-between flex-wrap gap-2 small text-secondary">
+        <span>IdleCloud · Campus compute, connected.</span><span>Preview only · No files are sent</span>
+      </div>
+    </footer>
+  </div>
+</div>
+</body>
+</html>

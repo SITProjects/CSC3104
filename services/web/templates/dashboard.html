@@ -1,0 +1,39 @@
+{% extends 'base.html' %}
+{% from 'components/ui.html' import empty, money %}
+{% set title = 'Overview' %}
+{% set active = 'dashboard' %}
+{% set data = data|default({}) %}
+{% block subtitle %}A clear view of your documents and the compute behind them.{% endblock %}
+{% block actions %}<a href="{{ urls.upload }}" class="btn btn-primary">+ New OCR job</a>{% endblock %}
+{% block content %}
+<!-- TODO: Provide dashboard totals from the implemented job, node, and cost data sources. -->
+<div class="row row-cards mb-4">
+  {% for label, value, note, color in [('Total jobs',data.get('total', '—'),'Across the shared workspace','blue'), ('In progress',data.get('active', '—'),'Queued or processing','yellow'), ('Completed',data.get('completed', '—'),'Verified jobs','green'), ('Available nodes',data.get('idle_nodes', '—'),'Idle compute nodes','purple')] %}
+  <div class="col-sm-6 col-xl-3"><div class="card"><div class="card-body">
+    <div class="d-flex align-items-center mb-3"><span class="subheader">{{ label }}</span><span class="status-dot bg-{{ color }} ms-auto" aria-hidden="true"></span></div>
+    <div class="h1 mb-2 metric-number">{{ value }}</div><div class="text-secondary small">{{ note }}</div>
+  </div></div></div>
+  {% endfor %}
+</div>
+<div class="row row-cards">
+  <div class="col-lg-8"><div class="card h-100">
+    <div class="card-header"><h2 class="card-title">Recent jobs</h2><a class="ms-auto small" href="{{ urls.jobs }}">View all jobs →</a></div>
+    {% set jobs = data.get('recent', []) %}
+    {% if jobs %}{% include 'components/jobs_table.html' %}{% else %}{{ empty('Your next document starts here','Jobs will appear here when the data source is connected.',urls.upload) }}{% endif %}
+  </div></div>
+  <div class="col-lg-4"><div class="card h-100"><div class="card-body">
+    <span class="badge bg-blue-lt mb-3">ESTIMATED SPEND</span><h2 class="card-title">Cloud burst cost</h2>
+    <div class="h1 metric-number mt-3 mb-2">{{ money(data.get('known_total')) }}</div>
+    <p class="text-secondary small">Recorded machine costs, including idle time. {% if data.get('has_unknown_price') %}Some prices are unknown; this total is partial.{% else %}Costs are estimates, not a billing statement.{% endif %}</p>
+    <a href="{{ urls.costs }}" class="btn w-100 mt-3">Explore cost breakdown</a><hr>
+    <div class="d-flex justify-content-between small"><span class="text-secondary">Jobs requiring attention</span><span class="fw-semibold">{{ data.get('failed', '—') }}</span></div>
+  </div></div></div>
+  <div class="col-12"><div class="card"><div class="card-body">
+    <h2 class="card-title mb-3">From document to verified text</h2><div class="row g-4">
+      {% for number, label, description in [('01','Upload a PDF','Store your document and validate its pages.'), ('02','Prepare & process','Rendered pages become tasks for available workers.'), ('03','Verify & download','Results become available when verification completes.')] %}
+      <div class="col-md-4 d-flex gap-3"><span class="avatar bg-blue-lt">{{ number }}</span><div><div class="fw-semibold mb-1">{{ label }}</div><div class="small text-secondary">{{ description }}</div></div></div>
+      {% endfor %}
+    </div>
+  </div></div></div>
+</div>
+{% endblock %}

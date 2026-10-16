@@ -1,0 +1,32 @@
+{% extends 'base.html' %}
+{% from 'components/ui.html' import empty %}
+{% set title = 'Jobs' %}
+{% set active = 'jobs' %}
+{% set jobs = jobs|default([]) %}
+{% block subtitle %}Documents submitted across your shared workspace.{% endblock %}
+{% block actions %}<a href="{{ urls.upload }}" class="btn btn-primary">+ New OCR job</a>{% endblock %}
+{% block content %}
+<!-- TODO: Supply jobs from the existing coordinator; current filtering is browser-local. -->
+<div class="card">
+  <div class="card-header flex-wrap gap-3">
+    <h2 class="card-title">All jobs <span id="job-count" class="badge bg-secondary-lt ms-2">{{ jobs|length }}</span></h2>
+    <form id="job-filter-form" class="ms-auto d-flex gap-2 align-items-center">
+      <label class="form-label mb-0" for="status-filter">Status</label>
+      <select class="form-select w-auto" id="status-filter" name="status">
+        <option value="">All statuses</option>
+        {% for status in ['PENDING','RUNNING','COMPLETED','FAILED','CANCELLED'] %}<option value="{{ status }}">{{ status|title }}</option>{% endfor %}
+      </select><button class="btn" type="submit">Filter</button>
+    </form>
+  </div>
+  {% include 'components/jobs_table.html' %}
+  <div id="filter-empty" class="empty {{ 'd-none' if jobs else '' }}">
+    <p class="empty-title">No jobs to show</p>
+    <p class="empty-subtitle text-secondary">Try another filter. Records will appear once the data source is connected.</p>
+    <button type="button" class="btn" id="reset-filter">Reset filter</button>
+  </div>
+  <div class="card-footer d-flex justify-content-between align-items-center">
+    <span id="pagination-label" class="small text-secondary" role="status">{{ jobs|length }} jobs</span>
+    <nav aria-label="Job pages" class="d-flex gap-2"><button type="button" id="previous-page" class="btn btn-sm">Previous</button><button type="button" id="next-page" class="btn btn-sm">Next</button></nav>
+  </div>
+</div>
+{% endblock %}

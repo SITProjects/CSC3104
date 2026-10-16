@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% set title = 'New OCR job' %}
+{% set active = 'upload' %}
+{% block subtitle %}Prepare a document for distributed OCR.{% endblock %}
+{% block content %}
+<div class="row row-cards">
+<div class="col-lg-8"><form id="upload-form" class="card"  data-limit="{{ max_upload_bytes|default(50000000) }}">
+  <div class="card-header"><h2 class="card-title">Upload your document</h2></div>
+  <div class="card-body">
+    <div class="alert alert-info small">This form checks your selection locally. PDF contents, page counts, and passwords will be validated after the upload API is connected.</div>
+    <!-- TODO: Connect PDF upload and server-side validation in the pipeline PR. -->
+
+    <label class="form-label" for="pdf-file">PDF document <span class="text-danger" aria-hidden="true">*</span></label>
+    <div class="upload-area rounded p-4 text-center mb-4" id="drop-zone"><span class="avatar avatar-lg bg-blue-lt mb-3" aria-hidden="true">↑</span><h3 class="mb-2">Choose a PDF to get started</h3><p class="text-secondary">Drop it here or browse your files.</p><input class="form-control" id="pdf-file" type="file" accept=".pdf,application/pdf" required aria-describedby="file-help file-info" ><div id="file-info" class="small mt-2" aria-live="polite"></div><div id="file-help" class="text-secondary small mt-2">Up to {{ (max_upload_bytes|default(50000000) / 1000000)|round(1) }} MB · 500 pages · PDF files only</div></div>
+    <label class="form-label" for="owner-email">Owner email <span class="text-danger" aria-hidden="true">*</span></label><input class="form-control" id="owner-email" type="email" maxlength="254" placeholder="you@university.edu" required aria-describedby="email-help"><div id="email-help" class="form-hint">Preview field only. Nothing is sent or saved.</div>
+    <div id="upload-error" class="alert alert-danger mt-3 d-none" role="alert"></div>
+  </div>
+  <div class="card-footer d-flex justify-content-between align-items-center flex-wrap gap-3"><span class="text-secondary small">Your file stays on your device in this preview.</span><button class="btn me-2" type="reset">Clear</button><button class="btn btn-primary" id="submit-upload" type="button" >Check selection</button></div>
+</form></div>
+<div class="col-lg-4"><div class="card mb-3"><div class="card-header"><h2 class="card-title">Processing settings</h2></div><div class="card-body"><dl class="row mb-0"><dt class="col-7 text-secondary fw-normal mb-3">OCR language</dt><dd class="col-5 text-end">English</dd><dt class="col-7 text-secondary fw-normal mb-3">Pages per task</dt><dd class="col-5 text-end">10</dd><dt class="col-7 text-secondary fw-normal mb-3">Replicas per task</dt><dd class="col-5 text-end">3</dd><dt class="col-7 text-secondary fw-normal mb-3">CPU per replica</dt><dd class="col-5 text-end">{{ cpu|default(1) }} core</dd><dt class="col-7 text-secondary fw-normal">Memory per replica</dt><dd class="col-5 text-end">{{ memory|default(512) }} MiB</dd></dl><hr><p class="text-secondary small mb-0">Example defaults from the project specs. Resource requests and processing are not active in this preview.</p></div></div><div class="card bg-blue-lt border-0"><div class="card-body"><h3 class="card-title">Keep track of every step</h3><p class="mb-0 small">Explore a sample job to see page preparation, processing, and verification. These stages are preview data.</p></div></div></div>
+</div>
+{% endblock %}

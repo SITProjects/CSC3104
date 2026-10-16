@@ -1,0 +1,20 @@
+{% extends 'base.html' %}
+{% from 'components/ui.html' import badge, empty, timestamp %}
+{% set title = 'Compute nodes' %}
+{% set active = 'nodes' %}
+{% set nodes = nodes|default([]) %}
+{% block subtitle %}Registered compute, availability, and verification trust.{% endblock %}
+{% block content %}
+<!-- TODO: Read stored node reports. Add controls only when the node-management API exists. -->
+<div class="card">
+  <div class="card-header"><h2 class="card-title">Registered nodes</h2><span class="badge bg-secondary-lt ms-auto">{{ nodes|length }} nodes</span></div>
+  {% if nodes %}<div class="table-responsive"><table class="table table-vcenter card-table">
+    <thead><tr><th>Node</th><th>Reported state</th><th>Trust score</th><th>Active replicas</th><th>Agreement / disagreement</th><th>Last heartbeat</th></tr></thead>
+    <tbody>{% for node in nodes %}<tr>
+      <td class="fw-medium">{{ node.name }}</td><td>{{ badge(node.state) }}</td><td>{{ '%.3f'|format(node.trust_score) }}</td>
+      <td>{{ node.active_replicas }}</td><td>{{ node.total_agree }} / {{ node.total_disagree }}</td><td class="small text-secondary">{{ timestamp(node.last_heartbeat) }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>{% else %}{{ empty('No node data available','Registered nodes will appear here when the data source is connected.') }}{% endif %}
+</div>
+<p class="text-secondary small mt-3">Read-only view. Availability and heartbeat times reflect supplied node reports.</p>
+{% endblock %}

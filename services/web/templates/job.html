@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% from 'components/ui.html' import empty %}
+{% set title = 'Job details' %}
+{% set active = 'jobs' %}
+{% block subtitle %}Follow page preparation, processing, and verification.{% endblock %}
+{% block actions %}<a class="btn" href="{{ urls.jobs }}">← All jobs</a>{% endblock %}
+{% block content %}
+<!-- TODO: Supply job details and connect progress refresh when the public endpoint exists. -->
+{% if job|default(none) %}
+  <div class="small text-secondary mb-3">Preview only · Live updates are not connected</div>
+  {% include 'components/job_detail.html' %}
+{% else %}
+  <div class="card">{{ empty('No job selected','Select a job once the job data source is connected.', urls.jobs, 'Browse jobs') }}</div>
+{% endif %}
+{% endblock %}
