@@ -57,6 +57,9 @@ class TaskIn(BaseModel):
 
 
 class CreateJobRequest(BaseModel):
+    job_id: UUID | None = Field(
+        default=None, examples=["123e4567-e89b-12d3-a456-426614174000"]
+    )
     email: str = Field(examples=["user@example.com"])
     job_type: str = Field(examples=["ocr"])
     params: dict[str, Any] = Field(examples=[{"param1": "value1", "param2": "value2"}])
