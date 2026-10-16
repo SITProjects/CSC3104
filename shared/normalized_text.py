@@ -31,7 +31,7 @@ def normalize_text(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = text.translate(_INVISIBLE)
     # drop remaining control characters (category Cc) except the newline
-    text = "".join(c for c in text if c == "\n" or unicodedata.category(c) != "Cc")
+    text = text.translate(dict.fromkeys(map(ord, "\t\v\f"), " "))
     lines = (_SPACES.sub(" ", line).strip() for line in text.split("\n"))
     text = _BLANK_LINES.sub("\n\n", "\n".join(lines))
     return text.strip("\n")

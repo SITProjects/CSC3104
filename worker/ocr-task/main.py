@@ -15,7 +15,6 @@ from typing import Any
 from urllib import request
 
 import pytesseract
-from dotenv import load_dotenv
 from PIL import Image
 
 from shared import checkpoint
@@ -127,7 +126,6 @@ def upload_result(manifest: dict[str, Any], body: bytes) -> None:
 
 
 def main() -> None:
-    load_dotenv(".env.worker")  # local runs only; in a Pod the env is already set
     stop = checkpoint.StopFlag()
     config = read_environment()
     manifest = call_coordinator(config, "GET", "manifest")
@@ -135,6 +133,12 @@ def main() -> None:
     # input_urls is keyed by the task's input.files, e.g. "pages/0001.png";
     # zero-padded names sort into page order
     names = sorted(manifest["input_urls"])
+    if not names:
+        # nothing to OCR; uploading an empty result would put it to a vote
+        raise RuntimeError(
+            f"replica {manifest['replica_id']} has no input files; "
+            "create the task with input.files"
+        )
     state = checkpoint.load(manifest) or {"next": 0, "pages": {}}
 
     for name in names[state["next"] :]:
@@ -148,7 +152,18 @@ def main() -> None:
         checkpoint.save(manifest, state)
         # 100 is set by the coordinator when /result arrives
         progress = min(99, state["next"] * 100 // len(names))
-        call_coordinator(config, "POST", "progress", {"progress": progress})
+        try:
+            call_coordinator(config, "POST", "progress", {"progress": progress})
+        except Exception as e:  # noqa: BLE001
+            # best effort: the page and checkpoint are already saved
+            print(f"Failed to report progress {progress}: {e}")
+
+    if stop.stop:
+        # SIGTERM arrived during the last page. Its checkpoint is saved, so the
+        # next attempt resumes with every page done and only uploads the result.
+        checkpoint.evict(
+            manifest, state, config["coordinator_url"], config["replica_token"]
+        )
 
     result = {"pages": state["pages"]}
     upload_result(manifest, canonical_json(result))
