@@ -1,8 +1,9 @@
-from sqlalchemy import update
+from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.coordinator.models import CreateJobRequest
-from shared.db import Job, Task, TaskStatus
+from shared.db import Job, ReplicaStatus, Task, TaskStatus
+from shared.db.models import Replica
 
 
 async def create_tasks(
@@ -35,3 +36,31 @@ async def mark_task_running(session: AsyncSession, task_id: int) -> None:
     )
 
     await session.execute(stmt)
+
+
+async def set_voting(session: AsyncSession, task: Task):
+    """
+    Checks if a task is eligible for voting based on its replicas' statuses and update the task's status to VOTING if eligible.
+
+    args:
+        task: The Task object to check for voting eligibility.
+
+    """
+    unfinished = await session.scalar(
+        select(
+            exists().where(
+                Replica.task_id == task.id,
+                Replica.status.in_(
+                    [
+                        ReplicaStatus.SCHEDULED,
+                        ReplicaStatus.RUNNING,
+                        ReplicaStatus.EVICTED,
+                        ReplicaStatus.LOST,
+                    ]
+                ),
+            )
+        )
+    )
+
+    if not unfinished and task.status in [TaskStatus.DISPUTED, TaskStatus.RUNNING]:
+        task.status = TaskStatus.VOTING

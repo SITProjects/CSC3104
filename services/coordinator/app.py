@@ -12,10 +12,16 @@ from kubernetes import client, config
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.settings import COORDINATOR_URL
-from services.coordinator.crud.jobs import get_job
-from services.coordinator.crud.replicas import get_replica_with_task
+from services.coordinator.crud import (
+    create_event,
+    evict_replica,
+    get_job,
+    get_replica_with_task,
+    mark_replica_done,
+    set_voting,
+)
 from services.coordinator.scheduler import scheduler_loop
-from shared.db import JobType, JobView, Replica, Task, session_manager
+from shared.db import JobType, JobView, Replica, ReplicaStatus, Task, session_manager
 from shared.migrate import run_migrations
 
 from .crud import create_job, create_replicas, create_tasks, ensure_job_type_exists
@@ -58,7 +64,10 @@ app = FastAPI(title="Coordinator", lifespan=lifespan)
 
 
 async def require_token(
-    session: AsyncSession, replica_id: int, authorization: str | None
+    session: AsyncSession,
+    replica_id: int,
+    authorization: str | None,
+    lock: bool = False,
 ) -> tuple[Replica, Task, JobType]:
     """
     Checks the request's REPLICA_TOKEN against the hash stored for the replica.
@@ -72,7 +81,7 @@ async def require_token(
     raises:
         HTTPException: 401 if the replica does not exist or the token is missing or wrong.
     """
-    res = await get_replica_with_task(session, replica_id)
+    res = await get_replica_with_task(session, replica_id, lock)
     if res is None:
         raise HTTPException(401, "Unauthorized")
     replica, task, job_type = res
@@ -89,7 +98,7 @@ async def require_token(
     return replica, task, job_type
 
 
-@app.get("/internal/job/{id}")
+@app.get("/internal/jobs/{id}")
 async def fetch_job(id: UUID, session: DbSession) -> JobView:
     """
     Returns a job view for the given job id.
@@ -186,7 +195,12 @@ async def report_progress(
     returns:
         Ack: An acknowledgment of the progress report.
     """
-    await require_token(session, id, authorization)
+    async with session.begin():
+        replica, _, _ = await require_token(session, id, authorization, True)
+        if replica.status == ReplicaStatus.DONE:
+            raise HTTPException(409, f"replica {id} is DONE, cannot report progress")
+        else:
+            replica.progress = body.progress
     return Ack()
 
 
@@ -208,7 +222,19 @@ async def report_result(
     returns:
         Ack: An acknowledgment of the result report.
     """
-    await require_token(session, id, authorization)
+    async with session.begin():
+        replica, task, _ = await require_token(session, id, authorization, True)
+        if replica.status != ReplicaStatus.RUNNING:
+            raise HTTPException(409, f"replica {id} is DONE, cannot report result")
+        else:
+            await mark_replica_done(
+                session,
+                replica,
+                task,
+                body.result_hash,
+                body.exit_code,
+            )
+            await set_voting(session, task)
     return Ack()
 
 
@@ -226,7 +252,23 @@ async def report_evicted(
     returns:
         Ack: An acknowledgment of the evicted report.
     """
-    await require_token(session, id, authorization)
+    async with session.begin():
+        replica, task, _ = await require_token(session, id, authorization, True)
+        if replica.status != ReplicaStatus.RUNNING:
+            raise HTTPException(
+                409, f"replica {id} is {replica.status.value}, not RUNNING"
+            )
+        node_name = replica.node_name
+        await evict_replica(session, replica)
+        await create_event(
+            session,
+            "replica_evicted",
+            task.job_id,
+            task.id,
+            node_name,
+            f"replica with id {replica.id} evicted",
+        )
+        await set_voting(session, task)
     return Ack()
 
 

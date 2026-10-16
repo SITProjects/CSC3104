@@ -1,14 +1,18 @@
 import asyncio
-import hashlib
 import secrets
 
 from kubernetes.client import BatchV1Api
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.settings import BATCH_SIZE, SCHEDULER_INTERVAL
-from shared.db.models import ReplicaStatus
 
-from .crud import fetch_scheduled_replicas, mark_job_running, mark_task_running
+from .crud import (
+    fetch_scheduled_replicas,
+    mark_job_running,
+    mark_task_running,
+    recover_replicas,
+    schedule_replica,
+)
 from .k8s import build_replica_job_manifest, create_job
 
 
@@ -19,6 +23,7 @@ async def launch_batch(
 ) -> int:
     launched = 0
     async with session_factory.begin() as session:
+        await recover_replicas(session)
         scheduled_replicas = await fetch_scheduled_replicas(session, limit=BATCH_SIZE)
         for replica, task, job_type in scheduled_replicas:
             print(f"launching replica {replica.id} attempt {replica.attempt}")
@@ -34,9 +39,7 @@ async def launch_batch(
                 # TODO: include a X amt of retries here, mark replica as failed if it fails to launch after X attempts
                 print(f"Failed to create K8s job for replica {replica.id}")
                 continue
-            replica.status = ReplicaStatus.RUNNING
-            replica.token_hash = hashlib.sha256(token.encode()).hexdigest()
-            replica.progress = 0
+            await schedule_replica(session, replica, token)
             await session.flush()
             await mark_task_running(session, task.id)
             await mark_job_running(session, task.job_id)
