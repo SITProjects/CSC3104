@@ -75,7 +75,8 @@ if (filterForm) {
       const query = new URLSearchParams();
       if (filter.value) query.set('status', filter.value);
       if (page > 1) query.set('page', page);
-      const url = `${window.location.pathname}${query.size ? `?${query}` : ''}`;
+      const search = query.toString();
+      const url = `${window.location.pathname}${search ? `?${search}` : ''}`;
       try { window.history.replaceState(null, '', url); } catch { /* file:// previews may restrict history. */ }
     }
   }
