@@ -7,7 +7,7 @@ services:
       - ./services/coordinator:/app/services/coordinator
       - ./shared:/app/shared
       - ./core:/app/core
-      - ./scripts:/app/scripts # dev-replica.py
+      - ./scripts:/app/scripts
       - k3s-config:/k3s-config:ro
     # k3s writes its kubeconfig with server 127.0.0.1; point it at the k3-server service
     command: >-
