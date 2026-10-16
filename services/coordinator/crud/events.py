@@ -1,3 +1,4 @@
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +12,7 @@ async def create_event(
     job_id: UUID,
     task_id: int,
     node_name: str | None = None,
-    details: str | None = None,
+    detail: dict[str, Any] | None = None,
 ) -> None:
     """
     Records an event in the events table, e.g. a replica eviction.
@@ -29,7 +30,7 @@ async def create_event(
         job_id=job_id,
         task_id=task_id,
         node_name=node_name,
-        detail=details,
+        detail=detail,
     )
     session.add(event)
     await session.flush()

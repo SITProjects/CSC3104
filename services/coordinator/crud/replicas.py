@@ -15,6 +15,8 @@ from shared.db.models import (
     TaskStatus,
 )
 
+from .tasks import set_voting
+
 
 async def create_replicas(
     session: AsyncSession, tasks: list[Task], replicas_per_task: int
@@ -147,21 +149,25 @@ async def recover_replicas(session: AsyncSession) -> None:
                 Replica.status == ReplicaStatus.EVICTED,
                 Replica.status == ReplicaStatus.LOST,
             ),
-            Task.status == TaskStatus.RUNNING,
+            Task.status.in_([TaskStatus.RUNNING, TaskStatus.DISPUTED]),
         )
         .with_for_update(of=Replica, skip_locked=True)
     )
-    rows = (await session.execute(stmt)).scalars()
-    for replica in rows:
+    replicas = (await session.execute(stmt)).scalars()
+    affected_task_ids = set()
+    for replica in replicas:
         if replica.attempt >= RETRY_ATTEMPTS:
             replica.status = ReplicaStatus.FAILED
             replica.ended_at = datetime.now(UTC)
+            affected_task_ids.add(replica.task_id)
             continue
         replica.attempt += 1
         replica.status = ReplicaStatus.SCHEDULED
         replica.started_at = None
         replica.ended_at = None
-        await session.flush()
+    await session.flush()
+    for task_id in affected_task_ids:
+        await set_voting(session, task_id)
 
 
 async def schedule_replica(session: AsyncSession, replica: Replica, token: str) -> None:

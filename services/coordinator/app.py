@@ -225,7 +225,10 @@ async def report_result(
     async with session.begin():
         replica, task, _ = await require_token(session, id, authorization, True)
         if replica.status != ReplicaStatus.RUNNING:
-            raise HTTPException(409, f"replica {id} is DONE, cannot report result")
+            raise HTTPException(
+                409,
+                f"replica {id} status is {replica.status.value}, cannot report result",
+            )
         else:
             await mark_replica_done(
                 session,
@@ -266,7 +269,12 @@ async def report_evicted(
             task.job_id,
             task.id,
             node_name,
-            f"replica with id {replica.id} evicted",
+            {
+                "replica_id": replica.id,
+                "attempt": replica.attempt,
+                "node_name": node_name,
+                "message": "replica was evicted from its node",
+            },
         )
         await set_voting(session, task)
     return Ack()
