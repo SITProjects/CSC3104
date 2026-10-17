@@ -1,5 +1,6 @@
 import logging
 import re
+from collections.abc import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -106,37 +107,8 @@ async def vote_task(session: AsyncSession, task: Task) -> bool:
     elif len(replicas) == 5:
         task.status = TaskStatus.FAILED
     else:
-        eviction_events = (
-            await session.scalars(
-                select(Event).where(
-                    Event.task_id == task.id,
-                    Event.type == "replica_evicted",
-                )
-            )
-        ).all()
-        assignments = {
-            (replica.id, replica.attempt): replica.node_name for replica in replicas
-        }
-        historical_nodes = []
-        for event in eviction_events:
-            # JSON preserves an old PC name even if its node row is removed.
-            detail = event.detail or {}
-            name = detail.get("node_name")
-            name = name if isinstance(name, str) else event.node_name
-            historical_nodes.append(name)
-            key = (detail.get("replica_id"), detail.get("attempt"))
-            # A final eviction clears node_name. Only an event for this exact
-            # attempt may fill it in. An older attempt cannot prove its PC.
-            if (
-                isinstance(key[0], int)
-                and isinstance(key[1], int)
-                and key in assignments
-                and assignments[key] is None
-            ):
-                assignments[key] = name
-        previous_nodes = list(assignments.values()) + historical_nodes
         try:
-            excluded_nodes = dispute_exclusions(previous_nodes)
+            excluded_nodes = await get_dispute_exclusions(session, task, replicas)
         except ValueError:
             log.warning("Task %s is waiting for complete PC assignments", task.id)
             return False
@@ -163,3 +135,53 @@ async def vote_task(session: AsyncSession, task: Task) -> bool:
     task.final_hash = winner
     await session.flush()
     return True
+
+
+async def get_dispute_exclusions(
+    session: AsyncSession, task: Task, replicas: Sequence[Replica]
+) -> list[str]:
+    """
+    Collects current and historical PCs to exclude from extra replicas.
+
+    Eviction events preserve earlier assignments. An event for the exact
+    replica and attempt can also recover a cleared final PC assignment.
+
+    args:
+        session: The verifier's current transaction.
+        task: The task whose PC history is needed.
+        replicas: The task's replicas, already loaded by vote_task.
+    returns:
+        list[str]: Distinct previous PC names in sorted order.
+    raises:
+        ValueError: If any previous PC assignment is missing.
+    """
+    eviction_events = (
+        await session.scalars(
+            select(Event).where(
+                Event.task_id == task.id,
+                Event.type == "replica_evicted",
+            )
+        )
+    ).all()
+    assignments = {
+        (replica.id, replica.attempt): replica.node_name for replica in replicas
+    }
+    historical_nodes = []
+    for event in eviction_events:
+        # JSON preserves an old PC name even if its node row is removed.
+        detail = event.detail or {}
+        name = detail.get("node_name")
+        name = name if isinstance(name, str) else event.node_name
+        historical_nodes.append(name)
+        key = (detail.get("replica_id"), detail.get("attempt"))
+        # A final eviction clears node_name. Only an event for this exact
+        # attempt may fill it in. An older attempt cannot prove its PC.
+        if (
+            isinstance(key[0], int)
+            and isinstance(key[1], int)
+            and key in assignments
+            and assignments[key] is None
+        ):
+            assignments[key] = name
+    previous_nodes = list(assignments.values()) + historical_nodes
+    return dispute_exclusions(previous_nodes)
