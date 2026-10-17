@@ -168,14 +168,13 @@ async def get_dispute_exclusions(
     }
     historical_nodes = []
     for event in eviction_events:
-        # JSON preserves an old PC name even if its node row is removed.
+        # Event details retain the PC name even if the node record is deleted.
         detail = event.detail or {}
         name = detail.get("node_name")
         name = name if isinstance(name, str) else event.node_name
         historical_nodes.append(name)
         key = (detail.get("replica_id"), detail.get("attempt"))
-        # A final eviction clears node_name. Only an event for this exact
-        # attempt may fill it in. An older attempt cannot prove its PC.
+        # Retries may use different PCs, restore only the matching replica and attempt.
         if (
             isinstance(key[0], int)
             and isinstance(key[1], int)
