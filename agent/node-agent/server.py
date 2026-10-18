@@ -36,7 +36,11 @@ def handle(change: Transition | None) -> None:
 async def watch_for_silence() -> None:
     while True:
         await asyncio.sleep(config.TICK_S)
-        handle(detector.tick(time.monotonic()))
+        # Keep the watchdog alive if handle() fails, or stale-sensor detection stops
+        try:
+            handle(detector.tick(time.monotonic()))
+        except Exception:
+            log.exception("tick failed")
 
 
 @asynccontextmanager

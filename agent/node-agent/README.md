@@ -19,7 +19,7 @@ Every number is in `config.py` and can be overridden with an environment variabl
 
 ## Run
 
-Inside Ubuntu (WSL2):
+Inside Ubuntu (WSL2). Requires Python 3.11+ (Ubuntu 24.04 ships 3.12):
 
 ```bash
 cd agent/node-agent
