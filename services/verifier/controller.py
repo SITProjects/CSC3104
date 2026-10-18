@@ -1,6 +1,5 @@
 import logging
 import re
-from collections.abc import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -15,7 +14,8 @@ from shared.db.models import (
     TaskStatus,
 )
 
-from .voting import dispute_exclusions, winning_hash
+from .pc_tracking import get_dispute_exclusions, pc_wait_expired
+from .voting import winning_hash
 
 log = logging.getLogger("verifier")
 
@@ -35,16 +35,16 @@ async def verify_next_task(
     All configured initial counts from one to five are supported. Failed replicas
     count towards the total but do not contribute votes. A task_disputed event
     stores the extra replica ids and excluded_nodes, including previous retry
-    PCs from eviction events. Tasks missing PC assignments are left unchanged
-    while other tasks are checked. This records a scheduling request; actual
-    PC placement is a later integration.
+    PCs from eviction events. Invalid replica counts and unrecoverable PC data
+    fail only the affected task, with a recorded reason. Missing PC metadata
+    gets a bounded wait recorded in the database before failing the task.
+    Waiting tasks allow later tasks to proceed. Actual PC placement is a later
+    integration.
 
     args:
         session_factory: The shared async database session factory.
     returns:
         int | None: The processed task's id, or None if no task can be processed.
-    raises:
-        ValueError: If the task has fewer than one or more than five replicas.
     """
     unfinished = (
         select(Replica.id)
@@ -81,17 +81,22 @@ async def verify_next_task(
 
 async def vote_task(session: AsyncSession, task: Task) -> bool:
     """
-    Applies a vote to a locked task, leaving incomplete PC data for a later poll.
+    Applies a vote, waits for PC metadata or records a terminal data error.
 
     args:
         session: The verifier's current transaction.
         task: The locked VOTING task with no unfinished replicas.
     returns:
-        bool: True when a decision was saved, False when PC data is incomplete.
+        bool: True after saving an outcome, False while waiting for PC metadata.
     """
     replicas = (
         await session.scalars(select(Replica).where(Replica.task_id == task.id))
     ).all()
+    replica_count = len(replicas)
+    if not 1 <= replica_count <= 5:
+        await fail_verification(session, task, "invalid_replica_count", replica_count)
+        return True
+
     hashes = [
         replica.result_hash
         for replica in replicas
@@ -100,23 +105,27 @@ async def vote_task(session: AsyncSession, task: Task) -> bool:
         and replica.result_hash is not None
         and re.fullmatch(r"[0-9a-f]{64}", replica.result_hash)
     ]
-    winner = winning_hash(hashes, len(replicas))
+    winner = winning_hash(hashes, replica_count)
 
     if winner is not None:
         task.status = TaskStatus.VERIFIED
-    elif len(replicas) == 5:
+    elif replica_count == 5:
         task.status = TaskStatus.FAILED
     else:
         try:
             excluded_nodes = await get_dispute_exclusions(session, task, replicas)
         except ValueError:
-            log.warning("Task %s is waiting for complete PC assignments", task.id)
-            return False
+            if not await pc_wait_expired(session, task, replicas):
+                return False
+            await fail_verification(
+                session, task, "missing_pc_assignment", replica_count
+            )
+            return True
 
         task.status = TaskStatus.DISPUTED
         extra_replicas = [
             Replica(task_id=task.id, status=ReplicaStatus.SCHEDULED, attempt=1)
-            for _ in range(min(2, 5 - len(replicas)))
+            for _ in range(min(2, 5 - replica_count))
         ]
         session.add_all(extra_replicas)
         await session.flush()
@@ -137,50 +146,32 @@ async def vote_task(session: AsyncSession, task: Task) -> bool:
     return True
 
 
-async def get_dispute_exclusions(
-    session: AsyncSession, task: Task, replicas: Sequence[Replica]
-) -> list[str]:
+async def fail_verification(
+    session: AsyncSession, task: Task, reason: str, replica_count: int
+) -> None:
     """
-    Collects current and historical PCs to exclude from extra replicas.
+    Saves a task's verification data failure in the caller's transaction.
 
-    Eviction events preserve earlier assignments. An event for the exact
-    replica and attempt can also recover a cleared final PC assignment.
+    Records the reason, clears any stale final hash and prevents repeated polls
+    from retrying a task whose data cannot be used safely.
 
     args:
         session: The verifier's current transaction.
-        task: The task whose PC history is needed.
-        replicas: The task's replicas, already loaded by vote_task.
-    returns:
-        list[str]: Distinct previous PC names in sorted order.
-    raises:
-        ValueError: If any previous PC assignment is missing.
+        task: The locked task that cannot be verified safely.
+        reason: The data error, e.g. invalid_replica_count or missing_pc_assignment.
+        replica_count: The number of replica records found for this task.
     """
-    eviction_events = (
-        await session.scalars(
-            select(Event).where(
-                Event.task_id == task.id,
-                Event.type == "replica_evicted",
-            )
+    task.status = TaskStatus.FAILED
+    task.final_hash = None
+    session.add(
+        Event(
+            type="task_verification_failed",
+            job_id=task.job_id,
+            task_id=task.id,
+            detail={"reason": reason, "replica_count": replica_count},
         )
-    ).all()
-    assignments = {
-        (replica.id, replica.attempt): replica.node_name for replica in replicas
-    }
-    historical_nodes = []
-    for event in eviction_events:
-        # Event details retain the PC name even if the node record is deleted.
-        detail = event.detail or {}
-        name = detail.get("node_name")
-        name = name if isinstance(name, str) else event.node_name
-        historical_nodes.append(name)
-        key = (detail.get("replica_id"), detail.get("attempt"))
-        # Retries may use different PCs, restore only the matching replica and attempt.
-        if (
-            isinstance(key[0], int)
-            and isinstance(key[1], int)
-            and key in assignments
-            and assignments[key] is None
-        ):
-            assignments[key] = name
-    previous_nodes = list(assignments.values()) + historical_nodes
-    return dispute_exclusions(previous_nodes)
+    )
+    await session.flush()
+    log.warning(
+        "Task %s failed verification: %s (replicas=%s)", task.id, reason, replica_count
+    )
