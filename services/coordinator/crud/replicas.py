@@ -1,5 +1,6 @@
 import hashlib
 from datetime import UTC, datetime
+from uuid import UUID
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,58 @@ from shared.db.models import (
 )
 
 from .tasks import set_voting
+
+
+async def fetch_running_replicas(
+    session: AsyncSession, older_than: datetime
+) -> list[tuple[Replica, UUID]]:
+    """Snapshot running replicas past the launch grace period, with their job ids."""
+    result = await session.execute(
+        select(Replica, Task.job_id)
+        .join(Task, Replica.task_id == Task.id)
+        .where(
+            Replica.status == ReplicaStatus.RUNNING,
+            Replica.started_at < older_than,
+        )
+    )
+    return [(replica, job_id) for replica, job_id in result.all()]
+
+
+async def mark_lost(session: AsyncSession, replica_id: int, attempt: int) -> bool:
+    """Invalidate only the running attempt observed by housekeeping."""
+    changed = await session.scalar(
+        update(Replica)
+        .where(
+            Replica.id == replica_id,
+            Replica.attempt == attempt,
+            Replica.status == ReplicaStatus.RUNNING,
+        )
+        .values(status=ReplicaStatus.LOST, token_hash=None, node_name=None)
+        .returning(Replica.id)
+    )
+    return changed is not None
+
+
+async def lock_stale_replica_job(
+    session: AsyncSession, replica_id: int, attempt: int
+) -> bool:
+    """Guard job deletion against scheduling; finished jobs use Kubernetes TTL."""
+    stale_id = await session.scalar(
+        select(Replica.id)
+        .where(
+            Replica.id == replica_id,
+            or_(
+                Replica.attempt > attempt,
+                (Replica.attempt == attempt)
+                & Replica.status.in_(
+                    [ReplicaStatus.CANCELLED, ReplicaStatus.LOST, ReplicaStatus.EVICTED]
+                ),
+            ),
+        )
+        .with_for_update(skip_locked=True)
+    )
+    # A SCHEDULED replica may be in the middle of creating this very Job.
+    return stale_id is not None
 
 
 async def create_replicas(

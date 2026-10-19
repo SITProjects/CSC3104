@@ -7,9 +7,7 @@ from kubernetes.client import BatchV1Api
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.settings import BATCH_SIZE, RETRY_ATTEMPTS, SCHEDULER_INTERVAL
-from shared.db.models import ReplicaStatus
-
-from ..crud import (
+from services.coordinator.crud import (
     fetch_scheduled_replicas,
     mark_job_running,
     mark_task_running,
@@ -17,7 +15,8 @@ from ..crud import (
     schedule_replica,
     set_voting,
 )
-from ..k8s import build_replica_job_manifest, create_job
+from services.coordinator.k8s import build_replica_job_manifest, create_job
+from shared.db.models import ReplicaStatus
 
 log = logging.getLogger("coordinator.scheduler")
 

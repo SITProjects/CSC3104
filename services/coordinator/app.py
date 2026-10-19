@@ -14,17 +14,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.settings import COORDINATOR_URL
 from services.coordinator.crud import (
+    cancel_job,
     create_event,
+    create_job,
+    create_replicas,
+    create_tasks,
+    ensure_job_type_exists,
     evict_replica,
     get_job,
     get_replica_with_task,
     mark_replica_done,
     set_voting,
+    update_node_state,
 )
-from services.coordinator.crud.jobs import cancel_job
 from services.coordinator.k8s import cancel_k3_job
-from services.coordinator.loops.pod_watcher import watch_pods
-from services.coordinator.loops.scheduler import scheduler_loop
+from services.coordinator.loops import housekeeping_loop, scheduler_loop, watch_pods
+from services.coordinator.models import (
+    Ack,
+    CreateJobRequest,
+    CreateJobResponse,
+    HeartbeatIn,
+    Manifest,
+    ProgressIn,
+    ResultIn,
+)
+from services.coordinator.storage import presign
 from shared.db import (
     JobType,
     JobView,
@@ -34,17 +48,6 @@ from shared.db import (
     session_manager,
 )
 from shared.migrate import run_migrations
-
-from .crud import create_job, create_replicas, create_tasks, ensure_job_type_exists
-from .models import (
-    Ack,
-    CreateJobRequest,
-    CreateJobResponse,
-    Manifest,
-    ProgressIn,
-    ResultIn,
-)
-from .storage import presign
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -65,8 +68,12 @@ async def lifespan(app: FastAPI):
     except config.ConfigException:
         await asyncio.to_thread(config.load_kube_config)
     batch_v1 = client.BatchV1Api()
+    core_v1 = client.CoreV1Api()
     scheduler = asyncio.create_task(
         scheduler_loop(session_manager.session_factory, COORDINATOR_URL, batch_v1)
+    )
+    housekeeping = asyncio.create_task(
+        housekeeping_loop(session_manager.session_factory, batch_v1, core_v1)
     )
     stop = threading.Event()
     watcher = threading.Thread(
@@ -74,20 +81,24 @@ async def lifespan(app: FastAPI):
         args=(
             asyncio.get_running_loop(),
             session_manager.session_factory,
-            client.CoreV1Api(),
+            core_v1,
             stop,
         ),
         name="pod_watcher",
         daemon=True,
     )
     watcher.start()
-    yield
-    stop.set()
-    scheduler.cancel()
-    with suppress(asyncio.CancelledError):
-        await scheduler
-    await asyncio.to_thread(watcher.join, 2)
-    await session_manager.close()
+    try:
+        yield
+    finally:
+        stop.set()
+        scheduler.cancel()
+        housekeeping.cancel()
+        for task in (scheduler, housekeeping):
+            with suppress(asyncio.CancelledError):
+                await task
+        await asyncio.to_thread(watcher.join, 2)
+        await session_manager.close()
 
 
 app = FastAPI(title="Coordinator", lifespan=lifespan)
@@ -332,6 +343,22 @@ async def cancel_job_request(id: UUID, session: DbSession, k3_api: K3API) -> Ack
     for name, result in zip(names, results):
         if isinstance(result, Exception):
             log.exception("failed to cancel K8s job %s: %s", name, result)
+    return Ack()
+
+
+@app.post("/internal/nodes/{name}/heartbeat")
+async def node_heartbeat(name: str, body: HeartbeatIn, session: DbSession) -> Ack:
+    """
+    Updates the last heartbeat time for the given node name.
+
+    args:
+        name: The name of the node sending the heartbeat.
+        session: The database session for this request.
+    returns:
+        Ack: An acknowledgment of the heartbeat.
+    """
+    async with session.begin():
+        await update_node_state(session, name, body.state)
     return Ack()
 
 
