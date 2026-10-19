@@ -24,8 +24,6 @@ async def launch_batch(
     launched = 0
     async with session_factory.begin() as session:
         await recover_replicas(session)
-    # one transaction per replica, so it is committed as RUNNING before its Pod
-    # can report anything to the pod watcher
     for _ in range(BATCH_SIZE):
         async with session_factory.begin() as session:
             scheduled_replicas = await fetch_scheduled_replicas(session, limit=1)
@@ -38,18 +36,18 @@ async def launch_batch(
             job_manifest = build_replica_job_manifest(
                 replica, task, job_type, token, coordinator_url
             )
-            try:
-                # BatchV1Api is blocking, so keep it off the event loop
-                await create_job(job_manifest, k3_api)
-            except Exception:  # noqa: BLE001
-                # TODO: include a X amt of retries here, mark replica as failed if it fails to launch after X attempts
-                print(f"Failed to create K8s job for replica {replica.id}")
-                # stop here: the replica stays SCHEDULED and would be picked again
-                break
             await schedule_replica(session, replica, token)
             await session.flush()
             await mark_task_running(session, task.id)
             await mark_job_running(session, task.job_id)
+        try:
+            # BatchV1Api is blocking, so keep it off the event loop
+            await create_job(job_manifest, k3_api)
+        except Exception:  # noqa: BLE001
+            # TODO: include a X amt of retries here, mark replica as failed if it fails to launch after X attempts
+            print(f"Failed to create K8s job for replica {replica.id}")
+            # stop here: the replica stays SCHEDULED and would be picked again
+            break
         launched += 1
         print(f"launched replica {replica.id} attempt {replica.attempt}")
     # only count successes, so repeated failures still wait SCHEDULER_INTERVAL
