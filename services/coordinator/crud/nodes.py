@@ -31,7 +31,9 @@ async def ensure_node(session: AsyncSession, node_name: str) -> None:
     )
 
 
-async def update_node_state(session: AsyncSession, node_name: str, state: str) -> None:
+async def update_node_state(
+    session: AsyncSession, node_name: str, state: str, cpu_percent: float
+) -> None:
     """
     Updates the state of a node in the database.
 
@@ -39,6 +41,7 @@ async def update_node_state(session: AsyncSession, node_name: str, state: str) -
         session: The database session for this request.
         node_name: The name of the node to update.
         state: The new state of the node.
+        cpu_percent: Whole-machine CPU use the node reported.
     """
     now = datetime.now(UTC)
     await session.execute(
@@ -47,9 +50,10 @@ async def update_node_state(session: AsyncSession, node_name: str, state: str) -
             name=node_name,
             state=state,
             last_heartbeat=now,
+            cpu_percent=cpu_percent,
         )
         .on_conflict_do_update(
             index_elements=[Node.name],
-            set_={"state": state, "last_heartbeat": now},
+            set_={"state": state, "last_heartbeat": now, "cpu_percent": cpu_percent},
         )
     )

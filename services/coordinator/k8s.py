@@ -3,6 +3,7 @@ from typing import cast
 
 from kubernetes.client import (
     ApiException,
+    AuthenticationV1Api,
     BatchV1Api,
     CoreV1Api,
     V1DeleteOptions,
@@ -11,6 +12,9 @@ from kubernetes.client import (
     V1Pod,
     V1PodList,
     V1Preconditions,
+    V1TokenReview,
+    V1TokenReviewSpec,
+    V1UserInfo,
 )
 
 from core.settings import JOB_NAMESPACE
@@ -215,3 +219,35 @@ async def cancel_k3_pod(pod_name: str, core_api: CoreV1Api, uid: str | None) -> 
     except ApiException as e:
         if e.status != 404:
             raise
+
+
+async def review_token(
+    auth_api: AuthenticationV1Api, token: str, audience: str
+) -> V1UserInfo | None:
+    """
+    Asks the API server who a service-account token belongs to (TokenReview).
+
+    args:
+        auth_api: The Kubernetes authentication API.
+        token: The bearer token from the request.
+        audience: The audience the token must have been issued for.
+    returns:
+        V1UserInfo | None: The token's user, with the node its Pod runs on in
+            extra["authentication.kubernetes.io/node-name"], or None if the token
+            is invalid, expired, or meant for another audience.
+    """
+    review = cast(
+        V1TokenReview,
+        await asyncio.to_thread(
+            auth_api.create_token_review,
+            V1TokenReview(spec=V1TokenReviewSpec(token=token, audiences=[audience])),
+        ),
+    )
+    status = review.status
+    if (
+        not status
+        or not status.authenticated
+        or audience not in (status.audiences or [])
+    ):
+        return None
+    return status.user
