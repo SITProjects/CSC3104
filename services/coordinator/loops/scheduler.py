@@ -1,11 +1,13 @@
 import asyncio
 import logging
 import secrets
+from datetime import UTC, datetime
 
 from kubernetes.client import BatchV1Api
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from core.settings import BATCH_SIZE, SCHEDULER_INTERVAL
+from core.settings import BATCH_SIZE, RETRY_ATTEMPTS, SCHEDULER_INTERVAL
+from shared.db.models import ReplicaStatus
 
 from ..crud import (
     fetch_scheduled_replicas,
@@ -43,9 +45,13 @@ async def launch_batch(
                 # BatchV1Api is blocking, so keep it off the event loop
                 await create_job(job_manifest, k3_api)
             except Exception:  # noqa: BLE001
-                # TODO: include a X amt of retries here, mark replica as failed if it fails to launch after X attempts
                 log.error(f"Failed to create K8s job for replica {replica.id}")
-                # stop here: the replica stays SCHEDULED and would be picked again
+                if replica.attempt >= RETRY_ATTEMPTS:
+                    replica.status = ReplicaStatus.FAILED
+                    replica.token_hash = None
+                    replica.ended_at = datetime.now(UTC)
+                else:
+                    replica.attempt += 1
                 break
             await schedule_replica(session, replica, token)
             await session.flush()
