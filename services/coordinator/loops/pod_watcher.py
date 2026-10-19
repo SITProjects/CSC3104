@@ -58,10 +58,13 @@ def watch_pods(loop, session_factory, v1, stop: threading.Event):
                 v1.list_namespaced_pod(JOB_NAMESPACE, label_selector=SELECTOR),
             )
             for pod in pods.items or []:
-                submit(loop, session_factory, to_update(v1, "ADDED", pod))
-            resource_version = (
-                pods.metadata.resource_version if pods.metadata else None
-            )
+                try:
+                    submit(loop, session_factory, to_update(v1, "ADDED", pod))
+                except (KeyError, ValueError):
+                    log.exception(
+                        "failed to submit pod update for %s", pod.metadata.name
+                    )
+            resource_version = pods.metadata.resource_version if pods.metadata else None
             for event in w.stream(
                 v1.list_namespaced_pod,
                 JOB_NAMESPACE,

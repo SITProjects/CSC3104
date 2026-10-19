@@ -270,6 +270,9 @@ async def handle_replica_completed(
         replica_id: The id of the completed replica.
         attempt: The attempt number of the completed replica.
         status: The status of the completed replica.
+        exit_code: The exit code of the completed replica, if known.
+    returns:
+        tuple[int, str | None] | None: The task id and node name of the completed replica, or None if the replica was not found or already completed.
     """
     replica = await session.scalar(
         select(Replica)
@@ -281,8 +284,6 @@ async def handle_replica_completed(
         .with_for_update()
     )
     if replica is None:
-        return None
-    if replica.attempt != attempt:
         return None
     node_name = replica.node_name  # before it is cleared, for the event
     replica.status = status
