@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import secrets
 
 from kubernetes.client import BatchV1Api
@@ -15,6 +16,8 @@ from ..crud import (
 )
 from ..k8s import build_replica_job_manifest, create_job
 
+log = logging.getLogger("coordinator.scheduler")
+
 
 async def launch_batch(
     session_factory: async_sessionmaker[AsyncSession],
@@ -30,26 +33,26 @@ async def launch_batch(
             if not scheduled_replicas:
                 break
             replica, task, job_type = scheduled_replicas[0]
-            print(f"launching replica {replica.id} attempt {replica.attempt}")
+            log.info(f"launching replica {replica.id} attempt {replica.attempt}")
             # the pod gets the plain token; only its hash is stored
             token = secrets.token_urlsafe(32)
             job_manifest = build_replica_job_manifest(
                 replica, task, job_type, token, coordinator_url
             )
+            try:
+                # BatchV1Api is blocking, so keep it off the event loop
+                await create_job(job_manifest, k3_api)
+            except Exception:  # noqa: BLE001
+                # TODO: include a X amt of retries here, mark replica as failed if it fails to launch after X attempts
+                log.error(f"Failed to create K8s job for replica {replica.id}")
+                # stop here: the replica stays SCHEDULED and would be picked again
+                break
             await schedule_replica(session, replica, token)
             await session.flush()
             await mark_task_running(session, task.id)
             await mark_job_running(session, task.job_id)
-        try:
-            # BatchV1Api is blocking, so keep it off the event loop
-            await create_job(job_manifest, k3_api)
-        except Exception:  # noqa: BLE001
-            # TODO: include a X amt of retries here, mark replica as failed if it fails to launch after X attempts
-            print(f"Failed to create K8s job for replica {replica.id}")
-            # stop here: the replica stays SCHEDULED and would be picked again
-            break
         launched += 1
-        print(f"launched replica {replica.id} attempt {replica.attempt}")
+        log.info(f"launched replica {replica.id} attempt {replica.attempt}")
     # only count successes, so repeated failures still wait SCHEDULER_INTERVAL
     return launched
 
@@ -77,6 +80,6 @@ async def scheduler_loop(
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
-            print("Scheduler transaction failed")
+            log.error("Scheduler transaction failed")
         # wait for x seconds before checking for new scheduled replicas
         await asyncio.sleep(SCHEDULER_INTERVAL)

@@ -65,7 +65,9 @@ async def fetch_scheduled_replicas(
         .where(
             Replica.status == ReplicaStatus.SCHEDULED,
             Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
-            Task.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]),
+            Task.status.in_(
+                [TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.DISPUTED]
+            ),
         )
         .order_by(Replica.id)
         .limit(limit)
