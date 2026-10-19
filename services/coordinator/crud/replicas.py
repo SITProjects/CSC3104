@@ -218,3 +218,66 @@ async def mark_replica_done(
     replica.exit_code = exit_code
     replica.ended_at = datetime.now(UTC)
     await session.flush()
+
+
+async def record_placement(
+    session: AsyncSession,
+    replica_id: int,
+    node_name: str | None,
+    started_at: datetime | None,
+) -> None:
+    """
+    Records the node name and start time of a replica that just started running.
+
+    args:
+        session: The database session for this request.
+        replica_id: The id of the replica that just started running.
+        node_name: The name of the node where the replica is running.
+        started_at: The time when the replica started running, or None if unknown.
+    """
+    replica = await session.get(Replica, replica_id)
+    if replica is None:
+        raise ValueError(f"replica {replica_id} not found")
+    replica.node_name = node_name
+    if started_at is not None:
+        replica.started_at = started_at
+    await session.flush()
+
+
+async def handle_replica_completed(
+    session: AsyncSession,
+    replica_id: int,
+    attempt: int,
+    status: ReplicaStatus,
+    exit_code: int | None = None,
+) -> tuple[int, str | None] | None:
+    """
+    Handles a replica that has completed its execution.
+
+    args:
+        session: The database session for this request.
+        replica_id: The id of the completed replica.
+        attempt: The attempt number of the completed replica.
+        status: The status of the completed replica.
+    """
+    replica = await session.scalar(
+        select(Replica)
+        .where(
+            Replica.id == replica_id,
+            Replica.attempt == attempt,
+            Replica.status == ReplicaStatus.RUNNING,
+        )
+        .with_for_update()
+    )
+    if replica is None:
+        return None
+    node_name = replica.node_name  # before it is cleared, for the event
+    replica.status = status
+    replica.token_hash = None
+    if status == ReplicaStatus.FAILED:
+        replica.ended_at = datetime.now(UTC)
+        replica.exit_code = exit_code
+    else:
+        replica.node_name = None  # requeued; the next attempt records its own node
+    await session.flush()
+    return replica.task_id, node_name

@@ -6,14 +6,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.settings import BATCH_SIZE, SCHEDULER_INTERVAL
 
-from .crud import (
+from ..crud import (
     fetch_scheduled_replicas,
     mark_job_running,
     mark_task_running,
     recover_replicas,
     schedule_replica,
 )
-from .k8s import build_replica_job_manifest, create_job
+from ..k8s import build_replica_job_manifest, create_job
 
 
 async def launch_batch(
