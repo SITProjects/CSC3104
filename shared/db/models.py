@@ -62,6 +62,7 @@ class TaskStatus(str, Enum):
     VERIFIED = "VERIFIED"
     DISPUTED = "DISPUTED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class ReplicaStatus(str, Enum):
@@ -71,6 +72,7 @@ class ReplicaStatus(str, Enum):
     LOST = "LOST"
     DONE = "DONE"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class NodeState(str, Enum):

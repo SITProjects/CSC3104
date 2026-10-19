@@ -146,3 +146,20 @@ async def create_job(manifest: dict, k3_api: BatchV1Api) -> None:
             if delete_err.status != 404:
                 raise
         await asyncio.to_thread(k3_api.create_namespaced_job, JOB_NAMESPACE, manifest)
+
+
+async def cancel_k3_job(job_name: str, k3_api: BatchV1Api) -> None:
+    """
+    Deletes a replica's Kubernetes Job and its Pods. A Job that no longer exists
+    is not an error.
+    """
+    try:
+        await asyncio.to_thread(
+            k3_api.delete_namespaced_job,
+            job_name,
+            JOB_NAMESPACE,
+            propagation_policy="Background",
+        )
+    except ApiException as e:
+        if e.status != 404:
+            raise

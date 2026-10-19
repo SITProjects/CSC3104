@@ -21,9 +21,18 @@ from services.coordinator.crud import (
     mark_replica_done,
     set_voting,
 )
+from services.coordinator.crud.jobs import cancel_job
+from services.coordinator.k8s import cancel_k3_job
 from services.coordinator.loops.pod_watcher import watch_pods
 from services.coordinator.loops.scheduler import scheduler_loop
-from shared.db import JobType, JobView, Replica, ReplicaStatus, Task, session_manager
+from shared.db import (
+    JobType,
+    JobView,
+    Replica,
+    ReplicaStatus,
+    Task,
+    session_manager,
+)
 from shared.migrate import run_migrations
 
 from .crud import create_job, create_replicas, create_tasks, ensure_job_type_exists
@@ -39,6 +48,7 @@ from .storage import presign
 
 log = logging.getLogger("coordinator")
 DbSession = Annotated[AsyncSession, Depends(session_manager.get_session)]
+K3API = Annotated[client.BatchV1Api, Depends(lambda: client.BatchV1Api())]
 
 
 @asynccontextmanager
@@ -298,7 +308,7 @@ async def report_evicted(
 
 
 @app.post("/internal/jobs/{id}/cancel")
-def cancel_job(id: UUID) -> Ack:
+async def cancel_job_request(id: UUID, session: DbSession, k3_api: K3API) -> Ack:
     """
     Cancels the job with the given id.
 
@@ -307,6 +317,18 @@ def cancel_job(id: UUID) -> Ack:
     returns:
         Ack: An acknowledgment of the cancellation.
     """
+    async with session.begin():
+        cancelled_replicas = await cancel_job(session, id)
+    names = [
+        f"replica-{replica_id}-a{attempt}"
+        for replica_id, attempt in cancelled_replicas or []
+    ]
+    results = await asyncio.gather(
+        *[cancel_k3_job(name, k3_api) for name in names], return_exceptions=True
+    )
+    for name, result in zip(names, results):
+        if isinstance(result, Exception):
+            log.error("failed to cancel K8s job %s: %s", name, result)
     return Ack()
 
 
