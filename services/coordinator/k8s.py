@@ -1,6 +1,21 @@
 import asyncio
+from typing import cast
 
-from kubernetes.client import ApiException, BatchV1Api
+from kubernetes.client import (
+    ApiException,
+    AuthenticationV1Api,
+    BatchV1Api,
+    CoreV1Api,
+    V1DeleteOptions,
+    V1Job,
+    V1JobList,
+    V1Pod,
+    V1PodList,
+    V1Preconditions,
+    V1TokenReview,
+    V1TokenReviewSpec,
+    V1UserInfo,
+)
 
 from core.settings import JOB_NAMESPACE
 from shared.db.models import JobType, Replica, Task
@@ -10,6 +25,33 @@ JOB_TTL_SECONDS = 600
 # time for worker to save checkpoint after terminate signal
 TERMINATION_GRACE_SECONDS = 30
 TOLERATION_SECONDS = 30
+REPLICA_SELECTOR = "app.kubernetes.io/managed-by=idlecloud-coordinator"
+
+
+async def list_replica_jobs(batch_api: BatchV1Api) -> list[V1Job]:
+    """List coordinator-managed Jobs without blocking the event loop."""
+    jobs = cast(
+        V1JobList,
+        await asyncio.to_thread(
+            batch_api.list_namespaced_job,
+            JOB_NAMESPACE,
+            label_selector=REPLICA_SELECTOR,
+        ),
+    )
+    return jobs.items or []
+
+
+async def list_replica_pods(core_api: CoreV1Api) -> list[V1Pod]:
+    """List coordinator-managed Pods without blocking the event loop."""
+    pods = cast(
+        V1PodList,
+        await asyncio.to_thread(
+            core_api.list_namespaced_pod,
+            JOB_NAMESPACE,
+            label_selector=REPLICA_SELECTOR,
+        ),
+    )
+    return pods.items or []
 
 
 def build_replica_job_manifest(
@@ -163,3 +205,49 @@ async def cancel_k3_job(job_name: str, k3_api: BatchV1Api) -> None:
     except ApiException as e:
         if e.status != 404:
             raise
+
+
+async def cancel_k3_pod(pod_name: str, core_api: CoreV1Api, uid: str | None) -> None:
+    """Delete an orphan Pod, protecting any replacement with the same name."""
+    try:
+        await asyncio.to_thread(
+            core_api.delete_namespaced_pod,
+            pod_name,
+            JOB_NAMESPACE,
+            body=V1DeleteOptions(preconditions=V1Preconditions(uid=uid)),
+        )
+    except ApiException as e:
+        if e.status != 404:
+            raise
+
+
+async def review_token(
+    auth_api: AuthenticationV1Api, token: str, audience: str
+) -> V1UserInfo | None:
+    """
+    Asks the API server who a service-account token belongs to (TokenReview).
+
+    args:
+        auth_api: The Kubernetes authentication API.
+        token: The bearer token from the request.
+        audience: The audience the token must have been issued for.
+    returns:
+        V1UserInfo | None: The token's user, with the node its Pod runs on in
+            extra["authentication.kubernetes.io/node-name"], or None if the token
+            is invalid, expired, or meant for another audience.
+    """
+    review = cast(
+        V1TokenReview,
+        await asyncio.to_thread(
+            auth_api.create_token_review,
+            V1TokenReview(spec=V1TokenReviewSpec(token=token, audiences=[audience])),
+        ),
+    )
+    status = review.status
+    if (
+        not status
+        or not status.authenticated
+        or audience not in (status.audiences or [])
+    ):
+        return None
+    return status.user

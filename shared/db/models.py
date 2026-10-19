@@ -12,6 +12,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -147,6 +148,11 @@ class Node(Base):
         Integer,
         nullable=False,
         server_default=text("0"),
+    )
+
+    cpu_percent: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
     )
 
     replicas: Mapped[list["Replica"]] = relationship(

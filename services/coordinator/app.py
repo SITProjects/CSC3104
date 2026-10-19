@@ -10,21 +10,40 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from kubernetes import client, config
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.settings import COORDINATOR_URL
+from core.settings import (
+    COORDINATOR_URL,
+    HEARTBEAT_AUDIENCE,
+    HEARTBEAT_SERVICE_ACCOUNTS,
+)
 from services.coordinator.crud import (
+    cancel_job,
     create_event,
+    create_job,
+    create_replicas,
+    create_tasks,
+    ensure_job_type_exists,
     evict_replica,
     get_job,
     get_replica_with_task,
     mark_replica_done,
     set_voting,
+    update_node_state,
 )
-from services.coordinator.crud.jobs import cancel_job
-from services.coordinator.k8s import cancel_k3_job
-from services.coordinator.loops.pod_watcher import watch_pods
-from services.coordinator.loops.scheduler import scheduler_loop
+from services.coordinator.k8s import cancel_k3_job, review_token
+from services.coordinator.loops import housekeeping_loop, scheduler_loop, watch_pods
+from services.coordinator.models import (
+    Ack,
+    CreateJobRequest,
+    CreateJobResponse,
+    HeartbeatIn,
+    Manifest,
+    ProgressIn,
+    ResultIn,
+)
+from services.coordinator.storage import presign
 from shared.db import (
     JobType,
     JobView,
@@ -35,23 +54,15 @@ from shared.db import (
 )
 from shared.migrate import run_migrations
 
-from .crud import create_job, create_replicas, create_tasks, ensure_job_type_exists
-from .models import (
-    Ack,
-    CreateJobRequest,
-    CreateJobResponse,
-    Manifest,
-    ProgressIn,
-    ResultIn,
-)
-from .storage import presign
-
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 log = logging.getLogger("coordinator")
 DbSession = Annotated[AsyncSession, Depends(session_manager.get_session)]
 K3API = Annotated[client.BatchV1Api, Depends(lambda: client.BatchV1Api())]
+AuthAPI = Annotated[
+    client.AuthenticationV1Api, Depends(lambda: client.AuthenticationV1Api())
+]
 
 
 @asynccontextmanager
@@ -65,8 +76,12 @@ async def lifespan(app: FastAPI):
     except config.ConfigException:
         await asyncio.to_thread(config.load_kube_config)
     batch_v1 = client.BatchV1Api()
+    core_v1 = client.CoreV1Api()
     scheduler = asyncio.create_task(
         scheduler_loop(session_manager.session_factory, COORDINATOR_URL, batch_v1)
+    )
+    housekeeping = asyncio.create_task(
+        housekeeping_loop(session_manager.session_factory, batch_v1, core_v1)
     )
     stop = threading.Event()
     watcher = threading.Thread(
@@ -74,20 +89,24 @@ async def lifespan(app: FastAPI):
         args=(
             asyncio.get_running_loop(),
             session_manager.session_factory,
-            client.CoreV1Api(),
+            core_v1,
             stop,
         ),
         name="pod_watcher",
         daemon=True,
     )
     watcher.start()
-    yield
-    stop.set()
-    scheduler.cancel()
-    with suppress(asyncio.CancelledError):
-        await scheduler
-    await asyncio.to_thread(watcher.join, 2)
-    await session_manager.close()
+    try:
+        yield
+    finally:
+        stop.set()
+        scheduler.cancel()
+        housekeeping.cancel()
+        for task in (scheduler, housekeeping):
+            with suppress(asyncio.CancelledError):
+                await task
+        await asyncio.to_thread(watcher.join, 2)
+        await session_manager.close()
 
 
 app = FastAPI(title="Coordinator", lifespan=lifespan)
@@ -335,12 +354,77 @@ async def cancel_job_request(id: UUID, session: DbSession, k3_api: K3API) -> Ack
     return Ack()
 
 
-@app.get("/healthz")
-def healthcheck() -> Ack:
+async def require_node_token(
+    name: str, authorization: str | None, auth_api: client.AuthenticationV1Api
+) -> None:
     """
-    TODO: Implement a real health check.
+    Checks that a heartbeat comes from an allowed service account on that node.
 
-    returns:
-        Ack: An acknowledgment of the health check.
+    The token is a projected service-account token for HEARTBEAT_AUDIENCE. A
+    TokenReview tells us its service account and the node its Pod runs on.
+
+    args:
+        name: The node named in the URL.
+        authorization: The value of the Authorization header, "Bearer <token>".
+        auth_api: The Kubernetes authentication API.
+    raises:
+        HTTPException: 401 if the token is missing or invalid, 403 if it belongs
+            to another service account or another node, 503 if the API server
+            cannot be asked.
     """
+    token = (authorization or "").removeprefix("Bearer ").strip()
+    if not token:
+        raise HTTPException(401, "Unauthorized")
+    try:
+        user = await review_token(auth_api, token, HEARTBEAT_AUDIENCE)
+    except client.ApiException:
+        log.exception("token review failed")
+        raise HTTPException(503, "cannot verify token")
+    if user is None:
+        log.warning("invalid heartbeat token for node %s", name)
+        raise HTTPException(401, "Unauthorized")
+    nodes = (user.extra or {}).get("authentication.kubernetes.io/node-name") or []
+    if user.username not in HEARTBEAT_SERVICE_ACCOUNTS or nodes != [name]:
+        log.warning(
+            "heartbeat for node %s rejected: %s on %s", name, user.username, nodes
+        )
+        raise HTTPException(403, "Forbidden")
+
+
+@app.post("/internal/nodes/{name}/heartbeat")
+async def node_heartbeat(
+    name: str,
+    body: HeartbeatIn,
+    session: DbSession,
+    auth_api: AuthAPI,
+    authorization: str | None = Header(None),
+) -> Ack:
+    """
+    Records a node's state and CPU use, and when it last reported.
+
+    args:
+        name: The name of the node sending the heartbeat.
+        body: The node's state and CPU use.
+        session: The database session for this request.
+        auth_api: The Kubernetes authentication API, for the TokenReview.
+        authorization: The value of the Authorization header, "Bearer <token>".
+    returns:
+        Ack: An acknowledgment of the heartbeat.
+    """
+    await require_node_token(name, authorization, auth_api)
+    async with session.begin():
+        await update_node_state(session, name, body.state, body.cpu_percent)
+    return Ack()
+
+
+@app.get("/healthz")
+async def healthcheck(session: DbSession) -> Ack:
+    """
+    healthcheck endpoint for the coordinator service.
+    """
+    try:
+        await asyncio.wait_for(session.execute(select(1)), timeout=2)
+    except Exception:
+        log.exception("healthcheck failed")
+        raise HTTPException(503, "database unavailable")
     return Ack()
