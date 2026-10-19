@@ -70,9 +70,7 @@ async def get_job(
     return job, float(progress) if progress is not None else None
 
 
-async def cancel_job(
-    session: AsyncSession, job_id: uuid.UUID
-) -> list[tuple[int, int]] | None:
+async def cancel_job(session: AsyncSession, job_id: uuid.UUID) -> list[tuple[int, int]]:
     """
     Cancels a job and all its tasks and replicas. Only PENDING or RUNNING jobs can be cancelled.
 
@@ -80,9 +78,9 @@ async def cancel_job(
         session: The database session for this request.
         job_id: The id of the job to cancel.
     returns:
-        list[tuple[int, int]] | None: A list of (replica_id, attempt) tuples of the cancelled replicas, or None if the job was not found or already completed.
+        list[tuple[int, int]] | None: A list of (replica_id, attempt) tuples of the cancelled replicas.
     """
-    job = await session.get(Job, job_id)
+    job = await session.get(Job, job_id, with_for_update=True)
     if job is None:
         raise HTTPException(404, f"job {job_id} not found")
     if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):

@@ -319,10 +319,16 @@ async def cancel_job_request(id: UUID, session: DbSession, k3_api: K3API) -> Ack
     """
     async with session.begin():
         cancelled_replicas = await cancel_job(session, id)
-    for replica in cancelled_replicas or []:
-        replica_id, attempt = replica
-        name = f"replica-{replica_id}-a{attempt}"
-        await cancel_k3_job(name, k3_api)
+    names = [
+        f"replica-{replica_id}-a{attempt}"
+        for replica_id, attempt in cancelled_replicas or []
+    ]
+    results = await asyncio.gather(
+        *[cancel_k3_job(name, k3_api) for name in names], return_exceptions=True
+    )
+    for name, result in zip(names, results):
+        if isinstance(result, Exception):
+            log.error("failed to cancel K8s job %s: %s", name, result)
     return Ack()
 
 
