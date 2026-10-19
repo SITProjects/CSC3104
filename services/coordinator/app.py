@@ -46,6 +46,9 @@ from .models import (
 )
 from .storage import presign
 
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
 log = logging.getLogger("coordinator")
 DbSession = Annotated[AsyncSession, Depends(session_manager.get_session)]
 K3API = Annotated[client.BatchV1Api, Depends(lambda: client.BatchV1Api())]
@@ -120,7 +123,7 @@ async def require_token(
             hashlib.sha256(token.encode()).hexdigest(), replica.token_hash
         )
     ):
-        log.warning("unauthorized request for replica %d", replica_id)
+        log.exception("unauthorized request for replica %d", replica_id)
         raise HTTPException(401, "Unauthorized")
     return replica, task, job_type
 
@@ -328,7 +331,7 @@ async def cancel_job_request(id: UUID, session: DbSession, k3_api: K3API) -> Ack
     )
     for name, result in zip(names, results):
         if isinstance(result, Exception):
-            log.error("failed to cancel K8s job %s: %s", name, result)
+            log.exception("failed to cancel K8s job %s: %s", name, result)
     return Ack()
 
 
