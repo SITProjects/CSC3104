@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import HTTPException
 from sqlalchemy import func, select, update
@@ -8,7 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from services.coordinator.models import CreateJobRequest
 from shared.db import JobType
-from shared.db.models import Job, JobStatus, Replica, ReplicaStatus, Task
+from shared.db.models import Job, JobStatus, Replica, ReplicaStatus, Task, TaskStatus
 
 
 async def ensure_job_type_exists(session: AsyncSession, job_type: str) -> None:
@@ -67,3 +68,65 @@ async def get_job(
         return None
     job, progress = row
     return job, float(progress) if progress is not None else None
+
+
+async def cancel_job(
+    session: AsyncSession, job_id: uuid.UUID
+) -> list[tuple[int, int]] | None:
+    """
+    Cancels a job and all its tasks and replicas. Only PENDING or RUNNING jobs can be cancelled.
+
+    args:
+        session: The database session for this request.
+        job_id: The id of the job to cancel.
+    returns:
+        list[tuple[int, int]] | None: A list of (replica_id, attempt) tuples of the cancelled replicas, or None if the job was not found or already completed.
+    """
+    job = await session.get(Job, job_id)
+    if job is None:
+        raise HTTPException(404, f"job {job_id} not found")
+    if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
+        raise HTTPException(409, f"job {job_id} is {job.status.value}, cannot cancel")
+    now = datetime.now(UTC)
+    # Replicas first, the same order the scheduler locks them in, so a replica
+    # being launched is waited for and then cancelled instead of deadlocking.
+    result = await session.execute(
+        update(Replica)
+        .where(
+            Replica.task_id.in_(select(Task.id).where(Task.job_id == job_id)),
+            Replica.status.in_(
+                [
+                    ReplicaStatus.SCHEDULED,
+                    ReplicaStatus.RUNNING,
+                    ReplicaStatus.EVICTED,
+                    ReplicaStatus.LOST,
+                ]
+            ),
+        )
+        .values(status=ReplicaStatus.CANCELLED, token_hash=None, ended_at=now)
+        .returning(Replica.id, Replica.attempt)
+    )
+    await session.execute(
+        update(Task)
+        .where(
+            Task.job_id == job_id,
+            Task.status.in_(
+                [
+                    TaskStatus.PENDING,
+                    TaskStatus.RUNNING,
+                    TaskStatus.VOTING,
+                    TaskStatus.DISPUTED,
+                ]
+            ),
+        )
+        .values(status=TaskStatus.CANCELLED)
+    )
+    await session.execute(
+        update(Job)
+        .where(
+            Job.id == job_id,
+            Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
+        )
+        .values(status=JobStatus.CANCELLED, finished_at=now)
+    )
+    return [(replica_id, attempt) for replica_id, attempt in result.all()]
