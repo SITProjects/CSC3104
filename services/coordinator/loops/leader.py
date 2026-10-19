@@ -3,7 +3,7 @@ import logging
 import threading
 import time
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import cast
 
 from kubernetes.client import (
@@ -35,6 +35,11 @@ class LeaseLock:
     def __init__(self, api: CoordinationV1Api, identity: str) -> None:
         self.api = api
         self.identity = identity
+        # Expiry is timed on this Pod's monotonic clock from when the Lease last
+        # changed, not from renew_time, so clock skew between nodes can't cause
+        # an early takeover (same approach as client-go).
+        self.observed: tuple[str | None, datetime | None] | None = None
+        self.observed_at = 0.0
 
     async def try_acquire_or_renew(self) -> bool:
         now = datetime.now(UTC)
@@ -50,8 +55,12 @@ class LeaseLock:
                 raise
             return await self._create_lease(now)
         spec = lease.spec or V1LeaseSpec()
-        duration = timedelta(seconds=spec.lease_duration_seconds or LEASE_SECONDS)
-        expired = not spec.renew_time or spec.renew_time + duration < now
+        record = (spec.holder_identity, spec.renew_time)
+        if record != self.observed:
+            self.observed = record
+            self.observed_at = time.monotonic()
+        duration = spec.lease_duration_seconds or LEASE_SECONDS
+        expired = time.monotonic() - self.observed_at > duration
         if spec.holder_identity != self.identity:
             if spec.holder_identity and not expired:
                 return False
@@ -128,8 +137,9 @@ class LeaderLoop:
     async def start(self) -> None:
         self.stop_watcher = threading.Event()
         self.watcher = threading.Thread(
-            target=watch_pods,
+            target=watch_after,
             args=(
+                self.watcher,
                 asyncio.get_running_loop(),
                 self.session_factory,
                 self.core_api,
@@ -153,8 +163,16 @@ class LeaderLoop:
                 pass
             self.housekeeping = None
         if self.watcher:
+            # The watch stream only checks the stop flag between events, so the
+            # thread can outlive this join; start() waits for it via watch_after.
             await asyncio.to_thread(self.watcher.join, 2)
-            self.watcher = None
+
+
+def watch_after(previous: threading.Thread | None, *args) -> None:
+    """Runs the pod watcher once the previous leader term's watcher has exited."""
+    if previous:
+        previous.join()
+    watch_pods(*args)
 
 
 async def leader_loop(
@@ -179,15 +197,29 @@ async def leader_loop(
             if holding:
                 last_renewed = now
                 if not leader:
-                    leader = True
-                    log.info("acquired leader Lease")
-                    await on_start()
+                    try:
+                        await on_start()
+                    except Exception:
+                        # Give the Lease up so the other replica can lead.
+                        log.exception("failed to start leader work")
+                        await stop_quietly(on_stop)
+                        await lock.release()
+                    else:
+                        leader = True
+                        log.info("acquired leader Lease")
             elif leader and (holding is False or now - last_renewed > RENEW_DEADLINE):
                 leader = False
                 log.info("lost leader Lease")
-                await on_stop()
+                await stop_quietly(on_stop)
             await asyncio.sleep(RENEW_INTERVAL)
     finally:
         if leader:
-            await on_stop()
+            await stop_quietly(on_stop)
             await lock.release()
+
+
+async def stop_quietly(on_stop: Callable[[], Awaitable[None]]) -> None:
+    try:
+        await on_stop()
+    except Exception:
+        log.exception("failed to stop leader work")
