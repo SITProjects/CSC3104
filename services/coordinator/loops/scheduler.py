@@ -6,14 +6,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.settings import BATCH_SIZE, SCHEDULER_INTERVAL
 
-from .crud import (
+from ..crud import (
     fetch_scheduled_replicas,
     mark_job_running,
     mark_task_running,
     recover_replicas,
     schedule_replica,
 )
-from .k8s import build_replica_job_manifest, create_job
+from ..k8s import build_replica_job_manifest, create_job
 
 
 async def launch_batch(
@@ -24,27 +24,32 @@ async def launch_batch(
     launched = 0
     async with session_factory.begin() as session:
         await recover_replicas(session)
-        scheduled_replicas = await fetch_scheduled_replicas(session, limit=BATCH_SIZE)
-        for replica, task, job_type in scheduled_replicas:
+    for _ in range(BATCH_SIZE):
+        async with session_factory.begin() as session:
+            scheduled_replicas = await fetch_scheduled_replicas(session, limit=1)
+            if not scheduled_replicas:
+                break
+            replica, task, job_type = scheduled_replicas[0]
             print(f"launching replica {replica.id} attempt {replica.attempt}")
             # the pod gets the plain token; only its hash is stored
             token = secrets.token_urlsafe(32)
             job_manifest = build_replica_job_manifest(
                 replica, task, job_type, token, coordinator_url
             )
-            try:
-                # BatchV1Api is blocking, so keep it off the event loop
-                await create_job(job_manifest, k3_api)
-            except Exception:  # noqa: BLE001
-                # TODO: include a X amt of retries here, mark replica as failed if it fails to launch after X attempts
-                print(f"Failed to create K8s job for replica {replica.id}")
-                continue
             await schedule_replica(session, replica, token)
             await session.flush()
             await mark_task_running(session, task.id)
             await mark_job_running(session, task.job_id)
-            launched += 1
-            print(f"launched replica {replica.id} attempt {replica.attempt}")
+        try:
+            # BatchV1Api is blocking, so keep it off the event loop
+            await create_job(job_manifest, k3_api)
+        except Exception:  # noqa: BLE001
+            # TODO: include a X amt of retries here, mark replica as failed if it fails to launch after X attempts
+            print(f"Failed to create K8s job for replica {replica.id}")
+            # stop here: the replica stays SCHEDULED and would be picked again
+            break
+        launched += 1
+        print(f"launched replica {replica.id} attempt {replica.attempt}")
     # only count successes, so repeated failures still wait SCHEDULER_INTERVAL
     return launched
 

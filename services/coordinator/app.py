@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager, suppress
 from typing import Annotated
 from uuid import UUID
@@ -20,7 +21,8 @@ from services.coordinator.crud import (
     mark_replica_done,
     set_voting,
 )
-from services.coordinator.scheduler import scheduler_loop
+from services.coordinator.loops.pod_watcher import watch_pods
+from services.coordinator.loops.scheduler import scheduler_loop
 from shared.db import JobType, JobView, Replica, ReplicaStatus, Task, session_manager
 from shared.migrate import run_migrations
 
@@ -50,13 +52,28 @@ async def lifespan(app: FastAPI):
     except config.ConfigException:
         await asyncio.to_thread(config.load_kube_config)
     batch_v1 = client.BatchV1Api()
-    task = asyncio.create_task(
+    scheduler = asyncio.create_task(
         scheduler_loop(session_manager.session_factory, COORDINATOR_URL, batch_v1)
     )
+    stop = threading.Event()
+    watcher = threading.Thread(
+        target=watch_pods,
+        args=(
+            asyncio.get_running_loop(),
+            session_manager.session_factory,
+            client.CoreV1Api(),
+            stop,
+        ),
+        name="pod_watcher",
+        daemon=True,
+    )
+    watcher.start()
     yield
-    task.cancel()
+    stop.set()
+    scheduler.cancel()
     with suppress(asyncio.CancelledError):
-        await task
+        await scheduler
+    await asyncio.to_thread(watcher.join, 2)
     await session_manager.close()
 
 

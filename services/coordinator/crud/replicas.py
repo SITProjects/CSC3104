@@ -1,7 +1,7 @@
 import hashlib
 from datetime import UTC, datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.settings import RETRY_ATTEMPTS
@@ -218,3 +218,80 @@ async def mark_replica_done(
     replica.exit_code = exit_code
     replica.ended_at = datetime.now(UTC)
     await session.flush()
+
+
+async def record_placement(
+    session: AsyncSession,
+    replica_id: int,
+    attempt: int,
+    node_name: str,
+    started_at: datetime | None,
+) -> None:
+    """
+    Records the node and start time of a RUNNING replica's Pod, once.
+
+    Only the current attempt's first placement is recorded, so an older
+    attempt's Pod never writes its node onto a requeued replica.
+
+    args:
+        session: The database session for this request.
+        replica_id: The id of the replica whose Pod was placed.
+        attempt: The attempt the Pod belongs to.
+        node_name: The node the Pod was placed on.
+        started_at: When the Pod started, or None if not known yet.
+    """
+    values: dict = {"node_name": node_name}
+    if started_at is not None:
+        values["started_at"] = started_at
+    await session.execute(
+        update(Replica)
+        .where(
+            Replica.id == replica_id,
+            Replica.attempt == attempt,
+            Replica.status == ReplicaStatus.RUNNING,
+            Replica.node_name.is_(None),
+        )
+        .values(**values)
+    )
+
+
+async def handle_replica_completed(
+    session: AsyncSession,
+    replica_id: int,
+    attempt: int,
+    status: ReplicaStatus,
+    exit_code: int | None = None,
+) -> tuple[int, str | None] | None:
+    """
+    Handles a replica that has completed its execution.
+
+    args:
+        session: The database session for this request.
+        replica_id: The id of the completed replica.
+        attempt: The attempt number of the completed replica.
+        status: The status of the completed replica.
+        exit_code: The exit code of the completed replica, if known.
+    returns:
+        tuple[int, str | None] | None: The task id and node name of the completed replica, or None if the replica was not found or already completed.
+    """
+    replica = await session.scalar(
+        select(Replica)
+        .where(
+            Replica.id == replica_id,
+            Replica.attempt == attempt,
+            Replica.status == ReplicaStatus.RUNNING,
+        )
+        .with_for_update()
+    )
+    if replica is None:
+        return None
+    node_name = replica.node_name  # before it is cleared, for the event
+    replica.status = status
+    replica.token_hash = None
+    if status == ReplicaStatus.FAILED:
+        replica.ended_at = datetime.now(UTC)
+        replica.exit_code = exit_code
+    else:
+        replica.node_name = None  # requeued; the next attempt records its own node
+    await session.flush()
+    return replica.task_id, node_name
