@@ -1,4 +1,5 @@
 import os
+import socket
 
 MAX_OVERFLOW = 10
 POOL_SIZE = 5
@@ -24,3 +25,9 @@ HEARTBEAT_SERVICE_ACCOUNTS = frozenset(
         "system:serviceaccount:idlecloud-system:spot-watcher",
     ).split(",")
 )
+POD_NAME = os.environ.get("POD_NAME") or socket.gethostname()
+LEASE_NAME = "coordinator-leader"
+LEASE_NAMESPACE = os.environ.get("LEASE_NAMESPACE", "idlecloud-system")
+LEASE_SECONDS = 15
+RENEW_INTERVAL = 5  # seconds
+RENEW_DEADLINE = 10  # seconds
