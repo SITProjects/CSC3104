@@ -24,8 +24,14 @@ async def launch_batch(
     launched = 0
     async with session_factory.begin() as session:
         await recover_replicas(session)
-        scheduled_replicas = await fetch_scheduled_replicas(session, limit=BATCH_SIZE)
-        for replica, task, job_type in scheduled_replicas:
+    # one transaction per replica, so it is committed as RUNNING before its Pod
+    # can report anything to the pod watcher
+    for _ in range(BATCH_SIZE):
+        async with session_factory.begin() as session:
+            scheduled_replicas = await fetch_scheduled_replicas(session, limit=1)
+            if not scheduled_replicas:
+                break
+            replica, task, job_type = scheduled_replicas[0]
             print(f"launching replica {replica.id} attempt {replica.attempt}")
             # the pod gets the plain token; only its hash is stored
             token = secrets.token_urlsafe(32)
@@ -38,13 +44,14 @@ async def launch_batch(
             except Exception:  # noqa: BLE001
                 # TODO: include a X amt of retries here, mark replica as failed if it fails to launch after X attempts
                 print(f"Failed to create K8s job for replica {replica.id}")
-                continue
+                # stop here: the replica stays SCHEDULED and would be picked again
+                break
             await schedule_replica(session, replica, token)
             await session.flush()
             await mark_task_running(session, task.id)
             await mark_job_running(session, task.job_id)
-            launched += 1
-            print(f"launched replica {replica.id} attempt {replica.attempt}")
+        launched += 1
+        print(f"launched replica {replica.id} attempt {replica.attempt}")
     # only count successes, so repeated failures still wait SCHEDULER_INTERVAL
     return launched
 

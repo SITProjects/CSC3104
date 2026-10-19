@@ -8,6 +8,7 @@ from kubernetes import watch
 from kubernetes.client import (
     ApiException,
     CoreV1Api,
+    V1Node,
     V1ObjectMeta,
     V1Pod,
     V1PodList,
@@ -50,20 +51,23 @@ EVENT_TYPES = {
 
 def watch_pods(loop, session_factory, v1, stop: threading.Event):
     while not stop.is_set():
-        pods = cast(
-            V1PodList, v1.list_namespaced_pod(JOB_NAMESPACE, label_selector=SELECTOR)
-        )
-        for pod in pods.items or []:
-            submit(loop, session_factory, to_update(v1, "ADDED", pod))
         w = watch.Watch()
-        resource_version = pods.metadata.resource_version if pods.metadata else None
         try:
+            pods = cast(
+                V1PodList,
+                v1.list_namespaced_pod(JOB_NAMESPACE, label_selector=SELECTOR),
+            )
+            for pod in pods.items or []:
+                submit(loop, session_factory, to_update(v1, "ADDED", pod))
+            resource_version = (
+                pods.metadata.resource_version if pods.metadata else None
+            )
             for event in w.stream(
                 v1.list_namespaced_pod,
                 JOB_NAMESPACE,
                 label_selector=SELECTOR,
                 resource_version=resource_version,
-                timeout_seconds=300,
+                timeout_seconds=60,
             ):
                 ev = cast(dict[str, Any], event)
                 submit(
@@ -71,9 +75,31 @@ def watch_pods(loop, session_factory, v1, stop: threading.Event):
                     session_factory,
                     to_update(v1, ev["type"], cast(V1Pod, ev["object"])),
                 )
+                if stop.is_set():
+                    break
         except ApiException as e:
-            if e.status == 410:
-                raise
+            # 410 means the resource_version expired: list again straight away
+            if e.status != 410:
+                log.exception("pod watch failed")
+                stop.wait(5)
+        except Exception:
+            log.exception("pod watch failed")
+            stop.wait(5)
+        finally:
+            w.stop()
+
+
+def node_is_ready(v1: CoreV1Api, name: str) -> bool:
+    """
+    Whether the node's Ready condition is True, so a disrupted Pod on it was
+    evicted rather than lost with its node.
+    """
+    try:
+        node = cast(V1Node, v1.read_node(name))
+    except ApiException:
+        return False  # the node object is already gone
+    conditions = (node.status.conditions if node.status else None) or []
+    return any(c.type == "Ready" and c.status == "True" for c in conditions)
 
 
 def to_update(v1: CoreV1Api, kind: str, pod: V1Pod) -> PodUpdate | None:
@@ -89,7 +115,7 @@ def to_update(v1: CoreV1Api, kind: str, pod: V1Pod) -> PodUpdate | None:
     attempt = int(labels["idlecloud/attempt"])
     reason = status.reason
     started = status.start_time
-    conditions = {c.type: c.status for c in status.conditions or []}
+    conditions = {c.type: c for c in (status.conditions or [])}
     disruption = conditions.get("DisruptionTarget")
     disruption_reason = (
         disruption.reason if disruption and disruption.status == "True" else None
@@ -104,7 +130,13 @@ def to_update(v1: CoreV1Api, kind: str, pod: V1Pod) -> PodUpdate | None:
         attempt=attempt,
         node=node,
         started_at=started,
-        outcome=decide(kind, phase, reason, disruption_reason, node is not None),
+        outcome=decide(
+            kind,
+            phase,
+            reason,
+            disruption_reason,
+            node_is_ready(v1, node) if disruption_reason and node else True,
+        ),
         exit_code=exit_code,
     )
 
@@ -141,6 +173,7 @@ async def apply(
             await record_placement(
                 session,
                 pod_update.replica_id,
+                pod_update.attempt,
                 pod_update.node,
                 pod_update.started_at,
             )
@@ -184,7 +217,7 @@ def submit(loop, session_factory, pod_update: PodUpdate | None) -> None:
     try:
         asyncio.run_coroutine_threadsafe(
             apply(session_factory, pod_update), loop
-        ).result()
+        ).result(timeout=30)
     except Exception:
         log.exception(
             "failed to apply pod update for replica %d", pod_update.replica_id

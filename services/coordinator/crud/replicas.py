@@ -1,7 +1,7 @@
 import hashlib
 from datetime import UTC, datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.settings import RETRY_ATTEMPTS
@@ -223,25 +223,36 @@ async def mark_replica_done(
 async def record_placement(
     session: AsyncSession,
     replica_id: int,
-    node_name: str | None,
+    attempt: int,
+    node_name: str,
     started_at: datetime | None,
 ) -> None:
     """
-    Records the node name and start time of a replica that just started running.
+    Records the node and start time of a RUNNING replica's Pod, once.
+
+    Only the current attempt's first placement is recorded, so an older
+    attempt's Pod never writes its node onto a requeued replica.
 
     args:
         session: The database session for this request.
-        replica_id: The id of the replica that just started running.
-        node_name: The name of the node where the replica is running.
-        started_at: The time when the replica started running, or None if unknown.
+        replica_id: The id of the replica whose Pod was placed.
+        attempt: The attempt the Pod belongs to.
+        node_name: The node the Pod was placed on.
+        started_at: When the Pod started, or None if not known yet.
     """
-    replica = await session.get(Replica, replica_id)
-    if replica is None:
-        raise ValueError(f"replica {replica_id} not found")
-    replica.node_name = node_name
+    values: dict = {"node_name": node_name}
     if started_at is not None:
-        replica.started_at = started_at
-    await session.flush()
+        values["started_at"] = started_at
+    await session.execute(
+        update(Replica)
+        .where(
+            Replica.id == replica_id,
+            Replica.attempt == attempt,
+            Replica.status == ReplicaStatus.RUNNING,
+            Replica.node_name.is_(None),
+        )
+        .values(**values)
+    )
 
 
 async def handle_replica_completed(
@@ -270,6 +281,8 @@ async def handle_replica_completed(
         .with_for_update()
     )
     if replica is None:
+        return None
+    if replica.attempt != attempt:
         return None
     node_name = replica.node_name  # before it is cleared, for the event
     replica.status = status
