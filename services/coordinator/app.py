@@ -3,7 +3,6 @@ import hashlib
 import hmac
 import logging
 import os
-import threading
 from contextlib import asynccontextmanager, suppress
 from typing import Annotated
 from uuid import UUID
@@ -17,6 +16,7 @@ from core.settings import (
     COORDINATOR_URL,
     HEARTBEAT_AUDIENCE,
     HEARTBEAT_SERVICE_ACCOUNTS,
+    POD_NAME,
 )
 from services.coordinator.crud import (
     cancel_job,
@@ -33,7 +33,12 @@ from services.coordinator.crud import (
     update_node_state,
 )
 from services.coordinator.k8s import cancel_k3_job, review_token
-from services.coordinator.loops import housekeeping_loop, scheduler_loop, watch_pods
+from services.coordinator.loops import (
+    LeaderLoop,
+    LeaseLock,
+    leader_loop,
+    scheduler_loop,
+)
 from services.coordinator.models import (
     Ack,
     CreateJobRequest,
@@ -80,32 +85,19 @@ async def lifespan(app: FastAPI):
     scheduler = asyncio.create_task(
         scheduler_loop(session_manager.session_factory, COORDINATOR_URL, batch_v1)
     )
-    housekeeping = asyncio.create_task(
-        housekeeping_loop(session_manager.session_factory, batch_v1, core_v1)
+    work = LeaderLoop(session_manager.session_factory, batch_v1, core_v1)
+    leader = asyncio.create_task(
+        leader_loop(
+            LeaseLock(client.CoordinationV1Api(), POD_NAME), work.start, work.stop
+        )
     )
-    stop = threading.Event()
-    watcher = threading.Thread(
-        target=watch_pods,
-        args=(
-            asyncio.get_running_loop(),
-            session_manager.session_factory,
-            core_v1,
-            stop,
-        ),
-        name="pod_watcher",
-        daemon=True,
-    )
-    watcher.start()
     try:
         yield
     finally:
-        stop.set()
-        scheduler.cancel()
-        housekeeping.cancel()
-        for task in (scheduler, housekeeping):
+        for task in (scheduler, leader):
+            task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
-        await asyncio.to_thread(watcher.join, 2)
         await session_manager.close()
 
 

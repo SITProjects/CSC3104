@@ -19,10 +19,10 @@ metadata:
   labels:
     app.kubernetes.io/name: idlecloud-coordinator
 spec:
-  replicas: 1
-  # One scheduler loop at a time during a rollout
+  replicas: 2
+  # Both Pods serve the API and schedule; the Lease holder also runs the watcher and housekeeping
   strategy:
-    type: Recreate
+    type: RollingUpdate
   selector:
     matchLabels:
       app.kubernetes.io/name: idlecloud-coordinator
@@ -50,6 +50,10 @@ spec:
             - name: http
               containerPort: 8001
           env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
