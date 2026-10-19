@@ -15,6 +15,7 @@ from ..crud import (
     mark_task_running,
     recover_replicas,
     schedule_replica,
+    set_voting,
 )
 from ..k8s import build_replica_job_manifest, create_job
 
@@ -50,6 +51,10 @@ async def launch_batch(
                     replica.status = ReplicaStatus.FAILED
                     replica.token_hash = None
                     replica.ended_at = datetime.now(UTC)
+                    await session.flush()
+                    await mark_task_running(session, task.id)
+                    await mark_job_running(session, task.job_id)
+                    await set_voting(session, task)
                 else:
                     replica.attempt += 1
                 break

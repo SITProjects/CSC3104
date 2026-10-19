@@ -1,6 +1,6 @@
 from .events import create_event
 from .jobs import create_job, ensure_job_type_exists, get_job, mark_job_running
-from .nodes import ensure_node
+from .nodes import ensure_node, update_node_state
 from .replicas import (
     create_replicas,
     evict_replica,
@@ -33,4 +33,5 @@ __all__ = [
     "recover_replicas",
     "schedule_replica",
     "set_voting",
+    "update_node_state",
 ]
