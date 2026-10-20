@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}{{ snap.upload.filename }} · Idle-Compute Cloud{% endblock %}
+{% block content %}
+{# The stream re-renders partials/job_detail.html and replaces this div's contents #}
+<div {% if not snap.finished %}data-stream="/jobs/{{ snap.upload.job_id }}/stream"{% endif %}>
+  {% include "partials/job_detail.html" %}
+</div>
+{% endblock %}

@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Admin · Idle-Compute Cloud{% endblock %}
+{% block content %}
+<h1>Cluster</h1>
+<div data-stream="/admin/stream">
+  {% include "partials/admin_detail.html" %}
+</div>
+{% endblock %}

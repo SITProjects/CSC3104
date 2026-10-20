@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>OCR a scanned PDF</h1>
+  <p class="muted">
+    Your PDF is split into {{ PAGES_PER_TASK }}-page tasks that run on idle lab PCs.
+    Up to {{ MAX_UPLOAD_MB }} MB, and {{ MAX_RUNNING_JOBS }} running jobs per person.
+  </p>
+  {% if error %}<p class="alert">{{ error }}</p>{% endif %}
+  <form id="upload-form" method="post" action="/upload" enctype="multipart/form-data"
+        data-max-bytes="{{ MAX_UPLOAD_MB * 1024 * 1024 }}">
+    <label>Email
+      <input type="email" name="email" required maxlength="254" value="{{ email or '' }}"
+             autocomplete="email">
+    </label>
+    <label>PDF file
+      <input type="file" name="pdf" accept="application/pdf,.pdf" required>
+    </label>
+    <details>
+      <summary>Notify a webhook when done (optional)</summary>
+      <label>Webhook URL
+        <input type="url" name="webhook_url" placeholder="https://example.com/hook"
+               value="{{ webhook_url or '' }}">
+      </label>
+      <p class="muted small">We POST <code>{"job_id": ..., "status": ...}</code> once the job ends,
+        signed with <code>X-Idlecloud-Signature</code> (<a href="/api-keys">how to check it</a>).</p>
+    </details>
+    <p class="alert" id="upload-error" hidden></p>
+    <button type="submit">Upload and start</button>
+  </form>
+</section>
+{% endblock %}

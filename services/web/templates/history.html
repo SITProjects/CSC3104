@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}My jobs · Idle-Compute Cloud{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>My jobs</h1>
+  <form method="get" action="/history" class="inline">
+    <input type="email" name="email" placeholder="you@example.com" required value="{{ email or '' }}">
+    <button type="submit">Show</button>
+  </form>
+  {% if error %}<p class="alert">{{ error }}</p>{% endif %}
+</section>
+
+{% if rows is not none %}
+<section class="card">
+  {% if rows %}
+  <div class="scroll">
+  <table>
+    <thead><tr><th>File</th><th>Status</th><th>Pages</th><th>Uploaded</th><th>Time taken</th><th></th></tr></thead>
+    <tbody>
+    {% for upload, job in rows %}
+      {% set status = job.status.value if job else upload.status %}
+      <tr>
+        <td><a href="/jobs/{{ upload.job_id }}">{{ upload.filename }}</a></td>
+        <td><span class="badge s-{{ status | lower }}">{{ status }}</span></td>
+        <td>{{ upload.page_count or "–" }}</td>
+        <td>{{ upload.created_at | ago }}</td>
+        <td>{{ upload.created_at | duration(job.finished_at if job else none) }}</td>
+        <td>{% if status == "COMPLETED" %}<a href="/jobs/{{ upload.job_id }}/result">Download</a>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">No jobs for {{ email }} yet.</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

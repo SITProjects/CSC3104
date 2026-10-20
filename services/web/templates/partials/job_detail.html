@@ -1,0 +1,101 @@
+{% set stage = snap.stage %}
+{% set job_id = snap.upload.job_id %}
+<section class="card">
+  <div class="row">
+    <div>
+      <h1>{{ snap.upload.filename }}</h1>
+      <p class="muted small">
+        Job <code>{{ job_id }}</code> · {{ snap.upload.size_bytes | filesize }}
+        · uploaded {{ snap.upload.created_at | ago }}
+        {% if snap.upload.page_count %}· {{ snap.upload.page_count }} pages{% endif %}
+      </p>
+    </div>
+    <span class="badge s-{{ stage | lower }}">{{ stage }}</span>
+  </div>
+
+  {% if stage == "SPLITTING" %}
+    <p>Rendering pages{% if snap.upload.page_count %}: {{ snap.pages_ready }} of {{ snap.upload.page_count }} ready{% endif %}…</p>
+    {% set pct = (100 * snap.pages_ready / snap.upload.page_count) | int if snap.upload.page_count else 0 %}
+    <div class="bar"><span style="width: {{ pct }}%"></span></div>
+  {% elif snap.job %}
+    <div class="bar"><span style="width: {{ snap.progress }}%"></span></div>
+    <p class="small muted">{{ snap.progress }}% of replica work done</p>
+  {% endif %}
+
+  {% if snap.upload.error %}<p class="alert">{{ snap.upload.error }}</p>{% endif %}
+  {% if snap.coordinator_down %}<p class="alert">The scheduler is not answering right now. Retrying…</p>{% endif %}
+
+  <div class="actions">
+    {% if stage == "COMPLETED" %}
+      <a class="button" href="/jobs/{{ job_id }}/result">Download result.txt</a>
+    {% endif %}
+    {% if not snap.finished %}
+      <form method="post" action="/jobs/{{ job_id }}/cancel"
+            data-confirm="Cancel this job and stop all its replicas?">
+        <button class="secondary" type="submit">Cancel job</button>
+      </form>
+    {% endif %}
+  </div>
+</section>
+
+{% if snap.job and snap.job.tasks %}
+<section class="card">
+  <h2>Tasks</h2>
+  <p class="muted small">
+    Each task runs on {{ REPLICAS_PER_TASK }} different PCs.
+    A task is verified when at least {{ VOTES_TO_VERIFY }} results agree.
+  </p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>#</th><th>Pages</th><th>Status</th><th>Replicas (PC · status · result)</th></tr></thead>
+    <tbody>
+    {% for t in snap.job.tasks | sort(attribute="task_index") %}
+      {% set per_task = snap.upload.pages_per_task %}
+      {% set first = t.task_index * per_task + 1 %}
+      {% set last = [first + per_task - 1, snap.upload.page_count or 0] | min %}
+      <tr>
+        <td>{{ t.task_index + 1 }}</td>
+        <td>{{ first }}–{{ last }}</td>
+        <td><span class="badge s-{{ t.status.value | lower }}">{{ t.status.value }}</span></td>
+        <td>
+          <ul class="replicas">
+          {% for r in t.replicas | sort(attribute="id") %}
+            <li>
+              <strong>{{ r.node_name or "waiting for a PC" }}</strong>
+              <span class="badge s-{{ r.status.value | lower }}">{{ r.status.value }}</span>
+              {% if r.attempt > 1 %}<span class="tag" title="Resumed from a checkpoint after an eviction">attempt {{ r.attempt }}</span>{% endif %}
+              {% if r.status.value == "RUNNING" %}<span class="small">{{ r.progress }}%</span>{% endif %}
+              {% if r.result_hash %}
+                <code title="{{ r.result_hash }}">{{ r.result_hash | short_hash }}</code>
+                {% if t.final_hash %}
+                  {% if r.result_hash == t.final_hash %}<span class="vote ok" title="Agrees with the majority">✓ agrees</span>
+                  {% else %}<span class="vote bad" title="Outvoted">✗ outvoted</span>{% endif %}
+                {% endif %}
+              {% endif %}
+            </li>
+          {% endfor %}
+          </ul>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+
+{% if snap.events %}
+<section class="card">
+  <h2>Events</h2>
+  <ul class="events">
+  {% for e in snap.events %}
+    <li>
+      <span class="muted small">{{ e.time | ago }}</span>
+      <span class="tag">{{ e.type | replace("_", " ") }}</span>
+      {% if e.node_name %}on <strong>{{ e.node_name }}</strong>{% endif %}
+      {% if e.detail and e.detail.message %}<span class="muted">· {{ e.detail.message }}</span>{% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+{% endif %}

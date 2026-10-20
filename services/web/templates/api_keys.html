@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}API · Idle-Compute Cloud{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>Public API</h1>
+  <p class="muted">Script your jobs. Send your key in the <code>X-API-Key</code> header.</p>
+  {% if error %}<p class="alert">{{ error }}</p>{% endif %}
+  {% if key %}
+    <p class="notice">Your new key for <strong>{{ email }}</strong>. Copy it now: it is not shown again.</p>
+    <pre class="key">{{ key }}</pre>
+    {% if webhook_secret %}
+      <p class="notice">Webhooks for this email are signed with this secret:</p>
+      <pre class="key">{{ webhook_secret }}</pre>
+    {% endif %}
+  {% else %}
+    <form method="post" action="/api-keys" class="inline">
+      <input type="email" name="email" placeholder="you@example.com" required value="{{ email or '' }}">
+      <button type="submit">Create API key</button>
+    </form>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Webhooks</h2>
+  <p class="muted">
+    When a job ends we POST its id and status to your webhook URL. A delivery that does not get a
+    2xx answer is retried a few times. Each request carries <code>X-Idlecloud-Timestamp</code> and
+    <code>X-Idlecloud-Signature</code>: the hex HMAC-SHA256 of <code>&lt;timestamp&gt;.&lt;raw body&gt;</code>,
+    keyed with your signing secret (shown when you create an API key). Ignore a timestamp more than
+    5 minutes old.
+  </p>
+</section>
+
+<section class="card">
+  <h2>Endpoints</h2>
+  <table>
+    <tbody>
+      <tr><td><code>POST /api/jobs</code></td><td>Upload a PDF (multipart field <code>pdf</code>, optional <code>webhook_url</code>)</td></tr>
+      <tr><td><code>GET /api/jobs</code></td><td>Your jobs, newest first</td></tr>
+      <tr><td><code>GET /api/jobs/{id}</code></td><td>Status and progress of one job</td></tr>
+      <tr><td><code>POST /api/jobs/{id}/cancel</code></td><td>Stop a job</td></tr>
+      <tr><td><code>GET /api/jobs/{id}/result</code></td><td>The OCR text once the job is COMPLETED</td></tr>
+    </tbody>
+  </table>
+  <h3>Example</h3>
+<pre>curl -H "X-API-Key: $KEY" -F pdf=@scan.pdf {{ request.base_url }}api/jobs
+curl -H "X-API-Key: $KEY" {{ request.base_url }}api/jobs/JOB_ID</pre>
+</section>
+{% endblock %}

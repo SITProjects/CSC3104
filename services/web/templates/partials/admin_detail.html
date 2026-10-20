@@ -1,0 +1,89 @@
+{% set idle = nodes | selectattr("0.state.value", "equalto", "IDLE") | list | length %}
+{% set busy = nodes | selectattr("0.state.value", "equalto", "BUSY") | list | length %}
+<div class="stats">
+  <div class="stat"><span>{{ nodes | length }}</span>nodes</div>
+  <div class="stat"><span>{{ idle }}</span>idle, lending compute</div>
+  <div class="stat"><span>{{ busy }}</span>busy, owner active</div>
+  <div class="stat"><span>{{ machines | selectattr("running") | list | length }}</span>burst workers running</div>
+</div>
+
+<section class="card">
+  <h2>Nodes</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Node</th><th>State</th><th>Trust</th><th>Votes (agree / disagree)</th><th>CPU</th><th>Running replicas</th><th>Heartbeat</th></tr></thead>
+    <tbody>
+    {% for node, running in nodes %}
+      {% set label = node.trust_score | trust_label %}
+      <tr>
+        <td><strong>{{ node.name }}</strong>{% if node.name.startswith("burst-") %} <span class="tag">cloud</span>{% endif %}</td>
+        <td><span class="badge s-{{ node.state.value | lower }}">{{ node.state.value }}</span></td>
+        <td>
+          <div class="trust t-{{ label }}" title="{{ label }}">
+            <div class="bar"><span style="width: {{ (node.trust_score * 100) | int }}%"></span></div>
+            {{ "%.2f" | format(node.trust_score) }}
+          </div>
+        </td>
+        <td>{{ node.total_agree }} / {{ node.total_disagree }}</td>
+        <td>{{ "%.0f%%" | format(node.cpu_percent) if node.cpu_percent is not none else "–" }}</td>
+        <td>{{ running }}</td>
+        <td>{{ node.last_heartbeat | ago }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="muted">No nodes have sent a heartbeat yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Burst workers (EC2)</h2>
+  {% if machines %}
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Node</th><th>Instance</th><th>Type</th><th>Market</th><th>Launched</th><th>Status</th><th>Cost</th></tr></thead>
+    <tbody>
+    {% for m in machines %}
+      <tr>
+        <td>{{ m.node_name }}</td>
+        <td><code>{{ m.instance_id }}</code></td>
+        <td>{{ m.machine }}</td>
+        <td>{{ m.market or "–" }}</td>
+        <td>{{ m.launched_at | ago }}</td>
+        <td>{% if m.running %}<span class="badge s-running">RUNNING</span>{% else %}ended {{ m.ended_at | ago }}{% endif %}</td>
+        <td>{{ "$%.4f" | format(m.total_usd) if m.total_usd is not none else "unknown" }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">No burst workers have been launched. Campus PCs are keeping up.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Recent jobs</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Job</th><th>Owner</th><th>Status</th><th>Pages</th><th>Uploaded</th><th>Time taken</th><th>Burst cost</th></tr></thead>
+    <tbody>
+    {% for j in jobs %}
+      {% set status = j.job_status or j.upload_status %}
+      <tr>
+        <td><a href="/jobs/{{ j.job_id }}">{{ j.filename }}</a></td>
+        <td>{{ j.owner_email }}</td>
+        <td><span class="badge s-{{ status | lower }}">{{ status }}</span></td>
+        <td>{{ j.page_count or "–" }}</td>
+        <td>{{ j.created_at | ago }}</td>
+        <td>{{ j.created_at | duration(j.finished_at) }}</td>
+        <td>{% if j.usd is not none %}${{ "%.4f" | format(j.usd) }}{% if j.has_estimated_runs %} <span class="muted small">est.</span>{% endif %}{% else %}–{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="muted">No jobs yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
