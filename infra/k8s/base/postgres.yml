@@ -37,9 +37,16 @@ spec:
       # local-path volumes are tied to one node, and campus PCs may leave
       nodeSelector:
         idlecloud/role: control
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: postgres
-          image: postgres:16-bookworm
+          image: postgres:16.15-bookworm@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
           ports:
             - name: postgres
               containerPort: 5432
@@ -51,8 +58,8 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: idlecloud-postgres
-                  key: password
+                  name: idlecloud-db
+                  key: POSTGRES_PASSWORD
             # A subfolder, because the volume root holds lost+found on some disks
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
@@ -60,6 +67,18 @@ spec:
             exec:
               command: ["pg_isready", "-U", "admin", "-d", "csc3104"]
             periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "admin", "-d", "csc3104"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           resources:
             requests:
               cpu: 100m
@@ -69,6 +88,15 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
   volumeClaimTemplates:
     - metadata:
         name: data
