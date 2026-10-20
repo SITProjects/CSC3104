@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coordinator
+  namespace: idlecloud-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: coordinator
+          env:
+            # Set to your bucket's name
+            - name: S3_BUCKET
+              value: csc3104-idle-compute
+            # Must be the bucket's region, or presigned URLs fail
+            - name: AWS_DEFAULT_REGION
+              value: ap-southeast-1
+            - name: S3_PUBLIC_ENDPOINT_URL
+              $patch: delete
+            - name: AWS_ACCESS_KEY_ID
+              $patch: delete
+            - name: AWS_SECRET_ACCESS_KEY
+              $patch: delete

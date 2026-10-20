@@ -1,0 +1,108 @@
+# Postgres 16 for the coordinator and autoscaler, on the AWS control plane.
+# Apply after namespaces.yml. Before applying, create in idlecloud-system:
+#   Secret idlecloud-postgres  key password
+# The data lives on the control plane's EBS volume through k3s's local-path
+# storage, so it survives lab restarts but not deleting the instance.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: idlecloud-system
+spec:
+  selector:
+    app.kubernetes.io/name: idlecloud-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: idlecloud-system
+  labels:
+    app.kubernetes.io/name: idlecloud-postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: idlecloud-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: idlecloud-postgres
+    spec:
+      # local-path volumes are tied to one node, and campus PCs may leave
+      nodeSelector:
+        idlecloud/role: control
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:16.15-bookworm@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: csc3104
+            - name: POSTGRES_USER
+              value: admin
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: idlecloud-db
+                  key: POSTGRES_PASSWORD
+            # A subfolder, because the volume root holds lost+found on some disks
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "admin", "-d", "csc3104"]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "admin", "-d", "csc3104"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 10Gi
