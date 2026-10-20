@@ -1,4 +1,35 @@
 services:
+  web:
+    build:
+      context: .
+      dockerfile: services/web/Dockerfile
+    volumes:
+      - ./services/web:/app/services/web
+      - ./shared:/app/shared
+      - ./core:/app/core
+    command: python -m uvicorn services.web.app:app --host 0.0.0.0 --port 8000 --reload --reload-dir services/web
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://admin:password123@postgres:5432/csc3104
+      COORDINATOR_URL: http://coordinator:8001
+      # No Lambda locally, so the web app renders pages itself
+      LOCAL_SPLIT: "1"
+      HMAC_SECRET: ${HMAC_SECRET:-local-dev-secret}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: csc3104-local
+      AWS_ACCESS_KEY_ID: csc3104-local
+      AWS_SECRET_ACCESS_KEY: csc3104-local-secret
+      AWS_DEFAULT_REGION: ap-southeast-1
+      AWS_EC2_METADATA_DISABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      coordinator:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
   coordinator:
     build:
       context: .
