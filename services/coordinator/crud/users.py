@@ -28,8 +28,7 @@ async def create_user(session: AsyncSession, email: str, password_hash: str) -> 
 
 async def delete_expired_sessions(session: AsyncSession) -> None:
     now = datetime.now(UTC)
-    async with session.begin():
-        await session.execute(delete(UserSession).where(UserSession.expires_at <= now))
+    await session.execute(delete(UserSession).where(UserSession.expires_at <= now))
 
 
 async def ensure_user_exists(session: AsyncSession, user_id: uuid.UUID) -> None:
