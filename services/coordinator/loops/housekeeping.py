@@ -13,6 +13,7 @@ from services.coordinator.crud import (
     mark_lost,
     mark_offline,
 )
+from services.coordinator.crud.users import delete_expired_sessions
 from services.coordinator.k8s import (
     cancel_k3_job,
     cancel_k3_pod,
@@ -47,6 +48,7 @@ async def housekeeping_pass(
     now = datetime.now(UTC)
     async with session_factory.begin() as session:
         await mark_offline(session, now - HEARTBEAT_GRACE)
+        await delete_expired_sessions(session)
         # Snapshot before listing Kubernetes resources so new launches are excluded.
         replicas = await fetch_running_replicas(session, now - LAUNCH_GRACE)
 

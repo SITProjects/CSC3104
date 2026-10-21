@@ -26,6 +26,7 @@ from .tasks import create_tasks, mark_task_running, set_voting
 from .users import (
     create_session,
     create_user,
+    delete_expired_sessions,
     delete_session,
     ensure_user_exists,
     get_session_user,
@@ -40,6 +41,7 @@ __all__ = [
     "create_session",
     "create_tasks",
     "create_user",
+    "delete_expired_sessions",
     "delete_session",
     "ensure_job_type_exists",
     "ensure_node",

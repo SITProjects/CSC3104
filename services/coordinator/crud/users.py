@@ -26,6 +26,12 @@ async def create_user(session: AsyncSession, email: str, password_hash: str) -> 
     return user
 
 
+async def delete_expired_sessions(session: AsyncSession) -> None:
+    now = datetime.now(UTC)
+    async with session.begin():
+        await session.execute(delete(UserSession).where(UserSession.expires_at <= now))
+
+
 async def ensure_user_exists(session: AsyncSession, user_id: uuid.UUID) -> None:
     if await session.get(User, user_id) is None:
         raise HTTPException(422, f"unknown owner_id {user_id}")
