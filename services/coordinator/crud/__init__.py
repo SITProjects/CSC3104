@@ -4,9 +4,10 @@ from .jobs import (
     create_job,
     ensure_job_type_exists,
     get_job,
+    list_jobs,
     mark_job_running,
 )
-from .nodes import ensure_node, mark_offline, update_node_state
+from .nodes import ensure_node, list_nodes, mark_offline, update_node_state
 from .replicas import (
     create_replicas,
     evict_replica,
@@ -22,13 +23,25 @@ from .replicas import (
     schedule_replica,
 )
 from .tasks import create_tasks, mark_task_running, set_voting
+from .users import (
+    create_session,
+    create_user,
+    delete_expired_sessions,
+    delete_session,
+    get_session_user,
+    get_user_by_email,
+)
 
 __all__ = [
     "cancel_job",
     "create_event",
     "create_job",
     "create_replicas",
+    "create_session",
     "create_tasks",
+    "create_user",
+    "delete_expired_sessions",
+    "delete_session",
     "ensure_job_type_exists",
     "ensure_node",
     "evict_replica",
@@ -36,7 +49,11 @@ __all__ = [
     "fetch_scheduled_replicas",
     "get_job",
     "get_replica_with_task",
+    "get_session_user",
+    "get_user_by_email",
     "handle_replica_completed",
+    "list_jobs",
+    "list_nodes",
     "lock_stale_replica_job",
     "mark_job_running",
     "mark_lost",

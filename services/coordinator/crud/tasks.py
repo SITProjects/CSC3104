@@ -1,14 +1,12 @@
 from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from services.coordinator.models import CreateJobRequest
+from services.coordinator.models import JobSpec
 from shared.db import Job, ReplicaStatus, Task, TaskStatus
 from shared.db.models import Replica
 
 
-async def create_tasks(
-    session: AsyncSession, job: Job, req: CreateJobRequest
-) -> list[Task]:
+async def create_tasks(session: AsyncSession, job: Job, req: JobSpec) -> list[Task]:
     """
     Creates one PENDING task per entry in the request, numbered from 0.
 

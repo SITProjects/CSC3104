@@ -31,3 +31,5 @@ LEASE_NAMESPACE = os.environ.get("LEASE_NAMESPACE", "idlecloud-system")
 LEASE_SECONDS = 15
 RENEW_INTERVAL = 5  # seconds
 RENEW_DEADLINE = 10  # seconds
+# User logins: how long a bearer token from /auth/login lasts
+SESSION_TTL_SECONDS = 24 * 3600

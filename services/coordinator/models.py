@@ -1,3 +1,5 @@
+import re
+from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -56,11 +58,12 @@ class TaskIn(BaseModel):
         return value
 
 
-class CreateJobRequest(BaseModel):
+class JobSpec(BaseModel):
+    """A job as a signed-in user submits it to POST /jobs; the owner comes from the token."""
+
     job_id: UUID | None = Field(
         default=None, examples=["123e4567-e89b-12d3-a456-426614174000"]
     )
-    email: str = Field(examples=["user@example.com"])
     job_type: str = Field(examples=["ocr"])
     params: dict[str, Any] = Field(examples=[{"param1": "value1", "param2": "value2"}])
     tasks: list[TaskIn] = Field(min_length=1)
@@ -102,3 +105,33 @@ class HeartbeatIn(BaseModel):
 
 class Ack(BaseModel):
     ok: bool = True
+
+
+# ---- user accounts ----
+
+EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+
+
+class Credentials(BaseModel):
+    email: str = Field(max_length=254, examples=["user@example.com"])
+    password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        """
+        Lower-cases the email so the same address can't sign up twice.
+
+        raises:
+            ValueError: If the value does not look like an email address.
+        """
+        value = value.strip().lower()
+        if not re.match(EMAIL_PATTERN, value):
+            raise ValueError("not a valid email address")
+        return value
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    expires_at: datetime

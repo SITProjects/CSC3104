@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager, suppress
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from kubernetes import client, config
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,16 +18,29 @@ from core.settings import (
     HEARTBEAT_SERVICE_ACCOUNTS,
     POD_NAME,
 )
+from services.coordinator.auth import (
+    AdminUser,
+    CurrentUser,
+    bearer_token,
+    hash_password,
+    verify_password,
+)
 from services.coordinator.crud import (
     cancel_job,
     create_event,
     create_job,
     create_replicas,
+    create_session,
     create_tasks,
+    create_user,
+    delete_session,
     ensure_job_type_exists,
     evict_replica,
     get_job,
     get_replica_with_task,
+    get_user_by_email,
+    list_jobs,
+    list_nodes,
     mark_replica_done,
     set_voting,
     update_node_state,
@@ -41,20 +54,28 @@ from services.coordinator.loops import (
 )
 from services.coordinator.models import (
     Ack,
-    CreateJobRequest,
     CreateJobResponse,
+    Credentials,
     HeartbeatIn,
+    JobSpec,
     Manifest,
     ProgressIn,
     ResultIn,
+    TokenOut,
 )
 from services.coordinator.storage import presign
 from shared.db import (
+    Job,
+    JobSummary,
     JobType,
     JobView,
+    NodeView,
     Replica,
     ReplicaStatus,
     Task,
+    User,
+    UserRole,
+    UserView,
     session_manager,
 )
 from shared.migrate import run_migrations
@@ -139,39 +160,48 @@ async def require_token(
     return replica, task, job_type
 
 
-@app.get("/internal/jobs/{id}")
-async def fetch_job(id: UUID, session: DbSession) -> JobView:
+async def job_view(
+    session: AsyncSession, id: UUID, owner_id: UUID | None = None
+) -> JobView:
     """
-    Returns a job view for the given job id.
+    Builds the view of a job with its tasks, replicas and overall progress.
 
     args:
-        id: The id of the job to retrieve.
+        session: The database session for this request.
+        id: The id of the job.
+        owner_id: If given, the job must belong to this user.
     returns:
-        JobView: A job view with the given id
+        JobView: The job.
+    raises:
+        HTTPException: 404 if there is no such job, or it belongs to someone else.
     """
-    async with session:
-        result = await get_job(session, id)
-        if result is None:
-            raise HTTPException(404, f"job {id} not found")
-        job, progress = result
-        view = JobView.model_validate(job, from_attributes=True)
-        view.progress = int(progress) if progress is not None else 0
-        return view
+    result = await get_job(session, id)
+    if result is None or (owner_id is not None and result[0].owner_id != owner_id):
+        raise HTTPException(404, f"job {id} not found")
+    job, progress = result
+    view = JobView.model_validate(job, from_attributes=True)
+    view.progress = int(progress) if progress is not None else 0
+    return view
 
 
-@app.post("/internal/jobs", status_code=201)
-async def create_jobs(req: CreateJobRequest, session: DbSession) -> CreateJobResponse:
+async def submit_job(
+    session: AsyncSession, req: JobSpec, owner_id: UUID
+) -> CreateJobResponse:
     """
-    Creates a job with the given request and returns a mock response.
+    Creates a job with its tasks and replicas in one transaction.
 
     args:
-        req: The request to create the job.
+        session: The database session for this request.
+        req: The job to create.
+        owner_id: The user the job belongs to.
     returns:
-        CreateJobResponse: A mock response with the job id and task ids.
+        CreateJobResponse: The job id, task ids and number of replicas made.
+    raises:
+        HTTPException: 422 if the job type doesn't exist.
     """
     async with session.begin():
         await ensure_job_type_exists(session, req.job_type)
-        job = await create_job(session, req)
+        job = await create_job(session, req, owner_id)
         tasks = await create_tasks(session, job, req)
         task_ids = [task.id for task in tasks]
         await create_replicas(session, tasks, req.replicas_per_task)
@@ -321,18 +351,16 @@ async def report_evicted(
     return Ack()
 
 
-@app.post("/internal/jobs/{id}/cancel")
-async def cancel_job_request(id: UUID, session: DbSession, k3_api: K3API) -> Ack:
+async def delete_k3_jobs(
+    cancelled_replicas: list[tuple[int, int]] | None, k3_api: client.BatchV1Api
+) -> None:
     """
-    Cancels the job with the given id.
+    Deletes the Kubernetes Jobs of cancelled replicas, logging any that fail.
 
     args:
-        id: The id of the job to cancel.
-    returns:
-        Ack: An acknowledgment of the cancellation.
+        cancelled_replicas: (replica_id, attempt) pairs from cancel_job.
+        k3_api: The Kubernetes batch API.
     """
-    async with session.begin():
-        cancelled_replicas = await cancel_job(session, id)
     names = [
         f"replica-{replica_id}-a{attempt}"
         for replica_id, attempt in cancelled_replicas or []
@@ -343,7 +371,6 @@ async def cancel_job_request(id: UUID, session: DbSession, k3_api: K3API) -> Ack
     for name, result in zip(names, results):
         if isinstance(result, Exception):
             log.exception("failed to cancel K8s job %s: %s", name, result)
-    return Ack()
 
 
 async def require_node_token(
@@ -407,6 +434,159 @@ async def node_heartbeat(
     async with session.begin():
         await update_node_state(session, name, body.state, body.cpu_percent)
     return Ack()
+
+
+# ---- public API for signed-in users ----
+
+
+@app.post("/auth/signup", status_code=201)
+async def signup(body: Credentials, session: DbSession) -> TokenOut:
+    """
+    Creates an account and signs it in.
+
+    args:
+        body: The new account's email and password (8-128 characters).
+    returns:
+        TokenOut: A bearer token for the new account.
+    raises:
+        HTTPException: 409 if the email already has an account.
+    """
+    password_hash = await hash_password(body.password)
+    async with session.begin():
+        user = await create_user(session, body.email, password_hash)
+        token, expires_at = await create_session(session, user.id)
+    return TokenOut(access_token=token, expires_at=expires_at)
+
+
+@app.post("/auth/login")
+async def login(body: Credentials, session: DbSession) -> TokenOut:
+    """
+    Signs in with email and password.
+
+    args:
+        body: The account's email and password.
+    returns:
+        TokenOut: A bearer token to send as "Authorization: Bearer <token>".
+    raises:
+        HTTPException: 401 if the email or password is wrong.
+    """
+    async with session.begin():
+        user = await get_user_by_email(session, body.email)
+        stored = user.password_hash if user else None
+        if user is None or not await verify_password(body.password, stored):
+            raise HTTPException(401, "wrong email or password")
+        token, expires_at = await create_session(session, user.id)
+    return TokenOut(access_token=token, expires_at=expires_at)
+
+
+@app.post("/auth/logout", status_code=204)
+async def logout(
+    session: DbSession, authorization: str | None = Header(None)
+) -> Response:
+    """
+    Ends the session of the request's bearer token. Succeeds even if it already ended.
+    """
+    token = bearer_token(authorization)
+    async with session.begin():
+        await delete_session(session, token)
+    return Response(status_code=204)
+
+
+@app.get("/auth/me")
+async def me(user: CurrentUser) -> UserView:
+    """
+    Returns the signed-in user.
+    """
+    return UserView.model_validate(user, from_attributes=True)
+
+
+@app.post("/jobs", status_code=201)
+async def create_my_job(
+    req: JobSpec, user: CurrentUser, session: DbSession
+) -> CreateJobResponse:
+    """
+    Creates a job owned by the signed-in user.
+
+    args:
+        req: The job; its owner is always the signed-in user.
+    returns:
+        CreateJobResponse: The job id, task ids and number of replicas made.
+    """
+    return await submit_job(session, req, user.id)
+
+
+@app.get("/jobs")
+async def list_my_jobs(
+    user: CurrentUser,
+    session: DbSession,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> list[JobSummary]:
+    """
+    Lists the signed-in user's jobs, newest first.
+    """
+    async with session:
+        jobs = await list_jobs(session, user.id, limit, offset)
+        return [JobSummary.model_validate(job, from_attributes=True) for job in jobs]
+
+
+@app.get("/jobs/{id}")
+async def fetch_my_job(id: UUID, user: CurrentUser, session: DbSession) -> JobView:
+    """
+    Returns one of the signed-in user's jobs. Other users' jobs are 404, except to admins.
+    """
+    async with session:
+        return await job_view(session, id, owner_id=owner_filter(user))
+
+
+@app.post("/jobs/{id}/cancel")
+async def cancel_my_job(
+    id: UUID, user: CurrentUser, session: DbSession, k3_api: K3API
+) -> Ack:
+    """
+    Cancels one of the signed-in user's jobs. Other users' jobs are 404, except to admins.
+
+    raises:
+        HTTPException: 404 if the job isn't the user's, 409 if it already ended.
+    """
+    async with session.begin():
+        # locked like cancel_job does, which then reuses this row
+        job = await session.get(Job, id, with_for_update=True)
+        if job is None or owner_filter(user) not in (None, job.owner_id):
+            raise HTTPException(404, f"job {id} not found")
+        cancelled_replicas = await cancel_job(session, id)
+    await delete_k3_jobs(cancelled_replicas, k3_api)
+    return Ack()
+
+
+def owner_filter(user: User) -> UUID | None:
+    """The owner whose jobs this user may see: their own, or None (all) for admins."""
+    return None if user.role == UserRole.ADMIN else user.id
+
+
+@app.get("/admin/jobs")
+async def list_all_jobs(
+    admin: AdminUser,
+    session: DbSession,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> list[JobSummary]:
+    """
+    Lists every user's jobs, newest first. Admins only.
+    """
+    async with session:
+        jobs = await list_jobs(session, None, limit, offset)
+        return [JobSummary.model_validate(job, from_attributes=True) for job in jobs]
+
+
+@app.get("/admin/nodes")
+async def list_all_nodes(admin: AdminUser, session: DbSession) -> list[NodeView]:
+    """
+    Lists the worker nodes with their state, trust and latest CPU use. Admins only.
+    """
+    async with session:
+        nodes = await list_nodes(session)
+        return [NodeView.model_validate(node, from_attributes=True) for node in nodes]
 
 
 @app.get("/healthz")
