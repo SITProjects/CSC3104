@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from services.coordinator.models import CreateJobRequest
+from services.coordinator.models import JobSpec
 from shared.db import JobType
 from shared.db.models import Job, JobStatus, Replica, ReplicaStatus, Task, TaskStatus
 
@@ -17,10 +17,14 @@ async def ensure_job_type_exists(session: AsyncSession, job_type: str) -> None:
         raise HTTPException(422, f"unknown job_type {job_type!r}")
 
 
-async def create_job(session: AsyncSession, req: CreateJobRequest) -> Job:
+async def create_job(
+    session: AsyncSession,
+    req: JobSpec,
+    owner_id: uuid.UUID,
+) -> Job:
     job = Job(
         id=req.job_id or uuid.uuid4(),
-        owner_email=req.email,
+        owner_id=owner_id,
         job_type=req.job_type,
         params=req.params,
         status=JobStatus.PENDING,
@@ -68,6 +72,26 @@ async def get_job(
         return None
     job, progress = row
     return job, float(progress) if progress is not None else None
+
+
+async def list_jobs(
+    session: AsyncSession, owner_id: uuid.UUID | None, limit: int, offset: int
+) -> list[Job]:
+    """
+    Returns jobs, newest first.
+
+    args:
+        session: The database session for this request.
+        owner_id: The user whose jobs to list, or None for everyone's.
+        limit: The most jobs to return.
+        offset: How many of the newest jobs to skip.
+    returns:
+        list[Job]: The jobs, without their tasks.
+    """
+    stmt = select(Job).order_by(Job.created_at.desc(), Job.id)
+    if owner_id is not None:
+        stmt = stmt.where(Job.owner_id == owner_id)
+    return list((await session.scalars(stmt.limit(limit).offset(offset))).all())
 
 
 async def cancel_job(session: AsyncSession, job_id: uuid.UUID) -> list[tuple[int, int]]:

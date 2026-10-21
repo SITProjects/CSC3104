@@ -1,10 +1,14 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.db.models import Node, NodeState
+
+
+async def list_nodes(session: AsyncSession) -> list[Node]:
+    return list((await session.scalars(select(Node).order_by(Node.name))).all())
 
 
 async def mark_offline(session: AsyncSession, older_than: datetime) -> None:

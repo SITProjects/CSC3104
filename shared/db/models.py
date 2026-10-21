@@ -82,6 +82,11 @@ class NodeState(str, Enum):
     OFFLINE = "OFFLINE"
 
 
+class UserRole(str, Enum):
+    USER = "USER"
+    ADMIN = "ADMIN"
+
+
 # PostgreSQL-native enum types.
 job_status_enum = PGEnum(
     JobStatus,
@@ -104,6 +109,12 @@ replica_status_enum = PGEnum(
 node_state_enum = PGEnum(
     NodeState,
     name="node_state",
+    create_type=True,
+)
+
+user_role_enum = PGEnum(
+    UserRole,
+    name="user_role",
     create_type=True,
 )
 
@@ -168,6 +179,79 @@ class Node(Base):
             "trust_score BETWEEN 0 AND 1",
             name="nodes_trust_score_check",
         ),
+    )
+
+
+# ============================================================
+# User
+# ============================================================
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[UUID] = mapped_column(
+        SQLUUID(as_uuid=True),
+        server_default=text("gen_random_uuid()"),
+        primary_key=True,
+    )
+
+    email: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        unique=True,
+    )
+
+    password_hash: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    role: Mapped[UserRole] = mapped_column(
+        user_role_enum,
+        nullable=False,
+        server_default=text("'USER'"),
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "email = lower(email)",
+            name="users_email_check",
+        ),
+    )
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    token_hash: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+    )
+
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "users.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+    expires_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
     )
 
 
@@ -252,8 +336,8 @@ class Job(Base):
         primary_key=True,
     )
 
-    owner_email: Mapped[str] = mapped_column(
-        Text,
+    owner_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id"),
         nullable=False,
     )
 
@@ -634,6 +718,33 @@ class TaskView(BaseModel):
     status: TaskStatus
     final_hash: str | None
     replicas: list[ReplicaView]
+
+
+class UserView(BaseModel):
+    id: UUID
+    email: str
+    role: UserRole
+    created_at: datetime
+
+
+class NodeView(BaseModel):
+    name: str
+    state: NodeState
+    trust_score: float
+    cpu_percent: float | None
+    last_heartbeat: datetime | None
+    total_agree: int
+    total_disagree: int
+
+
+class JobSummary(BaseModel):
+    id: UUID
+    owner_id: UUID
+    job_type: str
+    status: JobStatus
+    task_count: int
+    created_at: datetime
+    finished_at: datetime | None
 
 
 class JobView(BaseModel):
