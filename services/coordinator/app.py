@@ -35,7 +35,6 @@ from services.coordinator.crud import (
     create_user,
     delete_session,
     ensure_job_type_exists,
-    ensure_user_exists,
     evict_replica,
     get_job,
     get_replica_with_task,
@@ -55,7 +54,6 @@ from services.coordinator.loops import (
 )
 from services.coordinator.models import (
     Ack,
-    CreateJobRequest,
     CreateJobResponse,
     Credentials,
     HeartbeatIn,
@@ -199,11 +197,10 @@ async def submit_job(
     returns:
         CreateJobResponse: The job id, task ids and number of replicas made.
     raises:
-        HTTPException: 422 if the job type or owner doesn't exist.
+        HTTPException: 422 if the job type doesn't exist.
     """
     async with session.begin():
         await ensure_job_type_exists(session, req.job_type)
-        await ensure_user_exists(session, owner_id)
         job = await create_job(session, req, owner_id)
         tasks = await create_tasks(session, job, req)
         task_ids = [task.id for task in tasks]
@@ -213,33 +210,6 @@ async def submit_job(
         task_ids=task_ids,
         replica_count=req.replicas_per_task * len(task_ids),
     )
-
-
-@app.get("/internal/jobs/{id}")
-async def fetch_job(id: UUID, session: DbSession) -> JobView:
-    """
-    Returns a job view for the given job id.
-
-    args:
-        id: The id of the job to retrieve.
-    returns:
-        JobView: A job view with the given id
-    """
-    async with session:
-        return await job_view(session, id)
-
-
-@app.post("/internal/jobs", status_code=201)
-async def create_jobs(req: CreateJobRequest, session: DbSession) -> CreateJobResponse:
-    """
-    Creates a job with the given request and returns a mock response.
-
-    args:
-        req: The request to create the job.
-    returns:
-        CreateJobResponse: A mock response with the job id and task ids.
-    """
-    return await submit_job(session, req, req.owner_id)
 
 
 @app.get("/internal/replicas/{id}/manifest")
@@ -378,22 +348,6 @@ async def report_evicted(
             },
         )
         await set_voting(session, task)
-    return Ack()
-
-
-@app.post("/internal/jobs/{id}/cancel")
-async def cancel_job_request(id: UUID, session: DbSession, k3_api: K3API) -> Ack:
-    """
-    Cancels the job with the given id.
-
-    args:
-        id: The id of the job to cancel.
-    returns:
-        Ack: An acknowledgment of the cancellation.
-    """
-    async with session.begin():
-        cancelled_replicas = await cancel_job(session, id)
-    await delete_k3_jobs(cancelled_replicas, k3_api)
     return Ack()
 
 
@@ -554,7 +508,7 @@ async def create_my_job(
     Creates a job owned by the signed-in user.
 
     args:
-        req: The job, as for /internal/jobs but without an owner_id.
+        req: The job; its owner is always the signed-in user.
     returns:
         CreateJobResponse: The job id, task ids and number of replicas made.
     """

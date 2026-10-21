@@ -28,7 +28,6 @@ from .users import (
     create_user,
     delete_expired_sessions,
     delete_session,
-    ensure_user_exists,
     get_session_user,
     get_user_by_email,
 )
@@ -45,7 +44,6 @@ __all__ = [
     "delete_session",
     "ensure_job_type_exists",
     "ensure_node",
-    "ensure_user_exists",
     "evict_replica",
     "fetch_running_replicas",
     "fetch_scheduled_replicas",

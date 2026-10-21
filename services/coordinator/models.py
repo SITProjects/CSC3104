@@ -72,10 +72,6 @@ class JobSpec(BaseModel):
     mem_request: int = Field(ge=64, le=4096, examples=[256])  # in MiB
 
 
-class CreateJobRequest(JobSpec):
-    owner_id: UUID = Field(examples=["0b9f3c52-6d0e-4a8b-9f43-2d1c5e7a9b10"])
-
-
 class CreateJobResponse(BaseModel):
     job_id: UUID
     task_ids: list[int]

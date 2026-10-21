@@ -31,11 +31,6 @@ async def delete_expired_sessions(session: AsyncSession) -> None:
     await session.execute(delete(UserSession).where(UserSession.expires_at <= now))
 
 
-async def ensure_user_exists(session: AsyncSession, user_id: uuid.UUID) -> None:
-    if await session.get(User, user_id) is None:
-        raise HTTPException(422, f"unknown owner_id {user_id}")
-
-
 async def get_user_by_email(session: AsyncSession, email: str) -> User | None:
     return await session.scalar(select(User).where(User.email == email))
 
