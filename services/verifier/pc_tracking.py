@@ -19,8 +19,12 @@ async def get_dispute_exclusions(
     """
     Collects current and historical PCs to exclude from extra replicas.
 
-    Eviction events preserve earlier assignments. An event for the exact
+    Eviction and loss events preserve earlier assignments. An event for the exact
     replica and attempt can also recover a cleared final PC assignment.
+
+    Missing current or historical PC names prevent creating extra replicas,
+    because previously used PCs cannot be safely excluded. The verifier waits
+    up to five minutes for the missing information before failing the task.
 
     args:
         session: The verifier's current transaction.
@@ -29,13 +33,13 @@ async def get_dispute_exclusions(
     returns:
         list[str]: Distinct previous PC names in sorted order.
     raises:
-        ValueError: If any previous PC assignment is missing.
+        ValueError: If any current or historical PC assignment is unknown.
     """
-    eviction_events = (
+    history_events = (
         await session.scalars(
             select(Event).where(
                 Event.task_id == task.id,
-                Event.type == "replica_evicted",
+                Event.type.in_(["replica_evicted", "replica_lost"]),
             )
         )
     ).all()
@@ -43,7 +47,7 @@ async def get_dispute_exclusions(
         (replica.id, replica.attempt): replica.node_name for replica in replicas
     }
     historical_nodes = []
-    for event in eviction_events:
+    for event in history_events:
         # Event details retain the PC name even if the node record is deleted.
         detail = event.detail or {}
         name = detail.get("node_name")
