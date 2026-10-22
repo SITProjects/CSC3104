@@ -25,11 +25,10 @@ Only the score changes. The agree and disagree counters, state and heartbeat
 stay as the verifier and coordinator left them. If this write fails, the launch
 stays held and is recorded again next tick, with no new EC2 launch.
 
-Tie-breaking still needs work outside the autoscaler:
+The coordinator schedules the extra replicas of DISPUTED tasks like any
+other replica. Two things outside the autoscaler are still open:
 
 - The autoscaler's database user needs INSERT and UPDATE on `nodes`.
-- The coordinator must schedule the extra replicas of DISPUTED tasks. Today
-  its scheduler skips them.
 - The coordinator's Jobs prefer `trust=high` for every replica, so ordinary
   replicas also prefer burst workers. They need a stronger preference for
   campus PCs (for example `idlecloud/pool NotIn [cloud]` at weight 100 and
@@ -418,13 +417,15 @@ and `decide._rescue_demand`):
   until then.
 
 This is only a speed-up, and it does not move any work by itself. Running an
-evicted replica again is the coordinator's job (member 3). On main today the
-coordinator only acknowledges an eviction report and does not requeue it yet.
-Once it creates the new pods, the normal scale-up places them, with or without
-this step. If the autoscaler restarts, the memory starts empty and only that
-normal path remains. If a replica is never requeued, the early machine stays
-empty and is retired after 5 minutes. Later, once the coordinator records each
-replica's node (`replicas.node_name`), that can replace the in-memory record.
+evicted replica again is the coordinator's job (member 3). It requeues an
+EVICTED or LOST replica as the next attempt with the same replica id, until the
+retry limit marks it FAILED. The normal scale-up places the new pod, with or
+without this step. If the
+autoscaler restarts, the memory starts empty and only that normal path remains.
+If a replica is never requeued, the early machine stays empty and is retired
+after 5 minutes. The coordinator clears `replicas.node_name` on eviction, but
+its `replica_evicted` and `replica_lost` events keep the node name. Those could
+replace the in-memory record later.
 
 ### Spot or On-Demand
 
@@ -437,8 +438,9 @@ replica's node (`replicas.node_name`), that can replace the in-memory record.
 | `spot` | Spot only. A refused launch fails and the next tick tries again |
 | `auto` | Spot first. After a clear refusal the same launch runs once as On-Demand |
 
-On-Demand stays the default until the coordinator requeues evicted replicas.
-Without that, a real Spot reclaim loses the work that was running.
+On-Demand stays the default until a live reclaim test shows that the
+coordinator's requeue really resumes the evicted work. Until then, a real Spot
+reclaim may lose the work that was running.
 
 In `auto`, the chooser remembers why Spot was refused:
 
@@ -561,8 +563,8 @@ Why it is safe:
 
 120 minutes is a target. A tick runs every 30 seconds plus the time it takes,
 so the end can be up to one tick late, longer if AWS calls fail. Work evicted
-at 118 minutes is only recovered once the coordinator requeues evicted
-replicas (member 3).
+at 118 minutes is requeued by the coordinator (member 3), like any evicted
+replica. A live test has not measured this yet.
 
 Settings: `BURST_MAX_LIFETIME_MIN` (minutes, default 120, also used by the boot
 script) and `AUTOSCALER_RETIRE_CORDON_LEAD_S` (seconds, default 600). The

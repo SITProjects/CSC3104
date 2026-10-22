@@ -1,7 +1,7 @@
 """Signed POST to the web app's /hooks/pages-ready (member 5's endpoint).
 
 Two kinds of body, both with a "status" field:
-  ok      one batch of pages is in S3 and its tasks can start
+  ok      one batch of pages is in S3
   failed  the PDF cannot be processed, with a short reason to show the user
 """
 

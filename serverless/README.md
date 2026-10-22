@@ -5,7 +5,7 @@ Owner: member 6. Implementation plan, member 6, Step 1.
 When the web app saves a PDF to `jobs/{job_id}/input.pdf`, S3 starts the
 **splitter** Lambda. It counts the pages and starts one **renderer** Lambda per
 20 pages, all at the same time. Each renderer saves its pages as PNGs and sends
-a signed callback to the web app, so tasks can start as soon as their pages exist.
+a signed callback to the web app, which creates the job once every page exists.
 
 ```
 web app saves jobs/{job_id}/input.pdf
@@ -39,7 +39,7 @@ jobs/{job_id}/pages/{page:04d}.png   the renderer writes these, pages start at 1
 One call per batch of 20 pages:
 
 ```json
-{"status": "ok", "job_id": "a1b2c3", "page_count": 45,
+{"status": "ok", "job_id": "3f2b8c1e-5d4a-4e7b-9c1f-2a6d8e0b4c71", "page_count": 45,
  "page_start": 21, "page_end": 40, "chunk_index": 1, "chunk_count": 3, "render_ms": 4210}
 ```
 
@@ -47,14 +47,14 @@ If the file cannot be used (not a PDF, password protected, over 500 pages), the
 splitter sends one call instead and renders nothing:
 
 ```json
-{"status": "failed", "job_id": "a1b2c3", "error": "PDF is password protected"}
+{"status": "failed", "job_id": "3f2b8c1e-5d4a-4e7b-9c1f-2a6d8e0b4c71", "error": "PDF is password protected"}
 ```
 
 If one batch of pages cannot be rendered (a corrupt page), its renderer sends a
 `failed` call for that batch instead, so the job never waits forever:
 
 ```json
-{"status": "failed", "job_id": "a1b2c3", "page_start": 21, "page_end": 40,
+{"status": "failed", "job_id": "3f2b8c1e-5d4a-4e7b-9c1f-2a6d8e0b4c71", "page_start": 21, "page_end": 40,
  "error": "pages 21-40 could not be rendered: ..."}
 ```
 
@@ -67,6 +67,12 @@ bad signatures and anything older than 5 minutes, then reply 2xx.
 `common/signing.py` has a `verify()` function to reuse. The same batch can arrive
 twice after a retry, so ignore a `(job_id, page_start)` already seen.
 All pages are ready once the `page_end` values cover `page_count`.
+
+The coordinator's `POST /jobs` takes every task at once, so the web app creates
+the job after the last batch arrives. It passes the same `job_id`, which must
+be a UUID, and lists each task's pages as `input.files`, for example
+`pages/0001.png`. Starting tasks per batch would need a coordinator endpoint
+that adds tasks to an existing job.
 
 ## AWS deployment
 

@@ -142,9 +142,8 @@ def cost_per_hour(machine: str) -> float | None:
 
 # ---------- Spot or On-Demand ----------
 
-# on-demand, spot or auto (see burst/market.py). On-Demand by default until the
-# coordinator requeues evicted replicas. Without that, a real Spot reclaim
-# loses the running work.
+# on-demand, spot or auto (see burst/market.py). On-Demand by default until a
+# live reclaim test shows the coordinator's requeue resumes the evicted work.
 BURST_MARKET = os.environ.get("BURST_MARKET", "on-demand")
 # How long auto skips Spot after AWS has no Spot capacity (or quota) for it
 SPOT_COOLDOWN_S = _int("BURST_SPOT_COOLDOWN_S", 1800)

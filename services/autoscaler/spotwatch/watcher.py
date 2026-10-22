@@ -324,7 +324,9 @@ class _CpuMeter:
         if not now or not last or now[0] <= last[0]:
             return 0.0
         busy = (now[0] - last[0]) - (now[1] - last[1])
-        return round(100.0 * busy / (now[0] - last[0]), 1)
+        # The kernel's iowait counter can go down, which can push this outside
+        # 0 to 100. The coordinator rejects such a heartbeat, so clamp it.
+        return min(100.0, max(0.0, round(100.0 * busy / (now[0] - last[0]), 1)))
 
 
 def handle(kube: KubeApi, notice: Notice, seen_at: datetime) -> None:
