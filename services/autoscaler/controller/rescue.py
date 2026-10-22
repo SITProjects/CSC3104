@@ -8,9 +8,7 @@ keeps that instance's replicas until a while after the deadline.
 
 The memory lives in this process only. After an autoscaler restart it starts
 empty. Replacement is a speed-up, never the only path: once the coordinator
-requeues an evicted replica as a new pod, the normal scale-up places it. (On
-main today the coordinator only acknowledges an eviction, so that requeue is
-still member 3's work.)
+requeues an evicted replica as a new pod, the normal scale-up places it.
 """
 
 import dataclasses
