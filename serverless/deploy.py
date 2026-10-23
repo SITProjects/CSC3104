@@ -15,7 +15,8 @@ Its region decides where the Lambdas go, because S3 only triggers a Lambda in
 its own region.
 
 The callback goes to WEBHOOK_URL, signed with HMAC_SECRET, both read from the
-environment. Set them to change the callback. Without WEBHOOK_URL each function
+environment. Set them to change the callback. The URL must be https:// unless
+--allow-http-webhook is given (HMAC signs the body but does not encrypt it). Without WEBHOOK_URL each function
 keeps the callback settings it already has, and a new function only logs its
 callbacks.
 """
@@ -43,6 +44,9 @@ OWN_ROLE = "idlecloud-lambda-role"
 # Lambda settings this script owns only when WEBHOOK_URL is given
 CALLBACK_KEYS = ("WEBHOOK_URL", "HMAC_SECRET", "ALLOW_NO_WEBHOOK")
 LOG_ONLY = {"ALLOW_NO_WEBHOOK": "1"}
+# create_function fails with this while a new IAM role is still spreading
+ROLE_NOT_READY = "cannot be assumed"
+ROLE_RETRY_DELAYS_S = (5, 10, 15, 20, 25)
 
 # name: (handler, memory MB, timeout s, /tmp MB). More memory also means more
 # CPU, which speeds up rendering. The splitter only counts pages and fans out.
@@ -124,15 +128,20 @@ def lambda_role(iam, account: str, region: str, bucket: str) -> str:
         return iam.get_role(RoleName="LabRole")["Role"]["Arn"]
     except iam.exceptions.NoSuchEntityException:
         pass
-    except ClientError:
-        # AWS Academy can deny reading roles. LabRole is always there.
-        return f"arn:aws:iam::{account}:role/LabRole"
-    created = False
+    except ClientError as error:
+        code = error.response["Error"]["Code"]
+        if code not in ("AccessDenied", "AccessDeniedException"):
+            raise  # expired keys and the like must stop the deploy
+        # AWS Academy denies reading roles but always has LabRole. This is an
+        # assumption, so say so. A wrong guess fails at create_function.
+        arn = f"arn:aws:iam::{account}:role/LabRole"
+        print(f"Cannot read IAM roles ({code}), assuming AWS Academy's {arn}")
+        return arn
     try:
         arn = iam.get_role(RoleName=OWN_ROLE)["Role"]["Arn"]
     except iam.exceptions.NoSuchEntityException:
         arn = _create_role(iam)
-        created = True
+        print(f"Created IAM role {OWN_ROLE}")
     # Both calls replace what is there, so running them again is harmless
     iam.attach_role_policy(
         RoleName=OWN_ROLE,
@@ -159,9 +168,6 @@ def lambda_role(iam, account: str, region: str, bucket: str) -> str:
             }
         ),
     )
-    if created:
-        print(f"Created IAM role {OWN_ROLE}, waiting for AWS to pick it up")
-        time.sleep(15)  # a new role takes a few seconds before Lambda accepts it
     return arn
 
 
@@ -183,6 +189,20 @@ def _create_role(iam) -> str:
     )["Role"]["Arn"]
 
 
+def create_function(lam, **params) -> None:
+    """create_function, retried while a new role is not yet usable by Lambda.
+    IAM changes take a while to spread, and no fixed wait is long enough."""
+    for delay in (*ROLE_RETRY_DELAYS_S, None):
+        try:
+            lam.create_function(**params)
+            return
+        except lam.exceptions.InvalidParameterValueException as error:
+            if delay is None or ROLE_NOT_READY not in str(error):
+                raise
+            print(f"Role not usable by Lambda yet, retrying in {delay} s")
+            time.sleep(delay)
+
+
 def upsert_function(lam, name: str, image_uri: str, role: str, env: dict) -> str:
     """env replaces all the function's variables (that is how Lambda works), so
     callback settings not given in env are carried over from the function."""
@@ -198,7 +218,8 @@ def upsert_function(lam, name: str, image_uri: str, role: str, env: dict) -> str
         current = lam.get_function(FunctionName=name)["Configuration"]
     except lam.exceptions.ResourceNotFoundException:
         config["Environment"] = {"Variables": {**LOG_ONLY, **env}}
-        lam.create_function(
+        create_function(
+            lam,
             FunctionName=name,
             PackageType="Image",
             Code={"ImageUri": image_uri},
@@ -268,7 +289,7 @@ def connect_trigger(lam, s3, bucket: str, account: str, split_arn: str) -> None:
     print(f"Uploads to s3://{bucket}/jobs/<job_id>/input.pdf now start {SPLIT_FN}")
 
 
-def callback_env() -> dict:
+def callback_env(allow_http: bool = False) -> dict:
     """The callback settings to write, or {} to keep each function's own."""
     url = os.environ.get("WEBHOOK_URL", "")
     secret = os.environ.get("HMAC_SECRET", "")
@@ -277,6 +298,11 @@ def callback_env() -> dict:
         return {}
     if not secret:
         raise SystemExit("Set HMAC_SECRET too when WEBHOOK_URL is set")
+    if not url.startswith("https://") and not allow_http:
+        raise SystemExit(
+            "WEBHOOK_URL must start with https://. Page details would travel "
+            "unencrypted. Add --allow-http-webhook only for a test endpoint."
+        )
     return {"WEBHOOK_URL": url, "HMAC_SECRET": secret, "ALLOW_NO_WEBHOOK": "0"}
 
 
@@ -289,8 +315,13 @@ def main() -> None:
     parser.add_argument(
         "--bucket", required=True, help="existing bucket the web app uploads PDFs to"
     )
+    parser.add_argument(
+        "--allow-http-webhook",
+        action="store_true",
+        help="accept an http:// WEBHOOK_URL (test endpoints only)",
+    )
     args = parser.parse_args()
-    env = callback_env()
+    env = callback_env(args.allow_http_webhook)
 
     s3 = aws_session().client("s3")
     region = bucket_region(s3, args.bucket)
@@ -300,6 +331,7 @@ def main() -> None:
     print(f"Deploying to {region} for bucket {args.bucket}")
 
     role = lambda_role(session.client("iam"), account, region, args.bucket)
+    print(f"Lambdas run as {role}")
     image_uri = build_and_push(session.client("ecr"))
     upsert_function(lam, RENDER_FN, image_uri, role, {**env, "RENDER_DPI": "300"})
     # The splitter also sends a callback when it rejects a PDF

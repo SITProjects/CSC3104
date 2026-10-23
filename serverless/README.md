@@ -98,10 +98,12 @@ python -m serverless.deploy --bucket csc3104-idle-compute
 - **Bucket**: member 1's existing bucket. The script never creates one. It reads
   the bucket's region and deploys there, since S3 only triggers a Lambda in its
   own region.
-- **Role**: `LabRole` on AWS Academy. A normal account gets a small
-  `idlecloud-lambda-role` that can only log, read and write `jobs/` in this
-  bucket, and start the renderer. Its policies are applied on every run, so a
-  new bucket or region is picked up.
+- **Role**: `LabRole` on AWS Academy. If the lab denies reading roles, the
+  script assumes `LabRole` and prints the ARN it used. A normal account gets a
+  small `idlecloud-lambda-role` that can only log, read and write `jobs/` in
+  this bucket, and start the renderer. Its policies are applied on every run, so
+  a new bucket or region is picked up. A brand new role can take a while to
+  reach Lambda, so creating a function is retried for about a minute.
 - **Trigger**: uploads matching `jobs/*/input.pdf` start `idlecloud-split`. The
   bucket's other notification settings are kept.
 - **Callbacks**: without `WEBHOOK_URL`, each function keeps the callback
@@ -109,6 +111,13 @@ python -m serverless.deploy --bucket csc3104-idle-compute
   (`ALLOW_NO_WEBHOOK=1`) until a run sets the URL and secret. Lambda replaces
   all of a function's variables on update, which is why the script copies
   these over itself. Other variables are owned by the script and reset each run.
+- **HTTPS**: `WEBHOOK_URL` must start with `https://`. The HMAC proves who sent
+  a callback but does not hide its contents. `--allow-http-webhook` lifts this
+  for a test endpoint only.
+- **Where the secret lives**: `HMAC_SECRET` is a Lambda environment variable.
+  Lambda encrypts it at rest, but anyone allowed to read the function's
+  configuration can see it. That is enough for this project. AWS Secrets
+  Manager would be the next step.
 - **Retries**: S3 events and the splitter's fan-out use Lambda's default of two
   retries. The script does not touch the async settings, so a failure
   destination added in the console stays.
