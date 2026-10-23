@@ -2,10 +2,11 @@
 {% block title %}Log in{% endblock %}
 {% block content %}
 <h1>Log in</h1>
-{# TODO: wire this form to the coordinator's /auth/login #}
+{# TODO: add the POST /login handler, then remove "disabled" from the button.
+   Set the session cookie HttpOnly, SameSite=Lax (and Secure outside local dev). #}
 <form method="post" action="/login">
   <label>Email <input type="email" name="email" required></label>
   <label>Password <input type="password" name="password" required></label>
-  <button type="submit">Log in</button>
+  <button type="submit" disabled>Log in (coming soon)</button>
 </form>
 {% endblock %}

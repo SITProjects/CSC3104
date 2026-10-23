@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 import httpx
 import pytest
 
@@ -35,3 +37,14 @@ async def test_error_status_raises():
     client = make_client(lambda request: httpx.Response(401))
     with pytest.raises(httpx.HTTPStatusError):
         await client.me("bad")
+
+
+@pytest.mark.asyncio
+async def test_get_job_uses_uuid_in_path():
+    job_id = uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/jobs/{job_id}"
+        return httpx.Response(200, json={"id": str(job_id)})
+
+    assert (await make_client(handler).get_job("t", job_id))["id"] == str(job_id)

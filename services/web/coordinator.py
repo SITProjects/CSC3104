@@ -1,5 +1,7 @@
 """The web app's only way of talking to the coordinator service."""
 
+from uuid import UUID
+
 import httpx
 
 from services.web.settings import settings
@@ -48,7 +50,8 @@ class CoordinatorClient:
         params = {"limit": limit, "offset": offset}
         return await self._send("GET", "/jobs", token, params=params)
 
-    async def get_job(self, token: str, job_id: str) -> dict:
+    async def get_job(self, token: str, job_id: UUID) -> dict:
+        # typed as UUID so a value like "../admin/jobs" can't change the path
         return await self._send("GET", f"/jobs/{job_id}", token)
 
     async def aclose(self) -> None:
