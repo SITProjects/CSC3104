@@ -25,6 +25,7 @@ from services.coordinator.auth import (
     hash_password,
     verify_password,
 )
+from services.coordinator.burst import router as burst_router
 from services.coordinator.crud import (
     cancel_job,
     create_event,
@@ -123,6 +124,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Coordinator", lifespan=lifespan)
+app.include_router(burst_router)
 
 
 async def require_token(
