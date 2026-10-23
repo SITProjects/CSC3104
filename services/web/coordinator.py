@@ -1,0 +1,61 @@
+"""The web app's only way of talking to the coordinator service."""
+
+from uuid import UUID
+
+import httpx
+
+from services.web.settings import settings
+
+
+def _bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+class CoordinatorClient:
+    """
+    Thin wrapper over the coordinator's public endpoints.
+
+    Every method returns the decoded JSON and raises httpx.HTTPStatusError on a
+    non-2xx response, so callers decide how to show the error.
+    """
+
+    def __init__(self, base_url: str, timeout: float, transport=None):
+        self._http = httpx.AsyncClient(
+            base_url=base_url, timeout=timeout, transport=transport
+        )
+
+    async def _send(self, method: str, path: str, token: str | None = None, **kw):
+        headers = _bearer(token) if token else None
+        resp = await self._http.request(method, path, headers=headers, **kw)
+        resp.raise_for_status()
+        return resp.json() if resp.content else None
+
+    async def signup(self, email: str, password: str) -> dict:
+        return await self._send(
+            "POST", "/auth/signup", json={"email": email, "password": password}
+        )
+
+    async def login(self, email: str, password: str) -> dict:
+        return await self._send(
+            "POST", "/auth/login", json={"email": email, "password": password}
+        )
+
+    async def logout(self, token: str) -> None:
+        await self._send("POST", "/auth/logout", token)
+
+    async def me(self, token: str) -> dict:
+        return await self._send("GET", "/auth/me", token)
+
+    async def list_jobs(self, token: str, limit: int = 20, offset: int = 0) -> list:
+        params = {"limit": limit, "offset": offset}
+        return await self._send("GET", "/jobs", token, params=params)
+
+    async def get_job(self, token: str, job_id: UUID) -> dict:
+        # typed as UUID so a value like "../admin/jobs" can't change the path
+        return await self._send("GET", f"/jobs/{job_id}", token)
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
+
+
+coordinator = CoordinatorClient(settings.coordinator_url, settings.coordinator_timeout)
