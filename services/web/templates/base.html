@@ -7,10 +7,18 @@
   <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
 </head>
 <body>
-  <header>
+  <aside>
     <a class="brand" href="/">Idle-Compute Cloud</a>
-    <nav><a href="/login">Log in</a></nav>
-  </header>
+    <nav>
+      {% for label, path in nav_items %}
+      <a href="{{ path }}">{{ label }}</a>
+      {% endfor %}
+    </nav>
+    <nav class="auth">
+      <a href="/login">Log in</a>
+      <a href="/signup">Sign up</a>
+    </nav>
+  </aside>
   <main>{% block content %}{% endblock %}</main>
 </body>
 </html>
