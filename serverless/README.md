@@ -76,5 +76,42 @@ that adds tasks to an existing job.
 
 ## AWS deployment
 
-Deploying to Lambda (building the image in ECR and adding the S3 trigger) comes
-in a separate PR, once the group's AWS account and bucket are agreed.
+`deploy.py` builds the image, pushes it to ECR, creates or updates both Lambdas
+and adds the S3 trigger. Run it from the repo root with Docker running:
+
+```sh
+python -m serverless.deploy --bucket csc3104-idle-compute
+```
+
+To set or change the callback, give the URL and the secret first. `read -rs`
+asks for the secret without showing it, so it stays out of shell history:
+
+```sh
+export WEBHOOK_URL=https://<site>/hooks/pages-ready
+read -rs HMAC_SECRET && export HMAC_SECRET
+python -m serverless.deploy --bucket csc3104-idle-compute
+```
+
+- **Credentials**: `runtime/aws-credentials`, the same file the autoscaler's
+  launch command uses. Paste the AWS Academy "AWS CLI" block there. It expires
+  with the lab session. Without the file, boto3's normal lookup is used.
+- **Bucket**: member 1's existing bucket. The script never creates one. It reads
+  the bucket's region and deploys there, since S3 only triggers a Lambda in its
+  own region.
+- **Role**: `LabRole` on AWS Academy. A normal account gets a small
+  `idlecloud-lambda-role` that can only log, read and write `jobs/` in this
+  bucket, and start the renderer. Its policies are applied on every run, so a
+  new bucket or region is picked up.
+- **Trigger**: uploads matching `jobs/*/input.pdf` start `idlecloud-split`. The
+  bucket's other notification settings are kept.
+- **Callbacks**: without `WEBHOOK_URL`, each function keeps the callback
+  settings it already has. A new function only logs what it would send
+  (`ALLOW_NO_WEBHOOK=1`) until a run sets the URL and secret. Lambda replaces
+  all of a function's variables on update, which is why the script copies
+  these over itself. Other variables are owned by the script and reset each run.
+- **Retries**: S3 events and the splitter's fan-out use Lambda's default of two
+  retries. The script does not touch the async settings, so a failure
+  destination added in the console stays.
+
+Running it again after a code change pushes a new image tag and updates both
+functions. Each image tag is a timestamp, so Lambda always pulls the new code.
