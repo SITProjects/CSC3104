@@ -580,8 +580,10 @@ watcher's taint at 13 minutes, and termination at 15 minutes. Check with
 
 ## Estimated burst cost (Step 5c)
 
-Member 5's admin page shows burst workers and cost per job from three SQL
-views (`shared/migrations/004_burst_cost.sql`). Every figure is an estimate.
+The admin page (`/admin/nodes` in the web app) shows burst workers and cost per
+job. It reads them through the coordinator's admin-only `GET /admin/burst`,
+which reads the three SQL views in `shared/migrations/004_burst_cost.sql`.
+Every figure is an estimate.
 
 | View | One row per | Columns of note |
 | --- | --- | --- |
@@ -630,3 +632,39 @@ counts until it was last seen, which can be later than it really ended if its
 pod status was stale. A negative value means the estimated records disagree,
 not that idle time cost less than nothing. It is left unclamped, so attributed
 plus unattributed still equals the total.
+
+### Admin page (Step 5, final bullet)
+
+How the pieces connect:
+
+```
+/admin/nodes page  ->  CoordinatorClient.burst_overview()  ->  GET /admin/burst  ->  004 views
+(services/web)         (services/web/coordinator.py)          (services/coordinator/burst.py)
+```
+
+The web app never touches the database. It forwards the user's login token,
+and the coordinator checks it with its usual admin check. No token or an
+expired one gets 401. A normal user gets 403.
+
+`GET /admin/burst` returns `observed_at`, `machine_count`, `job_count`,
+`machines` and `jobs`. Money comes back as decimal strings, or null when the
+price is unknown. The two lists page on their own with `machine_limit`,
+`machine_offset`, `job_limit` and `job_offset`. Limits are 1 to 100, default 20.
+
+- Workers: still running first, then the newest. Trust, state, CPU and the
+  last heartbeat come from `nodes`, but only for the instance now on that slot.
+  Node names are reused, so an old machine never shows its replacement's data.
+  The node row also outlives a machine. Trust is reset when the new machine is
+  recorded, but state, CPU and heartbeat show only after it sends a heartbeat
+  of its own. Until then they are blank.
+- Jobs: every job, newest first. A job with no burst runs shows 0, which means
+  no burst run was seen, not proof that none ran. A job with some unpriced runs
+  shows the known part and a warning. A job with no priced runs shows Unknown.
+- "Running" means no end time is recorded yet. It is not a live EC2 check.
+
+The coordinator's database user needs SELECT on the three views,
+`burst_machines`, `jobs`, `burst_slots` and `nodes`. The web app needs no database access.
+
+Dependency on member 5: the page reads the token from the `session` cookie.
+The login page on main is still a placeholder, so it does not set that cookie
+yet. Until it does, set a coordinator admin token as the cookie by hand to test.
