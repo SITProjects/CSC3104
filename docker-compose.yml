@@ -38,6 +38,18 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
+  web:
+    build:
+      context: .
+      dockerfile: services/web/Dockerfile
+    volumes:
+      - ./services/web:/app/services/web
+    ports:
+      - "8000:8000"
+    environment:
+      COORDINATOR_URL: http://coordinator:8001
+    depends_on:
+      - coordinator
   postgres:
     image: postgres:16-bookworm
     environment:
