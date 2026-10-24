@@ -48,8 +48,19 @@ services:
       - "8000:8000"
     environment:
       COORDINATOR_URL: http://coordinator:8001
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: csc3104-local
+      AWS_ACCESS_KEY_ID: csc3104-local
+      AWS_SECRET_ACCESS_KEY: csc3104-local-secret
+      AWS_DEFAULT_REGION: ap-southeast-1
+      AWS_EC2_METADATA_DISABLED: "true"
+      # no Lambda locally: the web app renders the page images itself
+      LOCAL_RENDER: ${LOCAL_RENDER:-true}
+      # the Lambda signs /hooks/pages-ready with this; unset locally = hook off
+      HMAC_SECRET: ${HMAC_SECRET:-}
     depends_on:
       - coordinator
+      - minio
   postgres:
     image: postgres:16-bookworm
     environment:
