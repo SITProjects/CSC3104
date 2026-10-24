@@ -22,3 +22,11 @@ Or `docker compose up web`. Open http://localhost:8000 (API docs at `/docs`).
 ```sh
 uv run pytest services/web
 ```
+
+## Burst workers and cost (member 6)
+
+`/admin/nodes` shows burst workers and the estimated cost per job, from the
+coordinator's `GET /admin/burst`. It sends the token in the `session` cookie.
+The login handler must set that cookie from the `access_token` that
+`/auth/login` returns, ideally HttpOnly, SameSite=Lax and Secure. Details are in
+`services/autoscaler/README.md`, section "Admin page".

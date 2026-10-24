@@ -7,7 +7,7 @@ from urllib.parse import quote, urlsplit
 from uuid import UUID
 
 import httpx
-from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -17,6 +17,7 @@ from services.web.settings import settings
 
 BASE_DIR = Path(__file__).parent
 log = logging.getLogger("uvicorn.error")
+BURST_PAGE_SIZE = 20  # rows per page in each admin burst table
 
 # Main navigation: (label, path).
 NAV_ITEMS = [
@@ -267,8 +268,47 @@ async def account(request: Request):
 
 
 @app.get("/admin/nodes", response_class=HTMLResponse, dependencies=[AdminOnly])
-async def admin_nodes(request: Request):
-    return templates.TemplateResponse(request, "admin_nodes.html")
+async def admin_nodes(
+    request: Request,
+    machine_offset: int = Query(0, ge=0),
+    job_offset: int = Query(0, ge=0),
+):
+    token = request.cookies.get(settings.session_cookie)
+    context = {
+        "machine_offset": machine_offset,
+        "job_offset": job_offset,
+        "page_size": BURST_PAGE_SIZE,
+    }
+    status = 200
+    if not token:
+        context["error"] = (
+            "Log in with an admin account to view burst workers and costs."
+        )
+        status = 401
+    else:
+        try:
+            context["burst"] = await coordinator.burst_overview(
+                token,
+                machine_limit=BURST_PAGE_SIZE,
+                machine_offset=machine_offset,
+                job_limit=BURST_PAGE_SIZE,
+                job_offset=job_offset,
+            )
+        except httpx.HTTPStatusError as error:
+            code = error.response.status_code
+            status = code if code in (401, 403) else 503
+            context["error"] = {
+                401: "Your session has expired. Log in again to view burst costs.",
+                403: "An admin account is required to view burst workers and costs.",
+            }.get(code, "Burst cost data is unavailable. Please try again shortly.")
+        except httpx.RequestError:
+            status = 503
+            context["error"] = (
+                "The coordinator is unavailable. Please try again shortly."
+            )
+    return templates.TemplateResponse(
+        request, "admin_nodes.html", context, status_code=status
+    )
 
 
 @app.get("/healthz")

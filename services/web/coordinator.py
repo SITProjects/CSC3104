@@ -54,6 +54,26 @@ class CoordinatorClient:
         # typed as UUID so a value like "../admin/jobs" can't change the path
         return await self._send("GET", f"/jobs/{job_id}", token)
 
+    async def burst_overview(
+        self,
+        token: str,
+        machine_limit: int = 20,
+        machine_offset: int = 0,
+        job_limit: int = 20,
+        job_offset: int = 0,
+    ) -> dict:
+        return await self._send(
+            "GET",
+            "/admin/burst",
+            token,
+            params={
+                "machine_limit": machine_limit,
+                "machine_offset": machine_offset,
+                "job_limit": job_limit,
+                "job_offset": job_offset,
+            },
+        )
+
     async def aclose(self) -> None:
         await self._http.aclose()
 

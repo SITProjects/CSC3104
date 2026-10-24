@@ -31,3 +31,10 @@ body.logged-out main { display: flex; flex-direction: column; justify-content: c
 .auth-hero h1 { margin: 0 0 .5rem; font-size: 2.25rem; }
 .auth-hero p { margin: 0; color: #4b5563; }
 body.logged-out .auth-card { width: 100%; box-sizing: border-box; margin: 0; }
+.table-scroll { max-width: 100%; overflow-x: auto; }
+.table-scroll table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+.table-scroll caption { text-align: left; margin-bottom: .75rem; color: #4b5563; }
+.table-scroll th, .table-scroll td { text-align: left; vertical-align: top; padding: .75rem; border-bottom: 1px solid #d1d5db; }
+.table-scroll th { background: #f3f4f6; }
+.pagination { display: flex; gap: 1rem; margin: 1rem 0; }
+main:has(.table-scroll) { max-width: 80rem; min-width: 0; }

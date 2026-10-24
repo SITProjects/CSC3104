@@ -223,6 +223,16 @@ def test_protected_pages_open_when_logged_in(monkeypatch, path):
 
 
 def test_admin_page_needs_admin_role(monkeypatch):
+    async def fake_burst(token, **kwargs):
+        return {
+            "observed_at": "now",
+            "machine_count": 0,
+            "machines": [],
+            "job_count": 0,
+            "jobs": [],
+        }
+
+    monkeypatch.setattr(coordinator, "burst_overview", fake_burst)
     assert _signed_in(monkeypatch, USER).get("/admin/nodes").status_code == 403
     assert _signed_in(monkeypatch, ADMIN).get("/admin/nodes").status_code == 200
 
