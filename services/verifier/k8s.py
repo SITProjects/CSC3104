@@ -58,6 +58,22 @@ def sync_node(api, name, score):
     )
 
 
+def create_kubernetes_client() -> client.CoreV1Api:
+    """
+    Creates a Kubernetes client using cluster or local credentials.
+
+    returns:
+        CoreV1Api: The configured Kubernetes client.
+    raises:
+        ConfigException: If neither credential source can be loaded.
+    """
+    try:
+        config.load_incluster_config()
+    except config.ConfigException:
+        config.load_kube_config()
+    return client.CoreV1Api()
+
+
 async def trust_sync_loop(session_factory, interval=5):
     """
     Synchronizes database trust scores with Kubernetes node labels and taints.
@@ -77,23 +93,7 @@ async def trust_sync_loop(session_factory, interval=5):
     while True:
         try:
             if api is None:
-
-                def connect():
-                    """
-                    Creates a Kubernetes client using cluster or local credentials.
-
-                    returns:
-                        CoreV1Api: The configured Kubernetes client.
-                    raises:
-                        ConfigException: If neither credential source can be loaded.
-                    """
-                    try:
-                        config.load_incluster_config()
-                    except config.ConfigException:
-                        config.load_kube_config()
-                    return client.CoreV1Api()
-
-                api = await asyncio.to_thread(connect)
+                api = await asyncio.to_thread(create_kubernetes_client)
             async with session_factory() as session:
                 scores = (
                     await session.execute(select(Node.name, Node.trust_score))

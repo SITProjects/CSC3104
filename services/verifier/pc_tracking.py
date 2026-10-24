@@ -29,7 +29,7 @@ async def get_dispute_exclusions(
     args:
         session: The verifier's current transaction.
         task: The task whose PC history is needed.
-        replicas: The task's replicas, already loaded by vote_task.
+        replicas: The task's replicas, already loaded by process_vote.
     returns:
         list[str]: Distinct previous PC names in sorted order.
     raises:
