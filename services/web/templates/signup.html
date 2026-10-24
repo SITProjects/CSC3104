@@ -1,6 +1,37 @@
 {% extends "base.html" %}
 {% block title %}Sign up{% endblock %}
 {% block content %}
-<h1>Sign up</h1>
-<p>Placeholder page.</p>
+{% include "_auth_hero.html" %}
+<section class="auth-card">
+  <h2>Create your account</h2>
+  <p class="lede">Sign up to run OCR on idle campus PCs.</p>
+
+  {% if error %}
+  <div class="alert" role="alert">{{ error }}</div>
+  {% endif %}
+
+  <form method="post" action="/signup" novalidate>
+    <label>Email
+      <input type="email" name="email" value="{{ email or '' }}"
+             autocomplete="username" autofocus required>
+    </label>
+    <label>Password
+      <span class="password-field">
+        <input type="password" name="password" minlength="8" maxlength="128"
+               autocomplete="new-password" aria-describedby="pw-hint" required>
+        <button type="button" class="toggle-password" aria-label="Show password">Show</button>
+      </span>
+      <small id="pw-hint" class="hint">8 to 128 characters.</small>
+    </label>
+    <label>Confirm password
+      <input type="password" name="confirm_password" minlength="8" maxlength="128"
+             autocomplete="new-password" required>
+    </label>
+    <p class="field-error" id="match-error" role="alert" hidden>Passwords do not match.</p>
+    <button type="submit" class="primary">Create account</button>
+  </form>
+
+  <p class="alt">Already have an account? <a href="/login">Log in</a></p>
+</section>
+<script src="{{ url_for('static', path='auth.js') }}" defer></script>
 {% endblock %}
