@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 from kubernetes import client, config
+from kubernetes.client import ApiException
 from sqlalchemy import select
 
 from shared.db.models import Node
@@ -16,10 +17,22 @@ QUARANTINE_TAINT = "idlecloud/quarantined"
 
 
 def sync_node(api, name, score):
-    """Optimistically patch only our label/taint; retry conflicts next poll.
+    """
+    Synchronizes the database trust score with the node's label and taint.
 
-    resourceVersion protects the read/modify/write taint list against concurrent
-    owner-active or Spot watcher changes. Unrelated taints are preserved.
+    A quarantined node can be manually recovered by resetting its database trust
+    score to 0.1 after the node has been checked or fixed. The next sync removes
+    the quarantine taint while preserving its existing agreement history.
+
+    resourceVersion protects the taint update from concurrent changes.
+    Unrelated taints are preserved.
+
+    args:
+        api: The Kubernetes CoreV1Api client.
+        name: The Kubernetes node name.
+        score: The node's current database trust score.
+    raises:
+        ApiException: If reading or patching the Kubernetes node fails.
     """
     node = api.read_node(name, _request_timeout=10)
     labels = node.metadata.labels or {}
@@ -46,10 +59,19 @@ def sync_node(api, name, score):
 
 
 async def trust_sync_loop(session_factory, interval=5):
-    """Retry configuration/API failures; DB voting continues independently.
+    """
+    Synchronizes database trust scores with Kubernetes node labels and taints.
 
-    Read current database scores every pass, including after service restarts.
+    Retries configuration, API and database failures while voting continues
+    independently. Missing Kubernetes nodes are logged at debug level and
+    retried on later passes.
+
+    Reads current database scores every pass, including after service restarts.
     A later pass corrects a score changed while an API request was in flight.
+
+    args:
+        session_factory: The verifier's async database session factory.
+        interval: Seconds to wait between synchronization passes.
     """
     api = None
     while True:
@@ -57,6 +79,14 @@ async def trust_sync_loop(session_factory, interval=5):
             if api is None:
 
                 def connect():
+                    """
+                    Creates a Kubernetes client using cluster or local credentials.
+
+                    returns:
+                        CoreV1Api: The configured Kubernetes client.
+                    raises:
+                        ConfigException: If neither credential source can be loaded.
+                    """
                     try:
                         config.load_incluster_config()
                     except config.ConfigException:
@@ -71,10 +101,13 @@ async def trust_sync_loop(session_factory, interval=5):
             for name, score in scores:
                 try:
                     await asyncio.to_thread(sync_node, api, name, score)
-                except Exception:
-                    log.exception(
-                        "Could not synchronize trust for node %s; will retry", name
-                    )
+                except Exception as exc:
+                    if isinstance(exc, ApiException) and exc.status == 404:
+                        log.debug("Node %s is absent from Kubernetes; will retry", name)
+                    else:
+                        log.exception(
+                            "Could not synchronize trust for node %s; will retry", name
+                        )
         except Exception:
             log.exception("Trust synchronization failed; will retry")
         await asyncio.sleep(interval)

@@ -1,5 +1,6 @@
 import logging
 import re
+from enum import Enum, auto
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -19,6 +20,13 @@ from .trust import score_replicas
 from .voting import winning_hash
 
 log = logging.getLogger("verifier")
+
+
+class VoteOutcome(Enum):
+    """Represents whether task verification is finished or deferred while waiting."""
+
+    FINISHED = auto()
+    WAITING = auto()
 
 
 async def verify_next_task(
@@ -75,12 +83,13 @@ async def verify_next_task(
             task = await session.scalar(stmt.where(Task.id > after_id))
             if task is None:
                 return None
-            if await vote_task(session, task):
+            outcome = await vote_task(session, task)
+            if outcome == VoteOutcome.FINISHED:
                 return task.id
             after_id = task.id
 
 
-async def vote_task(session: AsyncSession, task: Task) -> bool:
+async def vote_task(session: AsyncSession, task: Task) -> VoteOutcome:
     """
     Applies a vote, waits for PC metadata or records a terminal data error.
 
@@ -88,10 +97,13 @@ async def vote_task(session: AsyncSession, task: Task) -> bool:
         session: The verifier's current transaction.
         task: The locked VOTING task with no unfinished replicas.
     returns:
-        bool: True after saving an outcome, False while waiting for PC metadata.
+        VoteOutcome.FINISHED: This verifier pass has reached/saved an outcome
+            for the task; the task status records the business outcome.
+        VoteOutcome.WAITING: Processing is deferred while waiting for missing
+            PC metadata.
     """
     if task.status != TaskStatus.VOTING:
-        return True
+        return VoteOutcome.FINISHED
 
     replicas = (
         await session.scalars(select(Replica).where(Replica.task_id == task.id))
@@ -99,7 +111,7 @@ async def vote_task(session: AsyncSession, task: Task) -> bool:
     replica_count = len(replicas)
     if not 1 <= replica_count <= 5:
         await fail_verification(session, task, "invalid_replica_count", replica_count)
-        return True
+        return VoteOutcome.FINISHED
 
     successful = [
         replica
@@ -113,16 +125,16 @@ async def vote_task(session: AsyncSession, task: Task) -> bool:
         [replica.result_hash for replica in successful], replica_count
     )
 
-    if winner is not None:
+    if winner:
         try:
             await score_replicas(session, successful, winner)
         except ValueError:
             if not await pc_wait_expired(session, task, replicas):
-                return False
+                return VoteOutcome.WAITING
             await fail_verification(
                 session, task, "missing_pc_assignment", replica_count
             )
-            return True
+            return VoteOutcome.FINISHED
         task.status = TaskStatus.VERIFIED
     elif replica_count == 5:
         task.status = TaskStatus.FAILED
@@ -131,11 +143,11 @@ async def vote_task(session: AsyncSession, task: Task) -> bool:
             excluded_nodes = await get_dispute_exclusions(session, task, replicas)
         except ValueError:
             if not await pc_wait_expired(session, task, replicas):
-                return False
+                return VoteOutcome.WAITING
             await fail_verification(
                 session, task, "missing_pc_assignment", replica_count
             )
-            return True
+            return VoteOutcome.FINISHED
 
         task.status = TaskStatus.DISPUTED
         extra_replicas = [
@@ -158,7 +170,7 @@ async def vote_task(session: AsyncSession, task: Task) -> bool:
 
     task.final_hash = winner
     await session.flush()
-    return True
+    return VoteOutcome.FINISHED
 
 
 async def fail_verification(
