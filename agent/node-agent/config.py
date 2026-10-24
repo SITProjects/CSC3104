@@ -4,6 +4,7 @@ Set NODE_AGENT_DEMO=1 to shorten the idle wait from 5 minutes to 30 seconds.
 """
 
 import os
+import socket
 
 
 def _float(name: str, default: float) -> float:
@@ -24,6 +25,22 @@ IDLE_CPU_PERCENT = _float("NODE_AGENT_IDLE_CPU_PERCENT", 20)
 IDLE_CPU_READINGS = int(os.environ.get("NODE_AGENT_IDLE_CPU_READINGS", "3"))
 # No sensor reading for this long means BUSY. Safe by default.
 STALE_S = _float("NODE_AGENT_STALE_S", 30)
+
+# ---------- owner-active taint ----------
+
+# Set NODE_AGENT_TAINT=0 to run without a cluster (decisions are only logged)
+TAINT_ENABLED = os.environ.get("NODE_AGENT_TAINT", "1") != "0"
+# Our Kubernetes node. K3s names a node after its lowercased hostname by default.
+NODE_NAME = os.environ.get("NODE_NAME", socket.gethostname().lower())
+# Kubeconfig for this node's own node-agent ServiceAccount, not the K3s join token
+KUBECONFIG = os.environ.get(
+    "NODE_AGENT_KUBECONFIG", "/etc/idlecloud/node-agent.kubeconfig"
+)
+# Wait this long before retrying a taint change the API server refused or missed
+TAINT_RETRY_S = _float("NODE_AGENT_TAINT_RETRY_S", 2)
+# Re-check the taint this often even with no state change, in case someone
+# removed or added it by hand
+TAINT_RESYNC_S = _float("NODE_AGENT_TAINT_RESYNC_S", 60)
 
 # ---------- server ----------
 
