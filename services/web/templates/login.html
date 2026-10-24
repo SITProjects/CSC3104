@@ -1,12 +1,31 @@
 {% extends "base.html" %}
 {% block title %}Log in{% endblock %}
 {% block content %}
-<h1>Log in</h1>
-{# TODO: add the POST /login handler, then remove "disabled" from the button.
-   Set the session cookie HttpOnly, SameSite=Lax (and Secure outside local dev). #}
-<form method="post" action="/login">
-  <label>Email <input type="email" name="email" required></label>
-  <label>Password <input type="password" name="password" required></label>
-  <button type="submit" disabled>Log in (coming soon)</button>
-</form>
+{% include "_auth_hero.html" %}
+<section class="auth-card">
+  <h2>Welcome back</h2>
+  <p class="lede">Log in to upload PDFs and follow your OCR jobs.</p>
+
+  {% if error %}
+  <div class="alert" role="alert">{{ error }}</div>
+  {% endif %}
+
+  <form method="post" action="/login" novalidate>
+    <input type="hidden" name="next" value="{{ next or '' }}">
+    <label>Email
+      <input type="email" name="email" value="{{ email or '' }}"
+             autocomplete="username" autofocus required>
+    </label>
+    <label>Password
+      <span class="password-field">
+        <input type="password" name="password" autocomplete="current-password" required>
+        <button type="button" class="toggle-password" aria-label="Show password">Show</button>
+      </span>
+    </label>
+    <button type="submit" class="primary">Log in</button>
+  </form>
+
+  <p class="alt">New here? <a href="/signup">Create an account</a></p>
+</section>
+<script src="{{ url_for('static', path='auth.js') }}" defer></script>
 {% endblock %}

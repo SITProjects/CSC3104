@@ -6,7 +6,8 @@
   <title>{% block title %}Idle-Compute Cloud{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
 </head>
-<body>
+<body{% if not signed_in %} class="logged-out"{% endif %}>
+  {% if signed_in %}
   <aside>
     <a class="brand" href="/">Idle-Compute Cloud</a>
     <nav>
@@ -15,10 +16,10 @@
       {% endfor %}
     </nav>
     <nav class="auth">
-      <a href="/login">Log in</a>
-      <a href="/signup">Sign up</a>
+      <form class="logout" method="post" action="/logout"><button type="submit" class="link">Log out</button></form>
     </nav>
   </aside>
+  {% endif %}
   <main>{% block content %}{% endblock %}</main>
 </body>
 </html>
