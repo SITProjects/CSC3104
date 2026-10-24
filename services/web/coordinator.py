@@ -54,6 +54,12 @@ class CoordinatorClient:
         # typed as UUID so a value like "../admin/jobs" can't change the path
         return await self._send("GET", f"/jobs/{job_id}", token)
 
+    async def create_job(self, token: str, spec: dict) -> dict:
+        return await self._send("POST", "/jobs", token, json=spec)
+
+    async def cancel_job(self, token: str, job_id: UUID) -> None:
+        await self._send("POST", f"/jobs/{job_id}/cancel", token)
+
     async def burst_overview(
         self,
         token: str,

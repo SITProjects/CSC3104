@@ -2,5 +2,41 @@
 {% block title %}My jobs{% endblock %}
 {% block content %}
 <h1>My jobs</h1>
-<p>Placeholder page.</p>
+
+{% if error %}
+<div class="alert" role="alert">{{ error }}</div>
+{% elif not rows and offset == 0 %}
+<p>You haven't submitted anything yet. <a href="/upload">Upload a PDF</a> to get started.</p>
+{% else %}
+<div class="table-scroll" tabindex="0" role="region" aria-label="My jobs">
+  <table>
+    <caption>Newest first. Select a job to follow its progress.</caption>
+    <thead><tr>
+      <th scope="col">Job</th><th scope="col">Status</th><th scope="col">Tasks</th>
+      <th scope="col">Submitted</th><th scope="col">Time taken</th>
+    </tr></thead>
+    <tbody>
+    {% for job in rows %}
+      <tr>
+        <td><a href="/jobs/{{ job.id }}"><code>{{ job.id|string|truncate(8, True, "") }}</code></a><br><small>{{ job.filename or job.job_type }}</small></td>
+        <td><span class="badge badge-{{ job.status|lower }}">{{ job.status|lower|capitalize }}</span>
+          {% if job.error %}<br><small>{{ job.error }}</small>{% endif %}</td>
+        <td>{{ job.task_count if job.task_count is not none else "–" }}</td>
+        <td>{{ job.created }}</td>
+        <td>{{ job.took }}{% if job.running %} <small>so far</small>{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5">No more jobs.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+<nav class="pagination" aria-label="Job pages">
+  {% if offset > 0 %}<a href="?offset={{ [0, offset - page_size]|max }}">Newer jobs</a>{% endif %}
+  {% if has_more %}<a href="?offset={{ offset + page_size }}">Older jobs</a>{% endif %}
+</nav>
+{% endif %}
+{% if rows|selectattr("status", "equalto", "PREPARING")|list %}
+<script>setTimeout(() => location.reload(), 5000);</script>
+{% endif %}
 {% endblock %}

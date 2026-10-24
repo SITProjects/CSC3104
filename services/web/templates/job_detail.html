@@ -1,6 +1,49 @@
 {% extends "base.html" %}
-{% block title %}Job{% endblock %}
+{% block title %}Job {{ job_id|string|truncate(8, True, "") }}{% endblock %}
 {% block content %}
-<h1>Job <code>{{ job_id }}</code></h1>
-<p>Placeholder page.</p>
+<div id="job" data-job-id="{{ job_id }}">
+  <div class="job-head">
+    <div>
+      <h1>Job <code>{{ job_id|string|truncate(8, True, "") }}</code></h1>
+      <p class="hint"><code>{{ job_id }}</code></p>
+    </div>
+    <div class="job-actions">
+      <span id="status-badge" class="badge badge-pending">Loading</span>
+      <a id="download" class="button" href="/jobs/{{ job_id }}/result.txt" hidden>Download text</a>
+      <form id="cancel-form" method="post" action="/jobs/{{ job_id }}/cancel" hidden
+            onsubmit="return confirm('Cancel this job? Work already done is discarded.')">
+        <button type="submit" class="secondary">Cancel job</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="job-error" class="alert" role="alert" hidden></div>
+
+  <section aria-label="Overall progress" aria-live="polite">
+    <progress id="overall" max="100" value="0" aria-label="Overall progress"></progress>
+    <p id="overall-text" class="hint">Connecting…</p>
+    <dl class="stats" id="stats" hidden>
+      <div><dt>Tasks verified</dt><dd id="stat-verified">0 / 0</dd></div>
+      <div><dt>Restarts after eviction</dt><dd id="stat-restarts">0</dd></div>
+      <div><dt>Disputed</dt><dd id="stat-disputed">0</dd></div>
+    </dl>
+  </section>
+
+  <p id="connection" class="hint" aria-live="polite"></p>
+
+  <section id="tasks-section" aria-labelledby="tasks-heading" hidden>
+    <h2 id="tasks-heading">Tasks</h2>
+    <p class="hint">Each task runs on three different PCs. A task is verified when most of them return the same text. If a PC's owner comes back, its copy moves elsewhere and carries on from where it stopped.</p>
+    <div class="table-scroll job-tasks" tabindex="0" role="region" aria-label="Tasks">
+      <table>
+        <thead><tr>
+          <th scope="col">Task</th><th scope="col">Status</th><th scope="col">Progress</th>
+          <th scope="col">Copies (PC · state)</th><th scope="col">Vote</th>
+        </tr></thead>
+        <tbody id="task-rows"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+<script src="{{ url_for('static', path='job.js') }}" defer></script>
 {% endblock %}

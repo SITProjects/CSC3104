@@ -190,7 +190,11 @@ def _signed_in(monkeypatch, user=USER):
         assert token == "tok123"
         return user
 
+    async def fake_list_jobs(token, limit=20, offset=0):
+        return []
+
     monkeypatch.setattr(coordinator, "me", fake_me)
+    monkeypatch.setattr(coordinator, "list_jobs", fake_list_jobs)
     c = TestClient(app, follow_redirects=False)
     c.cookies.set(settings.session_cookie, "tok123")
     return c

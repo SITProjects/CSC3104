@@ -1,0 +1,224 @@
+"""Pure job logic for the web app: checking uploads, splitting them into tasks,
+shaping the coordinator's job into what the progress page shows, and building the
+final text. Nothing here talks to the network, so it is easy to test.
+"""
+
+import json
+from collections.abc import Callable
+from typing import Any
+
+import pymupdf
+
+from services.web.settings import settings
+
+TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
+# Replica states that mean "this copy was knocked off its PC"
+LOST_STATES = frozenset({"EVICTED", "LOST"})
+# A replica in one of these still counts towards its task's progress
+ACTIVE_STATES = frozenset({"SCHEDULED", "RUNNING", "DONE"})
+
+
+class UploadError(ValueError):
+    """The upload can't become a job. The message is safe to show to the user."""
+
+
+class ResultUnavailable(RuntimeError):
+    """The job has no agreed output to put together."""
+
+
+def check_pdf(data: bytes) -> int:
+    """
+    Checks that the bytes are a usable PDF.
+
+    args:
+        data: The whole uploaded file.
+    returns:
+        int: The number of pages.
+    raises:
+        UploadError: If it is not a PDF, is damaged or password protected, or
+            has too many pages.
+    """
+    if not data.startswith(b"%PDF-"):
+        raise UploadError("That file is not a PDF.")
+    try:
+        with pymupdf.open(stream=data, filetype="pdf") as doc:
+            if doc.needs_pass:
+                raise UploadError("Password-protected PDFs can't be processed.")
+            pages = doc.page_count
+    except UploadError:
+        raise
+    except Exception as exc:  # pymupdf raises several types for damaged files
+        raise UploadError("That PDF is damaged or can't be read.") from exc
+    if pages < 1:
+        raise UploadError("That PDF has no pages.")
+    if pages > settings.max_pages:
+        raise UploadError(f"PDFs are limited to {settings.max_pages} pages.")
+    return pages
+
+
+def build_tasks(page_count: int) -> list[dict[str, Any]]:
+    """
+    Splits pages 1..page_count into tasks of settings.pages_per_task pages.
+
+    returns:
+        list: One {"input": {"files": [...], "lang": "eng"}} per task, ready for
+            the coordinator's POST /jobs. File names are relative to jobs/{id}/.
+    """
+    size = settings.pages_per_task
+    return [
+        {
+            "input": {
+                "files": [
+                    f"pages/{page:04d}.png"
+                    for page in range(start, min(start + size, page_count + 1))
+                ],
+                "lang": "eng",
+            }
+        }
+        for start in range(1, page_count + 1, size)
+    ]
+
+
+def job_spec(job_id: str, page_count: int) -> dict[str, Any]:
+    """The body for the coordinator's POST /jobs. Users never choose resources."""
+    return {
+        "job_id": job_id,
+        "job_type": "ocr",
+        "params": {"page_count": page_count},
+        "tasks": build_tasks(page_count),
+        "replicas_per_task": settings.replicas_per_task,
+        "cpu_request": settings.task_cpu,
+        "mem_request": settings.task_mem_mib,
+    }
+
+
+def _restarts(replica: dict[str, Any]) -> int:
+    # attempt goes up each time the coordinator relaunches an evicted or lost
+    # replica; one that is waiting for its relaunch hasn't gone up yet
+    waiting = 1 if replica["status"] in LOST_STATES else 0
+    return max(replica["attempt"] - 1, 0) + waiting
+
+
+def _task_progress(task: dict[str, Any]) -> int:
+    if task["status"] == "VERIFIED":
+        return 100
+    live = [r["progress"] for r in task["replicas"] if r["status"] in ACTIVE_STATES]
+    return round(sum(live) / len(live)) if live else 0
+
+
+def _votes(task: dict[str, Any]) -> dict[str, Any] | None:
+    """How many finished copies agreed, once the task has been put to a vote."""
+    if task["status"] not in ("VOTING", "VERIFIED", "DISPUTED"):
+        return None
+    hashes = [r["result_hash"] for r in task["replicas"] if r["result_hash"]]
+    agreeing = (
+        sum(1 for h in hashes if h == task["final_hash"]) if task["final_hash"] else 0
+    )
+    return {"agree": agreeing, "voted": len(hashes), "copies": len(task["replicas"])}
+
+
+def progress_view(job: dict[str, Any]) -> dict[str, Any]:
+    """
+    Shapes the coordinator's JobView for the progress page and its stream.
+
+    args:
+        job: The JSON from GET /jobs/{id}.
+    returns:
+        dict: Overall status, progress and counts, plus one entry per task with
+            the PCs that ran it, its restarts and its vote. Safe to send to the browser.
+    """
+    tasks = []
+    for task in sorted(job["tasks"], key=lambda t: t["task_index"]):
+        replicas = [
+            {
+                "id": r["id"],
+                "node": r["node_name"],
+                "status": r["status"],
+                "attempt": r["attempt"],
+                "progress": r["progress"],
+                "restarts": _restarts(r),
+            }
+            for r in sorted(task["replicas"], key=lambda r: r["id"])
+        ]
+        tasks.append(
+            {
+                "index": task["task_index"],
+                "status": task["status"],
+                "progress": _task_progress(task),
+                "replicas": replicas,
+                "restarts": sum(r["restarts"] for r in replicas),
+                "votes": _votes(task),
+            }
+        )
+    done = sum(1 for t in tasks if t["status"] == "VERIFIED")
+    return {
+        "stage": "active",
+        "id": str(job["id"]),
+        "job_type": job["job_type"],
+        "status": job["status"],
+        "terminal": job["status"] in TERMINAL_STATUSES,
+        "progress": 100 if job["status"] == "COMPLETED" else int(job["progress"]),
+        "tasks_total": len(tasks),
+        "tasks_verified": done,
+        "tasks_disputed": sum(1 for t in tasks if t["status"] == "DISPUTED"),
+        "restarts": sum(t["restarts"] for t in tasks),
+        "tasks": tasks,
+    }
+
+
+def preparing_view(pending: dict[str, Any], job_id: str) -> dict[str, Any]:
+    """
+    What the progress page shows before the coordinator knows the job, while the
+    pages are still being rendered, or after that step failed.
+    """
+    failed = pending.get("state") == "failed"
+    return {
+        "stage": "failed" if failed else "preparing",
+        "id": job_id,
+        "status": "FAILED" if failed else "PREPARING",
+        "terminal": failed,
+        "error": pending.get("error") if failed else None,
+        "progress": 0,
+        "tasks": [],
+        "tasks_total": 0,
+        "tasks_verified": 0,
+        "tasks_disputed": 0,
+        "restarts": 0,
+    }
+
+
+def assemble_text(job: dict[str, Any], fetch: Callable[[int], bytes | None]) -> str:
+    """
+    Joins the agreed OCR text of every task, in page order.
+
+    For each task it reads the result.json of a replica whose hash won the vote.
+
+    args:
+        job: The JSON from GET /jobs/{id}.
+        fetch: Returns the bytes of a replica's result.json by replica id, or None.
+    raises:
+        ResultUnavailable: If the job isn't COMPLETED or a winning result is missing.
+    """
+    if job["status"] != "COMPLETED":
+        raise ResultUnavailable("The job hasn't completed.")
+    parts: list[str] = []
+    for task in sorted(job["tasks"], key=lambda t: t["task_index"]):
+        winners = [
+            r
+            for r in task["replicas"]
+            if r["status"] == "DONE"
+            and task["final_hash"]
+            and r["result_hash"] == task["final_hash"]
+        ]
+        raw = None
+        for replica in winners:
+            raw = fetch(replica["id"])
+            if raw is not None:
+                break
+        if raw is None:
+            raise ResultUnavailable(
+                f"The result for task {task['task_index']} is missing."
+            )
+        pages = json.loads(raw)["pages"]
+        parts.extend(pages[name] for name in sorted(pages))
+    return "\n\n".join(parts) + "\n"

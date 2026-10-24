@@ -9,5 +9,27 @@ class Settings(BaseSettings):
     session_cookie: str = "session"  # holds the bearer token
     cookie_secure: bool = False  # set COOKIE_SECURE=true when served over HTTPS
 
+    # S3 (MinIO locally). The names match the coordinator's, so one .env serves both.
+    s3_endpoint_url: str | None = None  # unset on AWS
+    s3_bucket: str = "csc3104-local"
+
+    # Uploads and how a PDF becomes tasks
+    max_upload_mb: int = 50
+    max_pages: int = 500  # the Lambda splitter refuses more than this too
+    pages_per_task: int = 10
+    replicas_per_task: int = 3
+    # one core and 512 MiB matches the "ocr" job type's defaults
+    task_cpu: int = 1
+    task_mem_mib: int = 512
+
+    # Signs the Lambda's /hooks/pages-ready callback. Empty disables the hook.
+    hmac_secret: str = ""
+    # Render pages inside this app instead of waiting for the Lambda (local dev only)
+    local_render: bool = False
+
+    # Progress page: how often the stream asks the coordinator for news
+    stream_interval: float = 2.0  # seconds
+    stream_keepalive: float = 15.0  # seconds
+
 
 settings = Settings()

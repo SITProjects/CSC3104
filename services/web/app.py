@@ -1,17 +1,38 @@
+import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote, urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
-from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from botocore.exceptions import BotoCoreError, ClientError
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
+from fastapi.responses import (
+    HTMLResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from services.web import jobs as jobtools
+from services.web import storage, uploads
 from services.web.coordinator import coordinator
 from services.web.settings import settings
 
@@ -247,19 +268,348 @@ async def logout(request: Request):
     return response
 
 
+# ---- job submission and progress ----
+
+JOBS_PAGE_SIZE = 20
+MIB = 1024 * 1024
+
+
+def _upload_page(request: Request, error: str | None = None, status: int = 200):
+    return templates.TemplateResponse(
+        request,
+        "upload.html",
+        {
+            "error": error,
+            "max_mb": settings.max_upload_mb,
+            "max_pages": settings.max_pages,
+        },
+        status_code=status,
+    )
+
+
 @app.get("/upload", response_class=HTMLResponse, dependencies=[SignedIn])
 async def upload(request: Request):
-    return templates.TemplateResponse(request, "upload.html")
+    return _upload_page(request)
 
 
-@app.get("/jobs", response_class=HTMLResponse, dependencies=[SignedIn])
-async def jobs(request: Request):
-    return templates.TemplateResponse(request, "jobs.html")
+@app.post("/upload", response_class=HTMLResponse)
+async def upload_submit(
+    request: Request,
+    background: BackgroundTasks,
+    user: Annotated[dict, Depends(current_user)],
+    file: Annotated[UploadFile | None, File()] = None,
+):
+    if file is None or not file.filename:
+        return _upload_page(request, "Choose a PDF to upload.", 422)
+    limit = settings.max_upload_mb * MIB
+    data = await file.read(limit + 1)
+    if len(data) > limit:
+        return _upload_page(
+            request, f"That file is over {settings.max_upload_mb} MB.", 413
+        )
+    try:
+        pages = await asyncio.to_thread(jobtools.check_pdf, data)
+    except jobtools.UploadError as exc:
+        return _upload_page(request, str(exc), 422)
+
+    job_id = uuid4()
+    try:
+        await uploads.save_upload(
+            job_id,
+            str(user["id"]),
+            request.cookies[settings.session_cookie],
+            file.filename,
+            data,
+            pages,
+        )
+    except (BotoCoreError, ClientError):
+        log.exception("saving upload %s to S3 failed", job_id)
+        return _upload_page(request, "Couldn't store the file. Please try again.", 503)
+    if settings.local_render:
+        background.add_task(uploads.render_locally, job_id, data)
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
+def _when(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+def _duration(start: datetime | None, end: datetime | None) -> str:
+    if start is None:
+        return ""
+    seconds = int(((end or datetime.now(UTC)) - start).total_seconds())
+    minutes, seconds = divmod(max(seconds, 0), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
+
+
+async def _pending_rows(user: dict) -> list[dict]:
+    """
+    The user's uploads that the coordinator doesn't know yet, as job list rows.
+
+    Best effort: if S3 can't be read, the list just shows the coordinator's jobs.
+    """
+    rows: list[dict] = []
+    try:
+        job_ids = await asyncio.to_thread(storage.list_pending, str(user["id"]))
+        for job_id in job_ids:
+            pending = await asyncio.to_thread(
+                storage.get_json, storage.pending_key(job_id)
+            )
+            if pending is None or pending.get("owner_id") != str(user["id"]):
+                continue  # the job was created meanwhile, or the marker is stale
+            failed = pending.get("state") == "failed"
+            created = _when(pending.get("created_at"))
+            rows.append(
+                {
+                    "id": job_id,
+                    "job_type": "ocr",
+                    "status": "FAILED" if failed else "PREPARING",
+                    "task_count": None,
+                    "created": created.strftime("%d %b %Y %H:%M UTC")
+                    if created
+                    else "",
+                    "took": "" if failed else _duration(created, None),
+                    "running": not failed,
+                    "error": pending.get("error") if failed else None,
+                    "filename": pending.get("filename"),
+                }
+            )
+    except (BotoCoreError, ClientError, ValueError):
+        log.warning("couldn't list pending uploads", exc_info=True)
+    return rows
+
+
+@app.get("/jobs", response_class=HTMLResponse)
+async def jobs(
+    request: Request,
+    user: Annotated[dict, Depends(current_user)],
+    offset: int = Query(0, ge=0),
+):
+    token = request.cookies[settings.session_cookie]
+    error = None
+    rows: list[dict] = []
+    has_more = False
+    try:
+        listed = await coordinator.list_jobs(token, JOBS_PAGE_SIZE + 1, offset)
+        has_more = len(listed) > JOBS_PAGE_SIZE
+        for job in listed[:JOBS_PAGE_SIZE]:
+            created, finished = _when(job["created_at"]), _when(job["finished_at"])
+            rows.append(
+                {
+                    **job,
+                    "created": created.strftime("%d %b %Y %H:%M UTC")
+                    if created
+                    else "",
+                    "took": _duration(created, finished),
+                    "running": finished is None,
+                }
+            )
+    except (httpx.HTTPStatusError, httpx.RequestError):
+        error = "Your jobs can't be loaded right now. Please try again shortly."
+    if offset == 0 and not error:
+        known = {row["id"] for row in rows}
+        rows = [r for r in await _pending_rows(user) if r["id"] not in known] + rows
+    return templates.TemplateResponse(
+        request,
+        "jobs.html",
+        {
+            "rows": rows,
+            "error": error,
+            "offset": offset,
+            "page_size": JOBS_PAGE_SIZE,
+            "has_more": has_more,
+        },
+        status_code=503 if error else 200,
+    )
+
+
+async def load_progress(token: str, user: dict, job_id: UUID) -> dict | None:
+    """
+    Finds what to show for a job: the coordinator's job, or the upload still being
+    prepared. None means there is no such job for this user.
+
+    raises:
+        httpx.HTTPError: If the coordinator can't answer (anything but "not found").
+        BotoCoreError, ClientError: If S3 can't answer.
+    """
+    try:
+        return jobtools.progress_view(await coordinator.get_job(token, job_id))
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 404:
+            raise
+    pending = await asyncio.to_thread(storage.get_json, storage.pending_key(job_id))
+    if pending is not None and pending.get("owner_id") == str(user["id"]):
+        return jobtools.preparing_view(pending, str(job_id))
+    return None
+
+
+def _unavailable(request: Request, exc: Exception) -> HTTPException:
+    """Turns a failed coordinator or S3 call into the error to send back."""
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
+        return HTTPException(401, "Your session has expired. Log in again.")
+    log.warning("loading job failed: %r", exc)
+    return HTTPException(503, "Job status is unavailable. Please try again shortly.")
+
+
+_LOAD_ERRORS = (httpx.HTTPError, BotoCoreError, ClientError)
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse, dependencies=[SignedIn])
 async def job_detail(request: Request, job_id: UUID):
     return templates.TemplateResponse(request, "job_detail.html", {"job_id": job_id})
+
+
+@app.get("/jobs/{job_id}/status")
+async def job_status(
+    request: Request, job_id: UUID, user: Annotated[dict, Depends(current_user)]
+):
+    """One snapshot of the job's progress as JSON."""
+    token = request.cookies[settings.session_cookie]
+    try:
+        view = await load_progress(token, user, job_id)
+    except _LOAD_ERRORS as exc:
+        raise _unavailable(request, exc) from exc
+    if view is None:
+        raise HTTPException(404, "Job not found")
+    return view
+
+
+def _sse(data: dict, event: str | None = None) -> str:
+    head = f"event: {event}\n" if event else ""
+    return f"{head}data: {json.dumps(data)}\n\n"
+
+
+@app.get("/jobs/{job_id}/stream")
+async def job_stream(
+    request: Request, job_id: UUID, user: Annotated[dict, Depends(current_user)]
+):
+    """
+    Live progress as server-sent events: a message each time something changes,
+    then a "done" event once the job has finished.
+    """
+    token = request.cookies[settings.session_cookie]
+
+    async def events():
+        last = None
+        quiet = 0.0
+        while not await request.is_disconnected():
+            try:
+                view = await load_progress(token, user, job_id)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 401:
+                    yield _sse({}, "auth")
+                    return
+                view, failed = None, True
+            except _LOAD_ERRORS:
+                view, failed = None, True
+            else:
+                failed = False
+            if view is None and not failed:
+                yield _sse({}, "gone")
+                return
+            if view is not None and view != last:
+                last, quiet = view, 0.0
+                yield _sse(view)
+                if view["terminal"]:
+                    yield _sse({}, "done")
+                    return
+            elif quiet >= settings.stream_keepalive:
+                quiet = 0.0
+                yield ": keepalive\n\n"
+            await asyncio.sleep(settings.stream_interval)
+            quiet += settings.stream_interval
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/jobs/{job_id}/cancel")
+async def job_cancel(
+    request: Request, job_id: UUID, user: Annotated[dict, Depends(current_user)]
+):
+    token = request.cookies[settings.session_cookie]
+    try:
+        await coordinator.cancel_job(token, job_id)
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        if code == 404:
+            raise HTTPException(404, "Job not found") from exc
+        if code != 409:  # 409: it had already ended, so there is nothing to cancel
+            raise _unavailable(request, exc) from exc
+    except httpx.RequestError as exc:
+        raise _unavailable(request, exc) from exc
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
+@app.get("/jobs/{job_id}/result.txt")
+async def job_result(
+    request: Request, job_id: UUID, user: Annotated[dict, Depends(current_user)]
+):
+    """Downloads the agreed text of a completed job."""
+    token = request.cookies[settings.session_cookie]
+    try:
+        job = await coordinator.get_job(token, job_id)
+        text = await asyncio.to_thread(storage.get_bytes, storage.result_key(job_id))
+        if text is None:
+            if job["status"] != "COMPLETED":
+                raise HTTPException(409, "The job hasn't completed yet.")
+            text = (
+                await asyncio.to_thread(
+                    jobtools.assemble_text,
+                    job,
+                    lambda rid: storage.get_bytes(
+                        storage.replica_result_key(job_id, rid)
+                    ),
+                )
+            ).encode()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(404, "Job not found") from exc
+        raise _unavailable(request, exc) from exc
+    except jobtools.ResultUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (httpx.RequestError, BotoCoreError, ClientError) as exc:
+        raise _unavailable(request, exc) from exc
+    return Response(
+        text,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="result-{str(job_id)[:8]}.txt"'
+        },
+    )
+
+
+@app.post("/hooks/pages-ready")
+async def pages_ready(
+    request: Request,
+    x_idlecloud_timestamp: Annotated[str | None, Header()] = None,
+    x_idlecloud_signature: Annotated[str | None, Header()] = None,
+):
+    """The Lambda page splitter's callback; creates the job once every page exists."""
+    body = await request.body()
+    if not settings.hmac_secret:
+        raise HTTPException(503, "Page callbacks are not configured")
+    if not uploads.verify_signature(
+        settings.hmac_secret, body, x_idlecloud_timestamp, x_idlecloud_signature
+    ):
+        raise HTTPException(401, "Bad signature")
+    try:
+        event = uploads.PagesReady.model_validate_json(body)
+    except ValueError as exc:
+        raise HTTPException(422, "Bad callback body") from exc
+    try:
+        await uploads.on_pages_ready(event)
+    except _LOAD_ERRORS as exc:
+        # a 5xx makes the Lambda try again
+        log.warning("pages-ready for %s failed: %r", event.job_id, exc)
+        raise HTTPException(503, "Try again") from exc
+    return {"ok": True}
 
 
 @app.get("/account", response_class=HTMLResponse, dependencies=[SignedIn])

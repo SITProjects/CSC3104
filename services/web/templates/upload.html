@@ -1,6 +1,27 @@
 {% extends "base.html" %}
 {% block title %}Upload{% endblock %}
 {% block content %}
-<h1>Upload</h1>
-<p>Placeholder page.</p>
+<h1>Upload a PDF</h1>
+<p class="lede">We read the text from every page of a scanned PDF. The work is split into small tasks, and each task is run on three idle lab PCs whose results must agree before we trust them.</p>
+
+<div id="upload-error" class="alert" role="alert" {% if not error %}hidden{% endif %}>{{ error or "" }}</div>
+
+<form id="upload-form" class="upload-card" method="post" action="/upload" enctype="multipart/form-data"
+      data-max-bytes="{{ max_mb * 1024 * 1024 }}" data-max-mb="{{ max_mb }}">
+  <label class="dropzone" for="file">
+    <span class="dropzone-title" id="file-title">Choose a PDF</span>
+    <span class="hint" id="file-hint">Scanned documents up to {{ max_mb }} MB and {{ max_pages }} pages.</span>
+    <input id="file" type="file" name="file" accept="application/pdf,.pdf" required>
+  </label>
+
+  <div id="upload-progress" hidden>
+    <progress id="upload-bar" max="100" value="0" aria-label="Upload progress"></progress>
+    <p class="hint" id="upload-status" aria-live="polite">Uploading…</p>
+  </div>
+
+  <button type="submit" class="primary" id="upload-submit">Upload and start</button>
+  <p class="hint">You'll be taken to a page that shows live progress. No settings needed: we choose the CPU and memory for you.</p>
+</form>
+
+<script src="{{ url_for('static', path='upload.js') }}" defer></script>
 {% endblock %}
