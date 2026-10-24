@@ -42,16 +42,26 @@ class NodeTainter:
     def __init__(self, core: client.CoreV1Api, node_name: str) -> None:
         self.core = core
         self.node_name = node_name
-        # One change at a time. On shutdown a remove can still be running when
-        # taint_on_exit adds the taint, and the node could end up untainted.
+        # One change at a time, and none after close()
         self._lock = threading.Lock()
+        self._closed = False
 
     def set_owner_active(self, active: bool) -> bool:
         """Make the taint present (active) or absent. Returns True if the node
-        was changed, False if it was already right. Raises ApiException if the
-        API server refuses, so the caller can retry later."""
+        was changed, False if it was already right or the tainter is closed.
+        Raises ApiException if the API server refuses, so the caller can retry
+        later."""
         with self._lock:
+            if self._closed:
+                return False
             return self._set_owner_active(active)
+
+    def close(self) -> None:
+        """Taint the node and ignore every later change. On shutdown a remove
+        can still be running, and it must not clear the taint after this."""
+        with self._lock:
+            self._closed = True
+            self._set_owner_active(True)
 
     def _set_owner_active(self, active: bool) -> bool:
         for _ in range(CONFLICT_TRIES):

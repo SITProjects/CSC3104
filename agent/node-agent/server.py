@@ -81,9 +81,7 @@ async def taint_on_exit(tainter: NodeTainter) -> None:
     """Best effort: leave the node tainted when the agent stops, because with
     no agent nobody would notice the owner coming back."""
     try:
-        await asyncio.wait_for(
-            asyncio.to_thread(tainter.set_owner_active, True), config.TAINT_RETRY_S
-        )
+        await asyncio.wait_for(asyncio.to_thread(tainter.close), config.TAINT_RETRY_S)
     except Exception:
         log.exception("could not taint %s on exit", tainter.node_name)
 
