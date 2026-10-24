@@ -11,6 +11,7 @@ between, the API server answers 409 and we read it again.
 """
 
 import logging
+import threading
 
 from kubernetes import client
 from kubernetes import config as kube_config
@@ -41,11 +42,18 @@ class NodeTainter:
     def __init__(self, core: client.CoreV1Api, node_name: str) -> None:
         self.core = core
         self.node_name = node_name
+        # One change at a time. On shutdown a remove can still be running when
+        # taint_on_exit adds the taint, and the node could end up untainted.
+        self._lock = threading.Lock()
 
     def set_owner_active(self, active: bool) -> bool:
         """Make the taint present (active) or absent. Returns True if the node
         was changed, False if it was already right. Raises ApiException if the
         API server refuses, so the caller can retry later."""
+        with self._lock:
+            return self._set_owner_active(active)
+
+    def _set_owner_active(self, active: bool) -> bool:
         for _ in range(CONFLICT_TRIES):
             node = self.core.read_node(self.node_name)
             # Plain dicts keep each taint exactly as read, including timeAdded
