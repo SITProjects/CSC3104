@@ -15,6 +15,7 @@ from shared.db.models import (
 )
 
 from .pc_tracking import get_dispute_exclusions, pc_wait_expired
+from .trust import score_replicas
 from .voting import winning_hash
 
 log = logging.getLogger("verifier")
@@ -89,6 +90,9 @@ async def vote_task(session: AsyncSession, task: Task) -> bool:
     returns:
         bool: True after saving an outcome, False while waiting for PC metadata.
     """
+    if task.status != TaskStatus.VOTING:
+        return True
+
     replicas = (
         await session.scalars(select(Replica).where(Replica.task_id == task.id))
     ).all()
@@ -97,17 +101,28 @@ async def vote_task(session: AsyncSession, task: Task) -> bool:
         await fail_verification(session, task, "invalid_replica_count", replica_count)
         return True
 
-    hashes = [
-        replica.result_hash
+    successful = [
+        replica
         for replica in replicas
         if replica.status == ReplicaStatus.DONE
         and replica.exit_code == 0
         and replica.result_hash is not None
         and re.fullmatch(r"[0-9a-f]{64}", replica.result_hash)
     ]
-    winner = winning_hash(hashes, replica_count)
+    winner = winning_hash(
+        [replica.result_hash for replica in successful], replica_count
+    )
 
     if winner is not None:
+        try:
+            await score_replicas(session, successful, winner)
+        except ValueError:
+            if not await pc_wait_expired(session, task, replicas):
+                return False
+            await fail_verification(
+                session, task, "missing_pc_assignment", replica_count
+            )
+            return True
         task.status = TaskStatus.VERIFIED
     elif replica_count == 5:
         task.status = TaskStatus.FAILED

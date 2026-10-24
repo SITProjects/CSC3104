@@ -51,3 +51,39 @@ def should_quarantine(score: Decimal) -> bool:
         bool: True below 0.1. Applying a NoSchedule taint is left to integration.
     """
     return score < QUARANTINE_THRESHOLD
+
+
+async def score_replicas(session, replicas, winner: str) -> None:
+    """Score successful final attempts; caller holds the task lock/transaction.
+
+    Lock nodes in name order to serialize concurrent tasks without lost updates.
+    Validate all assignments before changing any score. Task verification and
+    these writes commit together, so normal polling cannot award twice.
+    """
+    from sqlalchemy import select
+
+    from shared.db.models import Node
+
+    names = {replica.node_name for replica in replicas}
+    if None in names or any(not name.strip() for name in names):
+        raise ValueError("Successful replica has no node assignment")
+    nodes = (
+        await session.scalars(
+            select(Node)
+            .where(Node.name.in_(names))
+            .order_by(Node.name)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    by_name = {node.name: node for node in nodes}
+    if set(by_name) != names:
+        raise ValueError("Successful replica's node record is missing")
+    for replica in sorted(replicas, key=lambda replica: replica.id):
+        node = by_name[replica.node_name]
+        agrees = replica.result_hash == winner
+        node.trust_score = update_trust_score(node.trust_score, agrees)
+        if agrees:
+            node.total_agree += 1
+        else:
+            node.total_disagree += 1
