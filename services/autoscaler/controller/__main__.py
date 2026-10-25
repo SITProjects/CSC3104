@@ -211,7 +211,7 @@ def apply(action: Action, db: Session, core, ec2, snapshot: Snapshot) -> None:
         remove_node_of(core, snapshot, action.slot, action.instance_id)
         slots.release(db, action.slot)
     elif action.kind == "kill_orphan":
-        ec2.terminate_instances(InstanceIds=[action.instance_id])
+        terminate_instance(ec2, action.instance_id)
         remove_node_of(core, snapshot, action.slot, action.instance_id)
     elif action.kind == "reclaim":
         # Only the instance that had the warning, and only its own node and slot
@@ -227,7 +227,7 @@ def apply(action: Action, db: Session, core, ec2, snapshot: Snapshot) -> None:
         burst.tag_reclaim(ec2, action.instance_id, action.deadline)
     elif action.kind == "kill_duplicate":
         # The node and slot belong to the instance that is kept
-        ec2.terminate_instances(InstanceIds=[action.instance_id])
+        terminate_instance(ec2, action.instance_id)
     else:
         raise ValueError(f"unknown action {action.kind}")
 
