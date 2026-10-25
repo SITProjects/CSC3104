@@ -95,7 +95,8 @@ sees the node as OFFLINE.
 ## Evaluation log
 
 Every state change and every taint change is appended as one JSON line to
-`node-agent-events.jsonl` (`NODE_AGENT_EVENT_LOG`; empty turns it off):
+`node-agent-events.jsonl` next to `server.py`, wherever the agent is started
+from (`NODE_AGENT_EVENT_LOG`; empty turns it off):
 
 ```json
 {"time": "2026-10-24T09:00:01.120+00:00", "node": "pc1", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 2s ago", "idle_seconds": 2.0}

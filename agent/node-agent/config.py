@@ -60,8 +60,12 @@ HEARTBEAT_TIMEOUT_S = _float("NODE_AGENT_HEARTBEAT_TIMEOUT_S", 3)
 # ---------- evaluation log ----------
 
 # One JSON line per state change and per taint change, for the eviction-speed
-# graph. Empty turns it off.
-EVENT_LOG = os.environ.get("NODE_AGENT_EVENT_LOG", "node-agent-events.jsonl")
+# graph. Next to this file, not the working directory, so it is in the same
+# place however the agent is started. Empty turns it off.
+EVENT_LOG = os.environ.get(
+    "NODE_AGENT_EVENT_LOG",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "node-agent-events.jsonl"),
+)
 
 # ---------- server ----------
 
