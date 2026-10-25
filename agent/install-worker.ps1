@@ -4,8 +4,10 @@ Turns this Windows PC into an IdleCloud worker in one step.
 
 .DESCRIPTION
 1. Turns on systemd in WSL2. K3s, WireGuard and graceful shutdown need it.
-2. Runs infra/join-worker.sh inside Ubuntu to join the cluster over WireGuard.
-3. Installs the Windows sensor .exe and starts it, and WSL, at every login.
+2. Installs the Windows sensor .exe and registers it, and WSL, to start at
+   every login.
+3. Runs infra/join-worker.sh inside Ubuntu to join the cluster over WireGuard,
+   then starts the sensor and WSL tasks.
 
 Get wg0.conf and agent-token from /etc/wireguard/peers/<name>/ on the hub,
 after member 1 runs `add-peer.sh worker <name>`. The token lasts 10 minutes,
@@ -96,27 +98,8 @@ fi
     }
 }
 
-# 2. Join the cluster
-if ((Get-WslOutput systemctl is-active k3s-agent) -eq 'active' -and -not $Rejoin) {
-    Write-Host 'K3s agent is already running, skipping the join (use -Rejoin to force it).'
-} else {
-    if (-not $WgConfig -or -not $TokenFile) {
-        throw 'Joining needs -WgConfig and -TokenFile from add-peer.sh on the hub.'
-    }
-    Write-Host "Joining the cluster as $NodeName..."
-    Initialize-Stage
-    try {
-        Copy-ToStage $JoinScript 'join-worker.sh'
-        Copy-ToStage $WgConfig 'wg0.conf'
-        Copy-ToStage $TokenFile 'agent-token'
-        Invoke-Wsl bash "$Stage/join-worker.sh" $NodeName "$Stage/wg0.conf" "$Stage/agent-token"
-    } finally {
-        # The stage holds the WireGuard private key and join token.
-        & wsl.exe -d $Distro -u root --exec rm -rf $Stage
-    }
-}
-
-# 3. Sensor and WSL at login
+# 2. Sensor and WSL at login. Done before the join, so a failure here (such as
+# a PC that blocks task creation) does not spend the 10-minute token.
 Write-Host 'Installing the sensor and login tasks...'
 $installDir = Join-Path $env:LOCALAPPDATA 'idlecloud'
 $installedExe = Join-Path $installDir 'idlecloud-sensor.exe'
@@ -144,6 +127,26 @@ Register-ScheduledTask -TaskPath $TaskPath -TaskName 'WSL' -Action $wslAction `
     -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 Register-ScheduledTask -TaskPath $TaskPath -TaskName 'Sensor' -Action $sensorAction `
     -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+
+# 3. Join the cluster
+if ((Get-WslOutput systemctl is-active k3s-agent) -eq 'active' -and -not $Rejoin) {
+    Write-Host 'K3s agent is already running, skipping the join (use -Rejoin to force it).'
+} else {
+    if (-not $WgConfig -or -not $TokenFile) {
+        throw 'Joining needs -WgConfig and -TokenFile from add-peer.sh on the hub.'
+    }
+    Write-Host "Joining the cluster as $NodeName..."
+    Initialize-Stage
+    try {
+        Copy-ToStage $JoinScript 'join-worker.sh'
+        Copy-ToStage $WgConfig 'wg0.conf'
+        Copy-ToStage $TokenFile 'agent-token'
+        Invoke-Wsl bash "$Stage/join-worker.sh" $NodeName "$Stage/wg0.conf" "$Stage/agent-token"
+    } finally {
+        # The stage holds the WireGuard private key and join token.
+        & wsl.exe -d $Distro -u root --exec rm -rf $Stage
+    }
+}
 
 Start-ScheduledTask -TaskPath $TaskPath -TaskName 'WSL'
 Start-ScheduledTask -TaskPath $TaskPath -TaskName 'Sensor'
