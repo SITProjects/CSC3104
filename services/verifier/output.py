@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from collections import defaultdict
 from collections.abc import Sequence
 from uuid import UUID
@@ -68,6 +69,7 @@ def get_task_pages(
         ValueError: If no usable agreeing result exists.
         ClientError: If storage access fails for a reason other than a missing object.
     """
+    files = task.input.get("files")
     for replica in replicas:
         key = f"jobs/{job_id}/replicas/{replica.id}/result.json"
         try:
@@ -89,7 +91,6 @@ def get_task_pages(
                 continue
             if not all(isinstance(text, str) for text in pages.values()):
                 continue
-            files = task.input.get("files")
             if files is not None and set(pages) != set(files):
                 continue
         except (ValueError, TypeError):
@@ -102,7 +103,10 @@ def assemble_output(
     s3, job_id: UUID, tasks: Sequence[Task], replicas: Sequence[Replica]
 ) -> bytes:
     """
-    Assembles agreed OCR text in task_index and zero-padded page filename order.
+    Assembles agreed OCR text in task_index and input-file order.
+
+    Without an input-file list, sorts numeric filename parts as numbers, so
+    page_2 precedes page_10 even when filenames are not zero-padded.
 
     args:
         s3: The configured S3 client.
@@ -120,7 +124,19 @@ def assemble_output(
     parts = []
     for task in tasks:
         pages = get_task_pages(s3, job_id, task, by_task[task.id])
-        parts.extend(pages[name] for name in sorted(pages))
+        files = task.input.get("files")
+        if files is None:
+            files = sorted(
+                pages,
+                key=lambda name: (
+                    [
+                        int(part) if part.isdigit() else part
+                        for part in re.split(r"(\d+)", name)
+                    ],
+                    name,
+                ),
+            )
+        parts.extend(pages[name] for name in files)
     return ("\n\n".join(parts) + "\n").encode("utf-8")
 
 
@@ -128,25 +144,22 @@ async def complete_job(
     session_factory: async_sessionmaker[AsyncSession], s3, job_id: UUID
 ) -> bool:
     """
-    Locks a ready job, uploads its output and commits completion afterwards.
+    Reads a ready job, uploads its output, then briefly locks it to complete.
 
-    A single job lock serializes completion with other verifiers and job
-    cancellation. Storage errors roll back database changes. Uploading again
-    after a crash uses the same deterministic key and content.
+    Database sessions are closed during storage calls. Rechecks eligibility and
+    the task snapshot before completion, preserving concurrent cancellation.
+    Concurrent attempts may upload the same deterministic output, but only one
+    can mark the job completed. Storage failures leave the job retryable.
 
     args:
         session_factory: The shared async database session factory.
         s3: The configured S3 client.
         job_id: The candidate job to recheck and complete.
     returns:
-        bool: True if completed, False if ineligible or locked by another process.
+        bool: True if completed, False if changed, ineligible or locked elsewhere.
     """
-    async with session_factory.begin() as session:
-        job = await session.scalar(
-            ready_jobs()
-            .where(Job.id == job_id)
-            .with_for_update(of=Job, skip_locked=True)
-        )
+    async with session_factory() as session:
+        job = await session.scalar(ready_jobs().where(Job.id == job_id))
         if job is None:
             return False
         tasks = (
@@ -167,14 +180,36 @@ async def complete_job(
                 .order_by(Replica.id)
             )
         ).all()
-        content = await asyncio.to_thread(assemble_output, s3, job.id, tasks, replicas)
-        await asyncio.to_thread(
-            s3.put_object,
-            Bucket=S3_BUCKET,
-            Key=f"jobs/{job.id}/output/result.txt",
-            Body=content,
-            ContentType="text/plain; charset=utf-8",
+
+    expected_tasks = [
+        (task.id, task.task_index, task.final_hash, task.input) for task in tasks
+    ]
+    content = await asyncio.to_thread(assemble_output, s3, job_id, tasks, replicas)
+    await asyncio.to_thread(
+        s3.put_object,
+        Bucket=S3_BUCKET,
+        Key=f"jobs/{job_id}/output/result.txt",
+        Body=content,
+        ContentType="text/plain; charset=utf-8",
+    )
+
+    async with session_factory.begin() as session:
+        job = await session.scalar(
+            ready_jobs()
+            .where(Job.id == job_id)
+            .with_for_update(of=Job, skip_locked=True)
         )
+        if job is None:
+            return False
+        current_tasks = (
+            await session.execute(
+                select(Task.id, Task.task_index, Task.final_hash, Task.input)
+                .where(Task.job_id == job_id)
+                .order_by(Task.task_index)
+            )
+        ).all()
+        if current_tasks != expected_tasks:
+            return False
         job.status = JobStatus.COMPLETED
         job.finished_at = func.now()
     return True
