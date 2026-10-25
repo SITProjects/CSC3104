@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     task_cpu: int = 1
     task_mem_mib: int = 512
 
+    # An upload whose pages aren't ready after this long is marked failed and its
+    # stored session token is deleted
+    pending_ttl_minutes: int = 30
+    # The Lambda's callback is a few hundred bytes; anything bigger is refused unread
+    callback_max_bytes: int = 16 * 1024
+    max_filename_chars: int = 200
+
     # Signs the Lambda's /hooks/pages-ready callback. Empty disables the hook.
     hmac_secret: str = ""
     # Render pages inside this app instead of waiting for the Lambda (local dev only)

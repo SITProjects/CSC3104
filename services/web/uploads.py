@@ -14,7 +14,7 @@ import hashlib
 import hmac
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from services.web import jobs, storage
 from services.web.coordinator import coordinator
+from services.web.settings import settings
 
 log = logging.getLogger("uvicorn.error")
 
@@ -96,11 +97,61 @@ async def save_upload(
     )
 
 
-async def _fail(job_id: UUID, pending: dict, message: str) -> None:
-    # the token is no longer needed, so don't keep it
+def timestamp_is_fresh(timestamp: str | None, now: float | None = None) -> bool:
+    """Cheap check of the callback's timestamp header, done before reading its body."""
+    try:
+        sent_at = int(timestamp or "")
+    except ValueError:
+        return False
+    return (
+        abs(int(now if now is not None else time.time()) - sent_at) <= MAX_AGE_SECONDS
+    )
+
+
+async def _fail(job_id: UUID | str, pending: dict, message: str) -> dict:
+    """Marks an upload failed and deletes its stored session token."""
     pending = {**pending, "state": "failed", "error": message}
     pending.pop("token", None)
     await asyncio.to_thread(storage.put_json, storage.pending_key(job_id), pending)
+    return pending
+
+
+def is_expired(pending: dict, now: datetime | None = None) -> bool:
+    """True if the upload has been waiting for its pages longer than the limit."""
+    if pending.get("state") != "rendering":
+        return False
+    try:
+        created = datetime.fromisoformat(pending["created_at"])
+    except (KeyError, ValueError, TypeError):
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    limit = timedelta(minutes=settings.pending_ttl_minutes)
+    return (now or datetime.now(UTC)) - created > limit
+
+
+async def expire_if_stale(job_id: UUID | str, pending: dict) -> dict:
+    """
+    Fails an upload that has waited too long for its pages, so a callback that
+    never arrives can't leave the user's token in S3 or the page on "Preparing".
+
+    returns:
+        dict: The pending record, as updated if it expired.
+    """
+    if not is_expired(pending):
+        return pending
+    log.warning("upload %s expired waiting for its pages", job_id)
+    return await _fail(
+        job_id, pending, "Preparing took too long. Please upload the file again."
+    )
+
+
+async def discard_pending(job_id: UUID | str, pending: dict) -> None:
+    """Forgets an upload that has no coordinator job: its record, token and list entry."""
+    await asyncio.to_thread(storage.delete, storage.pending_key(job_id))
+    await asyncio.to_thread(
+        storage.delete, storage.pending_index_key(pending["owner_id"], job_id)
+    )
 
 
 async def create_job_if_ready(job_id: UUID) -> bool:
@@ -118,6 +169,10 @@ async def create_job_if_ready(job_id: UUID) -> bool:
     """
     pending = await asyncio.to_thread(storage.get_json, storage.pending_key(job_id))
     if pending is None or pending.get("state") != "rendering":
+        return False
+    if is_expired(pending):
+        # too late: the user was told to upload again, so don't start the work
+        await expire_if_stale(job_id, pending)
         return False
     expected = pending["page_count"]
     if await asyncio.to_thread(storage.count_pages, job_id) < expected:
@@ -137,10 +192,7 @@ async def create_job_if_ready(job_id: UUID) -> bool:
             return False
         if code != 409:  # 409: another callback got there first
             raise
-    await asyncio.to_thread(storage.delete, storage.pending_key(job_id))
-    await asyncio.to_thread(
-        storage.delete, storage.pending_index_key(pending["owner_id"], job_id)
-    )
+    await discard_pending(job_id, pending)
     return True
 
 

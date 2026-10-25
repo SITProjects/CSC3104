@@ -2,6 +2,7 @@
 
 import json
 import time
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import httpx
@@ -600,7 +601,7 @@ def mark_pending(s3, job_id=JOB_ID, owner=USER["id"], **fields):
             "state": "rendering",
             "owner_id": owner,
             "filename": "thesis.pdf",
-            "created_at": "2026-10-24T10:00:00+00:00",
+            "created_at": datetime.now(UTC).isoformat(),
             **fields,
         }
     ).encode()
@@ -670,3 +671,139 @@ def test_job_list_still_works_when_s3_is_down(client, monkeypatch):
 
     monkeypatch.setattr(storage, "list_pending", boom)
     assert client.get("/jobs").status_code == 200
+
+
+# --- expiry of uploads that never get their pages ------------------------------
+
+
+def long_ago(minutes=31):
+    return (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
+
+
+def test_stale_upload_is_failed_and_token_deleted_when_viewed(client, monkeypatch, s3):
+    stub_job(monkeypatch, error=status_error(404))
+    mark_pending(s3, token="tok123", created_at=long_ago())
+    body = client.get(f"/jobs/{JOB_ID}/status").json()
+    assert body["stage"] == "failed" and "took too long" in body["error"]
+    pending = s3.json(f"jobs/{JOB_ID}/pending.json")
+    assert pending["state"] == "failed" and "token" not in pending
+
+
+def test_recent_upload_is_left_alone(client, monkeypatch, s3):
+    stub_job(monkeypatch, error=status_error(404))
+    mark_pending(s3, token="tok123", created_at=long_ago(5))
+    assert client.get(f"/jobs/{JOB_ID}/status").json()["stage"] == "preparing"
+    assert s3.json(f"jobs/{JOB_ID}/pending.json")["token"] == "tok123"
+
+
+def test_job_list_expires_stale_uploads_too(client, monkeypatch, s3):
+    stub_list(monkeypatch, [])
+    mark_pending(s3, token="tok123", created_at=long_ago())
+    r = client.get("/jobs")
+    assert "Failed" in r.text and "took too long" in r.text
+    assert "token" not in s3.json(f"jobs/{JOB_ID}/pending.json")
+
+
+def test_late_callback_does_not_start_an_expired_upload(client, hook, s3, created):
+    seed_pending(s3, pages=3)
+    pending = s3.json(f"jobs/{JOB_ID}/pending.json")
+    pending["created_at"] = long_ago()
+    s3.objects[f"jobs/{JOB_ID}/pending.json"] = json.dumps(pending).encode()
+    seed_pages(s3, 3)
+    assert signed_post(client, ok_event(page_count=3)).status_code == 200
+    assert created == []
+    assert "token" not in s3.json(f"jobs/{JOB_ID}/pending.json")
+
+
+# --- cancelling and dismissing uploads that have no coordinator job --------------
+
+
+def stub_cancel_404(monkeypatch):
+    async def not_found(token, job_id):
+        raise status_error(404)
+
+    monkeypatch.setattr(coordinator, "cancel_job", not_found)
+
+
+def test_cancel_while_preparing_forgets_the_upload(client, monkeypatch, s3):
+    stub_cancel_404(monkeypatch)
+    mark_pending(s3, token="tok123")
+    r = client.post(f"/jobs/{JOB_ID}/cancel")
+    assert r.status_code == 303 and r.headers["location"] == "/jobs"
+    assert f"jobs/{JOB_ID}/pending.json" not in s3.objects
+    assert f"pending-index/{USER['id']}/{JOB_ID}" not in s3.objects
+
+
+def test_dismiss_a_failed_upload(client, monkeypatch, s3):
+    stub_cancel_404(monkeypatch)
+    mark_pending(s3, state="failed", error="PDF is password protected")
+    assert client.post(f"/jobs/{JOB_ID}/cancel").status_code == 303
+    assert f"jobs/{JOB_ID}/pending.json" not in s3.objects
+
+
+def test_cannot_cancel_someone_elses_upload(client, monkeypatch, s3):
+    stub_cancel_404(monkeypatch)
+    other = str(UUID(int=99))
+    mark_pending(s3, owner=other)
+    assert client.post(f"/jobs/{JOB_ID}/cancel").status_code == 404
+    assert f"jobs/{JOB_ID}/pending.json" in s3.objects
+
+
+def test_cancel_unknown_job_is_still_404(client, monkeypatch):
+    stub_cancel_404(monkeypatch)
+    assert client.post(f"/jobs/{JOB_ID}/cancel").status_code == 404
+
+
+def test_job_list_offers_cancel_and_dismiss_for_pending_rows(client, monkeypatch, s3):
+    stub_list(monkeypatch, [])
+    mark_pending(s3)
+    mark_pending(s3, job_id=UUID(int=8), state="failed", error="bad")
+    html = client.get("/jobs").text
+    assert f'action="/jobs/{JOB_ID}/cancel"' in html and ">Cancel<" in html
+    assert f'action="/jobs/{UUID(int=8)}/cancel"' in html and ">Dismiss<" in html
+
+
+# --- callback and upload size limits -----------------------------------------
+
+
+def test_hook_refuses_big_bodies_before_checking_them(client, hook, created):
+    ts = str(int(time.time()))
+    r = client.post(
+        "/hooks/pages-ready",
+        content=b"x" * (settings.callback_max_bytes + 1),
+        headers={"X-Idlecloud-Timestamp": ts, "X-Idlecloud-Signature": "abc"},
+    )
+    assert r.status_code == 413
+
+
+def test_hook_refuses_stale_or_unsigned_requests_without_reading(client, hook):
+    old = str(int(time.time()) - 3600)
+    big = b"x" * (settings.callback_max_bytes + 1)
+    stale = client.post(
+        "/hooks/pages-ready",
+        content=big,
+        headers={"X-Idlecloud-Timestamp": old, "X-Idlecloud-Signature": "abc"},
+    )
+    unsigned = client.post(
+        "/hooks/pages-ready",
+        content=big,
+        headers={"X-Idlecloud-Timestamp": str(int(time.time()))},
+    )
+    assert stale.status_code == 401 and unsigned.status_code == 401
+
+
+def test_oversized_upload_is_refused_from_its_content_length(client, s3, monkeypatch):
+    monkeypatch.setattr(settings, "max_upload_mb", 1)
+    data = b"%PDF-" + b"0" * (3 * 1024 * 1024)
+    r = post_pdf(client, data)
+    assert r.status_code == 413 and "over 1 MB" in r.text
+    assert s3.objects == {}
+
+
+def test_filename_is_cleaned_and_capped(client, s3):
+    name = "../../etc/" + "a" * 400 + "\x00\x07.pdf"
+    r = post_pdf(client, make_pdf(1), name)
+    job_id = r.headers["location"].removeprefix("/jobs/")
+    stored = s3.json(f"jobs/{job_id}/pending.json")["filename"]
+    assert len(stored) <= settings.max_filename_chars
+    assert "/" not in stored and "\x00" not in stored and "etc" not in stored

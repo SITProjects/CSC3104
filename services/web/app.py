@@ -287,6 +287,41 @@ def _upload_page(request: Request, error: str | None = None, status: int = 200):
     )
 
 
+class UploadSizeGuard:
+    """
+    Refuses an oversized /upload from its Content-Length header, before the body
+    is parsed, so the app doesn't first spool a huge file to disk. A client that
+    sends no length still hits the check in upload_submit, and the proxy's own
+    body limit is the real protection once deployed.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope["type"] == "http"
+            and scope["method"] == "POST"
+            and scope["path"] == "/upload"
+        ):
+            declared = dict(scope["headers"]).get(b"content-length", b"")
+            # one extra MiB covers the multipart framing around the file
+            if (
+                declared.isdigit()
+                and int(declared) > (settings.max_upload_mb + 1) * MIB
+            ):
+                request = Request(scope, receive)
+                response = _upload_page(
+                    request, f"That file is over {settings.max_upload_mb} MB.", 413
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(UploadSizeGuard)
+
+
 @app.get("/upload", response_class=HTMLResponse, dependencies=[SignedIn])
 async def upload(request: Request):
     return _upload_page(request)
@@ -318,7 +353,7 @@ async def upload_submit(
             job_id,
             str(user["id"]),
             request.cookies[settings.session_cookie],
-            file.filename,
+            jobtools.clean_filename(file.filename),
             data,
             pages,
         )
@@ -360,6 +395,7 @@ async def _pending_rows(user: dict) -> list[dict]:
             )
             if pending is None or pending.get("owner_id") != str(user["id"]):
                 continue  # the job was created meanwhile, or the marker is stale
+            pending = await uploads.expire_if_stale(job_id, pending)
             failed = pending.get("state") == "failed"
             created = _when(pending.get("created_at"))
             rows.append(
@@ -375,6 +411,7 @@ async def _pending_rows(user: dict) -> list[dict]:
                     "running": not failed,
                     "error": pending.get("error") if failed else None,
                     "filename": pending.get("filename"),
+                    "pending": True,
                 }
             )
     except (BotoCoreError, ClientError, ValueError):
@@ -442,6 +479,7 @@ async def load_progress(token: str, user: dict, job_id: UUID) -> dict | None:
             raise
     pending = await asyncio.to_thread(storage.get_json, storage.pending_key(job_id))
     if pending is not None and pending.get("owner_id") == str(user["id"]):
+        pending = await uploads.expire_if_stale(job_id, pending)
         return jobtools.preparing_view(pending, str(job_id))
     return None
 
@@ -533,18 +571,34 @@ async def job_stream(
 async def job_cancel(
     request: Request, job_id: UUID, user: Annotated[dict, Depends(current_user)]
 ):
+    """
+    Cancels a job. An upload still being prepared (or one that failed) has no
+    coordinator job yet, so cancelling it, or dismissing it from the list, just
+    forgets it and deletes its stored token.
+    """
     token = request.cookies[settings.session_cookie]
     try:
         await coordinator.cancel_job(token, job_id)
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
         if code == 404:
-            raise HTTPException(404, "Job not found") from exc
+            return await _discard_pending_upload(request, job_id, user)
         if code != 409:  # 409: it had already ended, so there is nothing to cancel
             raise _unavailable(request, exc) from exc
     except httpx.RequestError as exc:
         raise _unavailable(request, exc) from exc
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
+async def _discard_pending_upload(request: Request, job_id: UUID, user: dict):
+    try:
+        pending = await asyncio.to_thread(storage.get_json, storage.pending_key(job_id))
+        if pending is None or pending.get("owner_id") != str(user["id"]):
+            raise HTTPException(404, "Job not found")
+        await uploads.discard_pending(job_id, pending)
+    except (BotoCoreError, ClientError) as exc:
+        raise _unavailable(request, exc) from exc
+    return RedirectResponse("/jobs", status_code=303)
 
 
 @app.get("/jobs/{job_id}/result.txt")
@@ -585,6 +639,20 @@ async def job_result(
     )
 
 
+async def _read_limited(request: Request, limit: int) -> bytes:
+    """Reads the request body, giving up with 413 as soon as it passes limit bytes."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise HTTPException(413, "Body too large")
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise HTTPException(413, "Body too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @app.post("/hooks/pages-ready")
 async def pages_ready(
     request: Request,
@@ -592,9 +660,14 @@ async def pages_ready(
     x_idlecloud_signature: Annotated[str | None, Header()] = None,
 ):
     """The Lambda page splitter's callback; creates the job once every page exists."""
-    body = await request.body()
     if not settings.hmac_secret:
         raise HTTPException(503, "Page callbacks are not configured")
+    # refuse stale or unsigned requests, and big ones, before reading the body
+    if not uploads.timestamp_is_fresh(x_idlecloud_timestamp) or not (
+        x_idlecloud_signature
+    ):
+        raise HTTPException(401, "Bad signature")
+    body = await _read_limited(request, settings.callback_max_bytes)
     if not uploads.verify_signature(
         settings.hmac_secret, body, x_idlecloud_timestamp, x_idlecloud_signature
     ):

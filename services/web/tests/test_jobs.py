@@ -185,3 +185,67 @@ def test_assemble_text_needs_completed_job_and_every_result():
     # task 1 never finished, so it has no winning copy to read
     with pytest.raises(jobs.ResultUnavailable, match="task 1"):
         jobs.assemble_text(sample_job("COMPLETED"), lambda rid: b'{"pages": {}}')
+
+
+# --- unreadable results and file names -----------------------------------------
+
+
+def completed_with_two_winners():
+    job = sample_job("COMPLETED")
+    job["tasks"] = [
+        {
+            "id": 1,
+            "task_index": 0,
+            "status": "VERIFIED",
+            "final_hash": H,
+            "replicas": [
+                replica(1, "DONE", 100, result_hash=H),
+                replica(2, "DONE", 100, node="pc-2", result_hash=H),
+            ],
+        }
+    ]
+    return job
+
+
+def test_assemble_text_skips_an_unreadable_copy_and_uses_the_next():
+    files = {
+        1: b'{"pages": ',
+        2: json.dumps({"pages": {"pages/0001.png": "ok"}}).encode(),
+    }
+    assert jobs.assemble_text(completed_with_two_winners(), files.get) == "ok\n"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"",
+        b"not json",
+        b"[]",
+        b'{"nope": 1}',
+        b'{"pages": [1]}',
+        b'{"pages": {"a": 5}}',
+    ],
+)
+def test_assemble_text_with_only_unreadable_results_is_unavailable(raw):
+    with pytest.raises(jobs.ResultUnavailable, match="missing or unreadable"):
+        jobs.assemble_text(completed_with_two_winners(), lambda rid: raw)
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("scan.pdf", "scan.pdf"),
+        ("C:\\Users\\me\\scan.pdf", "scan.pdf"),
+        ("../../etc/passwd", "passwd"),
+        ("bad\x00na\nme.pdf", "badname.pdf"),
+        ("", "upload.pdf"),
+        (None, "upload.pdf"),
+    ],
+)
+def test_clean_filename(name, expected):
+    assert jobs.clean_filename(name) == expected
+
+
+def test_clean_filename_caps_length(monkeypatch):
+    monkeypatch.setattr(settings, "max_filename_chars", 10)
+    assert jobs.clean_filename("x" * 50) == "x" * 10

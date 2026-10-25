@@ -187,6 +187,31 @@ def preparing_view(pending: dict[str, Any], job_id: str) -> dict[str, Any]:
     }
 
 
+def _read_pages(raw: bytes | None) -> dict[str, str] | None:
+    """The {file name: text} map in a replica's result.json, or None if unusable."""
+    if raw is None:
+        return None
+    try:
+        pages = json.loads(raw)["pages"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(pages, dict) or not all(
+        isinstance(text, str) for text in pages.values()
+    ):
+        return None
+    return pages
+
+
+def clean_filename(name: str | None) -> str:
+    """
+    Makes an uploaded file name safe to store and show: no folders, no control
+    characters, at most settings.max_filename_chars long.
+    """
+    name = (name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    name = "".join(ch for ch in name if ch.isprintable()).strip()
+    return name[: settings.max_filename_chars] or "upload.pdf"
+
+
 def assemble_text(job: dict[str, Any], fetch: Callable[[int], bytes | None]) -> str:
     """
     Joins the agreed OCR text of every task, in page order.
@@ -210,15 +235,16 @@ def assemble_text(job: dict[str, Any], fetch: Callable[[int], bytes | None]) -> 
             and task["final_hash"]
             and r["result_hash"] == task["final_hash"]
         ]
-        raw = None
+        pages = None
         for replica in winners:
-            raw = fetch(replica["id"])
-            if raw is not None:
+            # a copy whose file is missing or unreadable doesn't sink the job if
+            # another copy that agreed with the vote is fine
+            pages = _read_pages(fetch(replica["id"]))
+            if pages is not None:
                 break
-        if raw is None:
+        if pages is None:
             raise ResultUnavailable(
-                f"The result for task {task['task_index']} is missing."
+                f"The result for task {task['task_index']} is missing or unreadable."
             )
-        pages = json.loads(raw)["pages"]
         parts.extend(pages[name] for name in sorted(pages))
     return "\n\n".join(parts) + "\n"
