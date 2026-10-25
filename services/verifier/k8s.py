@@ -36,20 +36,21 @@ def sync_node(api, name, score):
     """
     node = api.read_node(name, _request_timeout=10)
     labels = node.metadata.labels or {}
-    current = client.ApiClient().sanitize_for_serialization(node.spec.taints or [])
+    current = api.api_client.sanitize_for_serialization(node.spec.taints or [])
+    label = trust_label(score)
     desired = [taint for taint in current if taint["key"] != QUARANTINE_TAINT]
     if should_quarantine(score):
         desired.append(
             {"key": QUARANTINE_TAINT, "value": "true", "effect": "NoSchedule"}
         )
-    if labels.get(TRUST_LABEL) == trust_label(score) and current == desired:
+    if labels.get(TRUST_LABEL) == label and current == desired:
         return
     api.patch_node(
         name,
         {
             "metadata": {
                 "resourceVersion": node.metadata.resource_version,
-                "labels": {TRUST_LABEL: trust_label(score)},
+                "labels": {TRUST_LABEL: label},
             },
             "spec": {"taints": desired},
         },

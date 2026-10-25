@@ -60,24 +60,20 @@ async def run_verifier() -> None:
     manager = SessionManager()
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
-    signal_registered = False
     try:
-        manager.init_db(
-            database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-        )
-        if task is not None:
-            loop.add_signal_handler(signal.SIGTERM, task.cancel)
-            signal_registered = True
-        log.info("Verifier started")
-        sync_task = asyncio.create_task(trust_sync_loop(manager.session_factory))
+        manager.init_db(database_url)
+        loop.add_signal_handler(signal.SIGTERM, task.cancel)
         try:
-            await verifier_loop(manager.session_factory)
+            log.info("Verifier started")
+            sync_task = asyncio.create_task(trust_sync_loop(manager.session_factory))
+            try:
+                await verifier_loop(manager.session_factory)
+            finally:
+                sync_task.cancel()
+                await asyncio.gather(sync_task, return_exceptions=True)
         finally:
-            sync_task.cancel()
-            await asyncio.gather(sync_task, return_exceptions=True)
-    finally:
-        if signal_registered:
             loop.remove_signal_handler(signal.SIGTERM)
+    finally:
         await manager.close()
 
 

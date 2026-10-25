@@ -1,4 +1,13 @@
+import logging
+from collections.abc import Sequence
 from decimal import Decimal
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from shared.db.models import Node, Replica
+
+log = logging.getLogger("verifier")
 
 INITIAL_TRUST = Decimal("0.5")
 AGREEMENT_REWARD = Decimal("0.05")
@@ -53,34 +62,51 @@ def should_quarantine(score: Decimal) -> bool:
     return score < QUARANTINE_THRESHOLD
 
 
-async def score_replicas(session, replicas, winner: str) -> None:
-    """Score successful final attempts; caller holds the task lock/transaction.
-
-    Lock nodes in name order to serialize concurrent tasks without lost updates.
-    Validate all assignments before changing any score. Task verification and
-    these writes commit together, so normal polling cannot award twice.
+async def score_replicas(
+    session: AsyncSession, replicas: Sequence[Replica], winner: str
+) -> None:
     """
-    from sqlalchemy import select
+    Scores successful final attempts whose node assignments still exist.
 
-    from shared.db.models import Node
+    Missing assignments or node records are skipped with a warning, allowing
+    the majority result to be verified. Skipped scores are not backfilled.
+    Node rows are locked in name order to serialize concurrent score updates.
+    Database errors propagate so scoring and verification roll back together.
 
-    names = {replica.node_name for replica in replicas}
-    if None in names or any(not name.strip() for name in names):
-        raise ValueError("Successful replica has no node assignment")
+    args:
+        session: The caller's transaction, holding the task lock.
+        replicas: Successful replicas with coordinator-validated result hashes.
+        winner: The majority result hash.
+    """
+    names = {
+        replica.node_name
+        for replica in replicas
+        if replica.node_name and replica.node_name.strip()
+    }
     nodes = (
-        await session.scalars(
-            select(Node)
-            .where(Node.name.in_(names))
-            .order_by(Node.name)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    ).all()
+        (
+            await session.scalars(
+                select(Node)
+                .where(Node.name.in_(names))
+                .order_by(Node.name)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+        if names
+        else []
+    )
     by_name = {node.name: node for node in nodes}
-    if set(by_name) != names:
-        raise ValueError("Successful replica's node record is missing")
     for replica in sorted(replicas, key=lambda replica: replica.id):
-        node = by_name[replica.node_name]
+        node = by_name.get(replica.node_name)
+        if node is None:
+            log.warning(
+                "Skipping trust for replica %s (task %s): node %r is unknown",
+                replica.id,
+                replica.task_id,
+                replica.node_name,
+            )
+            continue
         agrees = replica.result_hash == winner
         node.trust_score = update_trust_score(node.trust_score, agrees)
         if agrees:

@@ -94,9 +94,7 @@ AuthAPI = Annotated[
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     run_migrations(os.environ["DATABASE_URL"])
-    session_manager.init_db(
-        os.environ["DATABASE_URL"].replace("postgresql://", "postgresql+asyncpg://", 1)
-    )
+    session_manager.init_db(os.environ["DATABASE_URL"])
     try:
         await asyncio.to_thread(config.load_incluster_config)
     except config.ConfigException:
