@@ -87,7 +87,12 @@ def join(trials: list[dict], presses: list[dict]) -> list[dict]:
 
 
 def summary(name: str, values: list[float]) -> str:
-    q = statistics.quantiles(values, n=4) if len(values) > 1 else [values[0]] * 3
+    # "inclusive" matches the quartiles matplotlib draws, so the text agrees with the box
+    q = (
+        statistics.quantiles(values, n=4, method="inclusive")
+        if len(values) > 1
+        else [values[0]] * 3
+    )
     return (
         f"{name:<24} median {statistics.median(values):6.2f}s   "
         f"IQR {q[0]:.2f}-{q[2]:.2f}s   range {min(values):.2f}-{max(values):.2f}s"
