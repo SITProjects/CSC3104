@@ -1,11 +1,11 @@
 import logging
-import re
+from collections.abc import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from services.coordinator.crud import create_event, create_replicas
 from shared.db.models import (
-    Event,
     Job,
     JobStatus,
     Replica,
@@ -14,8 +14,9 @@ from shared.db.models import (
     TaskStatus,
 )
 
-from .pc_tracking import get_dispute_exclusions, pc_wait_expired
-from .voting import winning_hash
+from .pc_tracking import get_dispute_exclusions
+from .trust import score_replicas
+from .voting import MAX_REPLICAS, winning_hash
 
 log = logging.getLogger("verifier")
 
@@ -27,8 +28,9 @@ async def verify_next_task(
     Votes on one finished task and saves the decision in a single transaction.
 
     Locks a VOTING task with FOR UPDATE SKIP LOCKED, so concurrent verifiers
-    cannot process the same task. Only active jobs whose replicas are all DONE
-    or FAILED are eligible. A majority verifies the task and stores final_hash.
+    cannot process the same task. Only active jobs are eligible. The coordinator
+    sets VOTING once replicas have finished. A majority verifies the task and
+    stores final_hash.
     An unresolved task gets two extra SCHEDULED replicas, or one if four already
     exist, without exceeding five total. No majority at five fails the task.
 
@@ -36,114 +38,138 @@ async def verify_next_task(
     count towards the total but do not contribute votes. A task_disputed event
     stores the extra replica ids and excluded_nodes, including previous retry
     PCs from eviction events. Invalid replica counts and unrecoverable PC data
-    fail only the affected task, with a recorded reason. Missing PC metadata
-    gets a bounded wait recorded in the database before failing the task.
-    Waiting tasks allow later tasks to proceed. Actual PC placement is a later
-    integration.
+    fail only the affected task, with a recorded reason. A majority is verified
+    even if some nodes cannot be scored. Missing PC history fails an unresolved
+    task immediately because fresh-PC placement cannot be guaranteed.
+    Actual PC placement is a later integration.
 
     args:
         session_factory: The shared async database session factory.
     returns:
         int | None: The processed task's id, or None if no task can be processed.
     """
-    unfinished = (
-        select(Replica.id)
-        .where(
-            Replica.task_id == Task.id,
-            Replica.status.not_in([ReplicaStatus.DONE, ReplicaStatus.FAILED]),
-        )
-        .correlate(Task)
-        .exists()
+    async with session_factory.begin() as session:
+        task = await next_voting_task(session)
+        if task is None:
+            return None
+        await process_vote(session, task)
+        return task.id
+
+
+async def process_vote(session: AsyncSession, task: Task) -> None:
+    """
+    Applies a majority vote or records a dispute or terminal data error.
+
+    args:
+        session: The verifier's current transaction.
+        task: The locked VOTING task with no unfinished replicas.
+    """
+    replicas = await get_replicas(session, task.id)
+    replica_count = len(replicas)
+    if not 1 <= replica_count <= MAX_REPLICAS:
+        await fail_verification(session, task, "invalid_replica_count", replica_count)
+        return
+
+    # The coordinator validates the hash before marking a replica DONE.
+    successful = [
+        replica
+        for replica in replicas
+        if replica.status == ReplicaStatus.DONE and replica.exit_code == 0
+    ]
+    winner = winning_hash(
+        [replica.result_hash for replica in successful], replica_count
     )
+
+    if winner:
+        await score_replicas(session, successful, winner)
+        task.status = TaskStatus.VERIFIED
+    elif replica_count == MAX_REPLICAS:
+        task.status = TaskStatus.FAILED
+    else:
+        try:
+            excluded_nodes = await get_dispute_exclusions(session, task, replicas)
+        except ValueError:
+            await fail_verification(
+                session, task, "missing_pc_assignment", replica_count
+            )
+            return
+
+        await handle_dispute(session, task, replica_count, excluded_nodes)
+
+    task.final_hash = winner
+
+
+async def next_voting_task(session: AsyncSession) -> Task | None:
+    """
+    Fetches and locks the oldest eligible voting task.
+
+    Skips locked tasks and inactive jobs. Relies on the coordinator setting
+    VOTING only after replicas have finished. The caller owns the transaction
+    and keeps the task lock while voting.
+
+    args:
+        session: The verifier's current transaction.
+    returns:
+        Task | None: The next locked task, or None if none is eligible.
+    """
     stmt = (
         select(Task)
         .join(Job, Task.job_id == Job.id)
         .where(
             Task.status == TaskStatus.VOTING,
             Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
-            ~unfinished,
         )
         .order_by(Task.id)
         .limit(1)
         .with_for_update(of=Task, skip_locked=True)
     )
-
-    async with session_factory.begin() as session:
-        after_id = 0
-        while True:
-            task = await session.scalar(stmt.where(Task.id > after_id))
-            if task is None:
-                return None
-            if await vote_task(session, task):
-                return task.id
-            after_id = task.id
+    return await session.scalar(stmt)
 
 
-async def vote_task(session: AsyncSession, task: Task) -> bool:
+async def get_replicas(session: AsyncSession, task_id: int) -> Sequence[Replica]:
     """
-    Applies a vote, waits for PC metadata or records a terminal data error.
+    Fetches all replica records for a task, including failed replicas.
 
     args:
         session: The verifier's current transaction.
-        task: The locked VOTING task with no unfinished replicas.
+        task_id: The task whose replicas are needed.
     returns:
-        bool: True after saving an outcome, False while waiting for PC metadata.
+        Sequence[Replica]: All replicas used to determine the vote and replica limit.
     """
-    replicas = (
-        await session.scalars(select(Replica).where(Replica.task_id == task.id))
+    return (
+        await session.scalars(select(Replica).where(Replica.task_id == task_id))
     ).all()
-    replica_count = len(replicas)
-    if not 1 <= replica_count <= 5:
-        await fail_verification(session, task, "invalid_replica_count", replica_count)
-        return True
 
-    hashes = [
-        replica.result_hash
-        for replica in replicas
-        if replica.status == ReplicaStatus.DONE
-        and replica.exit_code == 0
-        and replica.result_hash is not None
-        and re.fullmatch(r"[0-9a-f]{64}", replica.result_hash)
-    ]
-    winner = winning_hash(hashes, replica_count)
 
-    if winner is not None:
-        task.status = TaskStatus.VERIFIED
-    elif replica_count == 5:
-        task.status = TaskStatus.FAILED
-    else:
-        try:
-            excluded_nodes = await get_dispute_exclusions(session, task, replicas)
-        except ValueError:
-            if not await pc_wait_expired(session, task, replicas):
-                return False
-            await fail_verification(
-                session, task, "missing_pc_assignment", replica_count
-            )
-            return True
+async def handle_dispute(
+    session: AsyncSession, task: Task, replica_count: int, excluded_nodes: list[str]
+) -> None:
+    """
+    Marks a task disputed, creates extra replicas and records their exclusions.
 
-        task.status = TaskStatus.DISPUTED
-        extra_replicas = [
-            Replica(task_id=task.id, status=ReplicaStatus.SCHEDULED, attempt=1)
-            for _ in range(min(2, 5 - replica_count))
-        ]
-        session.add_all(extra_replicas)
-        await session.flush()
-        session.add(
-            Event(
-                type="task_disputed",
-                job_id=task.job_id,
-                task_id=task.id,
-                detail={
-                    "replica_ids": [replica.id for replica in extra_replicas],
-                    "excluded_nodes": excluded_nodes,
-                },
-            )
-        )
+    Adds up to two replicas without exceeding MAX_REPLICAS. Flushes to obtain
+    replica ids for the event; the caller owns and commits the transaction.
 
-    task.final_hash = winner
-    await session.flush()
-    return True
+    args:
+        session: The verifier's current transaction.
+        task: The locked task with no majority and room for more replicas.
+        replica_count: The number of existing replicas, including failures.
+        excluded_nodes: Previously used PCs excluded from the extra replicas.
+    """
+    task.status = TaskStatus.DISPUTED
+    extra_replicas = await create_replicas(
+        session, [task], min(2, MAX_REPLICAS - replica_count)
+    )
+    await create_event(
+        session,
+        "task_disputed",
+        task.job_id,
+        task.id,
+        detail={
+            "replica_ids": [replica.id for replica in extra_replicas],
+            "excluded_nodes": excluded_nodes,
+        },
+    )
 
 
 async def fail_verification(
@@ -163,15 +189,13 @@ async def fail_verification(
     """
     task.status = TaskStatus.FAILED
     task.final_hash = None
-    session.add(
-        Event(
-            type="task_verification_failed",
-            job_id=task.job_id,
-            task_id=task.id,
-            detail={"reason": reason, "replica_count": replica_count},
-        )
+    await create_event(
+        session,
+        "task_verification_failed",
+        task.job_id,
+        task.id,
+        detail={"reason": reason, "replica_count": replica_count},
     )
-    await session.flush()
     log.warning(
         "Task %s failed verification: %s (replicas=%s)", task.id, reason, replica_count
     )

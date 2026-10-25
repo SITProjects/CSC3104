@@ -17,6 +17,7 @@ class SessionManager:
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
 
     def init_db(self, db_url: str) -> None:
+        db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
         self.engine = create_async_engine(
             db_url,
             poolclass=AsyncAdaptedQueuePool,

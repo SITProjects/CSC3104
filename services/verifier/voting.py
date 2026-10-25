@@ -1,5 +1,7 @@
 from collections import Counter
 
+MAX_REPLICAS = 5
+
 
 def winning_hash(successful_hashes: list[str], total_replicas: int) -> str | None:
     """
@@ -19,8 +21,8 @@ def winning_hash(successful_hashes: list[str], total_replicas: int) -> str | Non
     raises:
         ValueError: If the total is outside 1 to 5, or there are too many hashes.
     """
-    if not 1 <= total_replicas <= 5:
-        raise ValueError("total_replicas must be between 1 and 5")
+    if not 1 <= total_replicas <= MAX_REPLICAS:
+        raise ValueError(f"total_replicas must be between 1 and {MAX_REPLICAS}")
     if len(successful_hashes) > total_replicas:
         raise ValueError("successful hashes cannot outnumber replicas")
 
@@ -50,4 +52,4 @@ def dispute_exclusions(previous_nodes: list[str | None]) -> list[str]:
         not isinstance(node, str) or not node.strip() for node in previous_nodes
     ):
         raise ValueError("Every previous replica must have a known PC assignment")
-    return sorted({node for node in previous_nodes if node is not None})
+    return sorted(set(previous_nodes))
