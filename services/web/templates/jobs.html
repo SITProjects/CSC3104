@@ -1,15 +1,17 @@
 {% extends "base.html" %}
+{% from "_macros.html" import error_alert, status_badge %}
 {% block title %}My jobs{% endblock %}
+{% block width %}max-w-6xl{% endblock %}
 {% block content %}
-<h1>My jobs</h1>
+<h1 class="mb-6 text-2xl font-semibold tracking-tight">My jobs</h1>
 
 {% if error %}
-<div class="alert" role="alert">{{ error }}</div>
+{{ error_alert(error) }}
 {% elif not rows and offset == 0 %}
-<p>You haven't submitted anything yet. <a href="/upload">Upload a PDF</a> to get started.</p>
+<p class="text-muted-foreground">You haven't submitted anything yet. <a class="text-foreground underline underline-offset-4" href="/jobs/new">Create a job</a> to get started.</p>
 {% else %}
-<div class="table-scroll" tabindex="0" role="region" aria-label="My jobs">
-  <table>
+<div class="table-container" tabindex="0" role="region" aria-label="My jobs">
+  <table class="table">
     <caption>Newest first. Select a job to follow its progress.</caption>
     <thead><tr>
       <th scope="col">Job</th><th scope="col">Status</th><th scope="col">Tasks</th>
@@ -18,23 +20,24 @@
     <tbody>
     {% for job in rows %}
       <tr>
-        <td><a href="/jobs/{{ job.id }}"><code>{{ job.id|string|truncate(8, True, "") }}</code></a><br><small>{{ job.filename or job.job_type }}</small></td>
-        <td><span class="badge badge-{{ job.status|lower }}">{{ job.status|lower|capitalize }}</span>
-          {% if job.error %}<br><small>{{ job.error }}</small>{% endif %}
-          {% if job.pending %}<form class="inline" method="post" action="/jobs/{{ job.id }}/cancel"><button type="submit" class="link">{{ "Dismiss" if job.status == "FAILED" else "Cancel" }}</button></form>{% endif %}</td>
-        <td>{{ job.task_count if job.task_count is not none else "–" }}</td>
+        <td><a class="font-mono font-medium underline-offset-4 hover:underline" href="/jobs/{{ job.id }}">{{ job.id|string|truncate(8, True, "") }}</a>
+          <div class="text-xs text-muted-foreground">{{ job.filename or job.job_type }}</div></td>
+        <td>{{ status_badge(job.status) }}
+          {% if job.error %}<div class="text-xs text-muted-foreground">{{ job.error }}</div>{% endif %}
+          {% if job.pending %}<form class="inline" method="post" action="/jobs/{{ job.id }}/cancel"><button type="submit" class="btn text-destructive" data-variant="link" data-size="xs">{{ "Dismiss" if job.status == "FAILED" else "Cancel" }}</button></form>{% endif %}</td>
+        <td class="tabular-nums">{{ job.task_count if job.task_count is not none else "–" }}</td>
         <td>{{ job.created }}</td>
-        <td>{{ job.took }}{% if job.running %} <small>so far</small>{% endif %}</td>
+        <td>{{ job.took }}{% if job.running %} <span class="text-xs text-muted-foreground">so far</span>{% endif %}</td>
       </tr>
     {% else %}
-      <tr><td colspan="5">No more jobs.</td></tr>
+      <tr><td colspan="5" class="text-muted-foreground">No more jobs.</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
-<nav class="pagination" aria-label="Job pages">
-  {% if offset > 0 %}<a href="?offset={{ [0, offset - page_size]|max }}">Newer jobs</a>{% endif %}
-  {% if has_more %}<a href="?offset={{ offset + page_size }}">Older jobs</a>{% endif %}
+<nav class="mt-4 flex gap-2" aria-label="Job pages">
+  {% if offset > 0 %}<a class="btn" data-variant="outline" data-size="sm" href="?offset={{ [0, offset - page_size]|max }}">Newer jobs</a>{% endif %}
+  {% if has_more %}<a class="btn" data-variant="outline" data-size="sm" href="?offset={{ offset + page_size }}">Older jobs</a>{% endif %}
 </nav>
 {% endif %}
 {% if rows|selectattr("status", "equalto", "PREPARING")|list %}

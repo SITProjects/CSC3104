@@ -42,7 +42,7 @@ BURST_PAGE_SIZE = 20  # rows per page in each admin burst table
 
 # Main navigation: (label, path).
 NAV_ITEMS = [
-    ("Upload", "/upload"),
+    ("New job", "/jobs/new"),
     ("My jobs", "/jobs"),
     ("Account", "/account"),
     ("Admin: nodes", "/admin/nodes"),
@@ -68,7 +68,7 @@ templates = Jinja2Templates(
 )
 templates.env.globals["nav_items"] = NAV_ITEMS
 
-DEFAULT_AFTER_LOGIN = "/upload"
+DEFAULT_AFTER_LOGIN = "/jobs/new"
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 128
 
@@ -274,12 +274,25 @@ JOBS_PAGE_SIZE = 20
 MIB = 1024 * 1024
 
 
-def _upload_page(request: Request, error: str | None = None, status: int = 200):
+NEW_JOB_PATH = "/jobs/new"
+
+
+def _new_job_page(
+    request: Request,
+    error: str | None = None,
+    status: int = 200,
+    form: dict | None = None,
+):
+    """The New job page; form refills what the user entered after an error."""
     return templates.TemplateResponse(
         request,
-        "upload.html",
+        "new_job.html",
         {
             "error": error,
+            "form": form or {},
+            "job_types": list(jobtools.JOB_TYPES.values()),
+            "cpu_range": (jobtools.MIN_CPU, jobtools.MAX_CPU),
+            "mem_range": (jobtools.MIN_MEM, jobtools.MAX_MEM),
             "max_mb": settings.max_upload_mb,
             "max_pages": settings.max_pages,
         },
@@ -289,7 +302,7 @@ def _upload_page(request: Request, error: str | None = None, status: int = 200):
 
 class UploadSizeGuard:
     """
-    Refuses an oversized /upload from its Content-Length header, before the body
+    Refuses an oversized new job from its Content-Length header, before the body
     is parsed, so the app doesn't first spool a huge file to disk. A client that
     sends no length still hits the check in upload_submit, and the proxy's own
     body limit is the real protection once deployed.
@@ -302,7 +315,7 @@ class UploadSizeGuard:
         if (
             scope["type"] == "http"
             and scope["method"] == "POST"
-            and scope["path"] == "/upload"
+            and scope["path"] == NEW_JOB_PATH
         ):
             declared = dict(scope["headers"]).get(b"content-length", b"")
             # one extra MiB covers the multipart framing around the file
@@ -311,7 +324,7 @@ class UploadSizeGuard:
                 and int(declared) > (settings.max_upload_mb + 1) * MIB
             ):
                 request = Request(scope, receive)
-                response = _upload_page(
+                response = _new_job_page(
                     request, f"That file is over {settings.max_upload_mb} MB.", 413
                 )
                 await response(scope, receive, send)
@@ -322,30 +335,43 @@ class UploadSizeGuard:
 app.add_middleware(UploadSizeGuard)
 
 
-@app.get("/upload", response_class=HTMLResponse, dependencies=[SignedIn])
-async def upload(request: Request):
-    return _upload_page(request)
+# Declared before /jobs/{job_id}, which would otherwise catch "new"
+@app.get(NEW_JOB_PATH, response_class=HTMLResponse, dependencies=[SignedIn])
+async def new_job(request: Request):
+    return _new_job_page(request)
 
 
-@app.post("/upload", response_class=HTMLResponse)
-async def upload_submit(
+@app.post(NEW_JOB_PATH, response_class=HTMLResponse)
+async def new_job_submit(
     request: Request,
     background: BackgroundTasks,
     user: Annotated[dict, Depends(current_user)],
+    job_type: Annotated[str | None, Form()] = None,
+    cpu: Annotated[str | None, Form()] = None,
+    mem: Annotated[str | None, Form()] = None,
     file: Annotated[UploadFile | None, File()] = None,
 ):
+    form = {"job_type": job_type, "cpu": cpu, "mem": mem}
+    try:
+        kind = jobtools.parse_job_type(job_type)
+        cpu_cores, mem_mib = jobtools.parse_resources(kind, cpu, mem)
+    except jobtools.UploadError as exc:
+        return _new_job_page(request, str(exc), 422, form)
+    if not kind.needs_pdf:
+        return await _create_job_now(request, form, kind.name, cpu_cores, mem_mib)
+
     if file is None or not file.filename:
-        return _upload_page(request, "Choose a PDF to upload.", 422)
+        return _new_job_page(request, "Choose a PDF to upload.", 422, form)
     limit = settings.max_upload_mb * MIB
     data = await file.read(limit + 1)
     if len(data) > limit:
-        return _upload_page(
-            request, f"That file is over {settings.max_upload_mb} MB.", 413
+        return _new_job_page(
+            request, f"That file is over {settings.max_upload_mb} MB.", 413, form
         )
     try:
         pages = await asyncio.to_thread(jobtools.check_pdf, data)
     except jobtools.UploadError as exc:
-        return _upload_page(request, str(exc), 422)
+        return _new_job_page(request, str(exc), 422, form)
 
     job_id = uuid4()
     try:
@@ -356,12 +382,44 @@ async def upload_submit(
             jobtools.clean_filename(file.filename),
             data,
             pages,
+            cpu_cores,
+            mem_mib,
         )
     except (BotoCoreError, ClientError):
         log.exception("saving upload %s to S3 failed", job_id)
-        return _upload_page(request, "Couldn't store the file. Please try again.", 503)
+        return _new_job_page(
+            request, "Couldn't store the file. Please try again.", 503, form
+        )
     if settings.local_render:
         background.add_task(uploads.render_locally, job_id, data)
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
+async def _create_job_now(
+    request: Request, form: dict, job_type: str, cpu: int, mem: int
+) -> Response:
+    """Creates a job that needs no upload straight away and opens its page."""
+    job_id = str(uuid4())
+    try:
+        await coordinator.create_job(
+            request.cookies[settings.session_cookie],
+            jobtools.job_spec(job_id, job_type, cpu, mem),
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 401:
+            raise LoginRequired(NEW_JOB_PATH) from exc
+        log.warning("creating %s job failed: %r", job_type, exc)
+        return _new_job_page(
+            request, "The job couldn't be created. Please try again.", 503, form
+        )
+    except httpx.RequestError as exc:
+        log.warning("creating %s job failed: %r", job_type, exc)
+        return _new_job_page(
+            request,
+            "The job service is unavailable. Please try again shortly.",
+            503,
+            form,
+        )
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 

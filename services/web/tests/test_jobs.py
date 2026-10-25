@@ -64,13 +64,41 @@ def test_build_tasks_exact_multiple_and_single_page():
     assert [t["input"]["files"] for t in jobs.build_tasks(1)] == [["pages/0001.png"]]
 
 
-def test_job_spec_uses_fixed_resources_and_given_id():
-    spec = jobs.job_spec("abc", 12)
+def test_job_spec_for_ocr_splits_pages_and_uses_given_resources():
+    spec = jobs.job_spec("abc", "ocr", 2, 768, page_count=12)
     assert spec["job_id"] == "abc"
     assert spec["job_type"] == "ocr"
+    assert spec["params"] == {"page_count": 12}
     assert spec["replicas_per_task"] == 3
-    assert (spec["cpu_request"], spec["mem_request"]) == (1, 512)
+    assert (spec["cpu_request"], spec["mem_request"]) == (2, 768)
     assert len(spec["tasks"]) == 2
+
+
+def test_job_spec_for_other_types_has_one_empty_task():
+    spec = jobs.job_spec("abc", "test", 1, 64)
+    assert spec["params"] == {} and spec["tasks"] == [{"input": {}}]
+
+
+def test_parse_resources_only_lets_some_types_choose():
+    ocr, test = jobs.JOB_TYPES["ocr"], jobs.JOB_TYPES["test"]
+    assert jobs.parse_resources(ocr, "8", "2048") == (1, 512)
+    assert jobs.parse_resources(test, "8", "2048") == (8, 2048)
+    assert jobs.parse_resources(test, None, "") == (1, 64)
+
+
+def test_parse_resources_checks_the_coordinators_limits():
+    test = jobs.JOB_TYPES["test"]
+    assert jobs.parse_resources(test, "16", "4096") == (16, 4096)
+    for cpu, mem in (("17", None), (None, "63"), ("-1", None), ("two", None)):
+        with pytest.raises(jobs.UploadError):
+            jobs.parse_resources(test, cpu, mem)
+
+
+def test_parse_job_type_refuses_unknown_types():
+    assert jobs.parse_job_type("ocr").needs_pdf
+    for value in (None, "", "OCR", "rm -rf"):
+        with pytest.raises(jobs.UploadError):
+            jobs.parse_job_type(value)
 
 
 # --- progress view -----------------------------------------------------------
@@ -151,6 +179,7 @@ def test_progress_view_completed_is_terminal_and_full():
 def test_preparing_view_states():
     waiting = jobs.preparing_view({"state": "rendering"}, "id1")
     assert (waiting["stage"], waiting["terminal"]) == ("preparing", False)
+    assert waiting["job_type"] == "ocr"  # the page shows the preparing stage
     failed = jobs.preparing_view({"state": "failed", "error": "Password"}, "id1")
     assert (failed["stage"], failed["terminal"], failed["error"]) == (
         "failed",

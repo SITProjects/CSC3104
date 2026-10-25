@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     max_pages: int = 500  # the Lambda splitter refuses more than this too
     pages_per_task: int = 10
     replicas_per_task: int = 3
-    # one core and 512 MiB matches the "ocr" job type's defaults
+    # Only for uploads saved before users chose CPU and memory themselves
     task_cpu: int = 1
     task_mem_mib: int = 512
 

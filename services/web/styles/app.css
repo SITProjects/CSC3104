@@ -1,0 +1,14 @@
+/* Source for static/app.css: Tailwind, the Basecoat components (shadcn/ui as CSS
+   classes) and the utility classes used in templates/ and static/*.js.
+   Rebuild with services/web/build-css.sh; never edit static/app.css by hand. */
+
+@import "tailwindcss" source(none);
+@import "./vendor/basecoat/basecoat-vega.css";
+
+@source "../templates";
+@source "../static/*.js";
+
+@theme {
+  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+}

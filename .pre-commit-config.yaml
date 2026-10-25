@@ -1,6 +1,7 @@
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
-exclude: '^uv\.lock$'
+# generated or vendored files are kept byte for byte
+exclude: '^(uv\.lock|services/web/static/app\.css|services/web/(static|styles)/vendor/.*)$'
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -18,3 +19,13 @@ repos:
       # Converts all line endings to LF
       - id: mixed-line-ending
         args: ["--fix=lf"]
+  - repo: local
+    hooks:
+      # Keep the built stylesheet in step with the classes the pages use. If this
+      # changes services/web/static/app.css, stage it and commit again.
+      - id: build-web-css
+        name: build web CSS (Tailwind)
+        entry: services/web/build-css.sh
+        language: system
+        files: ^services/web/(templates/|styles/|static/[^/]+\.js$)
+        pass_filenames: false

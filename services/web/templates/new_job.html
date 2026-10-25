@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, error_alert %}
+{% block title %}New job{% endblock %}
+{% block content %}
+{% set chosen = job_types|selectattr("name", "equalto", form.job_type)|first %}
+<header class="mb-6">
+  <h1 class="text-2xl font-semibold tracking-tight">New job</h1>
+  <p class="mt-2 text-muted-foreground">Pick what to run. The work is split into small tasks, and each task is run on three idle lab PCs whose results must agree before we trust them.</p>
+</header>
+
+<div class="mb-4">{{ error_alert(error, "form-error") }}</div>
+
+<form id="job-form" class="card" method="post" action="/jobs/new" enctype="multipart/form-data"
+      data-max-bytes="{{ max_mb * 1024 * 1024 }}" data-max-mb="{{ max_mb }}">
+  <section class="grid gap-6">
+    <div role="group" class="field">
+      <label class="label" for="job_type">Job type</label>
+      <select class="select w-full" id="job_type" name="job_type" aria-describedby="job-type-hint" required>
+        <option value="" disabled {% if not chosen %}selected{% endif %}>Choose a job type</option>
+        {% for t in job_types %}
+        <option value="{{ t.name }}" data-needs-pdf="{{ 'true' if t.needs_pdf else 'false' }}"
+                data-custom-resources="{{ 'true' if t.custom_resources else 'false' }}"
+                data-description="{{ t.description }}" data-cpu="{{ t.default_cpu }}" data-mem="{{ t.default_mem }}"
+                {% if chosen and chosen.name == t.name %}selected{% endif %}>{{ t.label }}</option>
+        {% endfor %}
+      </select>
+      <p id="job-type-hint">{{ chosen.description if chosen else "Each job type runs a vetted program on the lab PCs." }}</p>
+    </div>
+
+    <div id="pdf-section" class="grid gap-2" {% if not (chosen and chosen.needs_pdf) %}hidden{% endif %}>
+      <span class="label">PDF</span>
+      <label class="relative grid cursor-pointer justify-items-center gap-1 rounded-lg border-2 border-dashed bg-muted/40 px-4 py-10 text-center transition-colors hover:border-primary hover:bg-muted focus-within:border-primary focus-within:bg-muted" for="file">
+        {{ icon("upload", "mb-2 size-6 text-muted-foreground") }}
+        <span class="font-medium wrap-anywhere" id="file-title">Choose a PDF</span>
+        <span class="text-sm text-muted-foreground" id="file-hint">Scanned documents up to {{ max_mb }} MB and {{ max_pages }} pages.</span>
+        <input id="file" class="absolute inset-0 size-full cursor-pointer opacity-0" type="file" name="file" accept="application/pdf,.pdf"
+               {% if chosen and chosen.needs_pdf %}required{% else %}disabled{% endif %}>
+      </label>
+    </div>
+
+    {# Only for job types that let users choose; the others always use their defaults. #}
+    {% set custom = chosen and chosen.custom_resources %}
+    <fieldset id="resources-section" class="fieldset" {% if not custom %}hidden{% endif %}>
+      <legend>Resources <span class="font-normal text-muted-foreground">(optional)</span></legend>
+      <p>Leave blank to use the job type's default. Each copy of a task gets this much.</p>
+      <div class="grid gap-4 sm:grid-cols-2">
+        <div role="group" class="field">
+          <label class="label" for="cpu">CPU cores</label>
+          <input class="input" id="cpu" type="number" name="cpu" inputmode="numeric" step="1"
+                 min="{{ cpu_range[0] }}" max="{{ cpu_range[1] }}" value="{{ form.cpu or '' }}"
+                 placeholder="Default: {{ chosen.default_cpu if chosen else '' }}" aria-describedby="cpu-hint"
+                 {% if not custom %}disabled{% endif %}>
+          <p id="cpu-hint">{{ cpu_range[0] }} to {{ cpu_range[1] }} cores.</p>
+        </div>
+        <div role="group" class="field">
+          <label class="label" for="mem">Memory (MiB)</label>
+          <input class="input" id="mem" type="number" name="mem" inputmode="numeric" step="1"
+                 min="{{ mem_range[0] }}" max="{{ mem_range[1] }}" value="{{ form.mem or '' }}"
+                 placeholder="Default: {{ chosen.default_mem if chosen else '' }}" aria-describedby="mem-hint"
+                 {% if not custom %}disabled{% endif %}>
+          <p id="mem-hint">{{ mem_range[0] }} to {{ mem_range[1] }} MiB.</p>
+        </div>
+      </div>
+    </fieldset>
+
+    <div id="upload-progress" class="grid gap-2" hidden>
+      <progress id="upload-bar" class="h-2 w-full appearance-none overflow-hidden rounded-full bg-muted [&::-webkit-progress-bar]:bg-muted [&::-webkit-progress-value]:bg-primary [&::-moz-progress-bar]:bg-primary" max="100" value="0" aria-label="Upload progress"></progress>
+      <p class="text-sm text-muted-foreground" id="upload-status" aria-live="polite">Uploading…</p>
+    </div>
+
+    <button type="submit" class="btn" id="job-submit">Create job</button>
+    <p class="text-sm text-muted-foreground">You'll be taken to a page that shows live progress.</p>
+  </section>
+</form>
+
+<script src="{{ url_for('static', path='new_job.js') }}" defer></script>
+{% endblock %}

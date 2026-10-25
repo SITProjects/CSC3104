@@ -102,17 +102,93 @@ def created(monkeypatch):
     return calls
 
 
-# --- upload ------------------------------------------------------------------
+# --- new job -----------------------------------------------------------------
 
 
-def post_pdf(client, data, name="scan.pdf"):
-    return client.post("/upload", files={"file": (name, data, "application/pdf")})
+def post_pdf(client, data, name="scan.pdf", **fields):
+    return client.post(
+        "/jobs/new",
+        data={"job_type": "ocr", **fields},
+        files={"file": (name, data, "application/pdf")},
+    )
 
 
-def test_upload_page_shows_limits(client):
-    r = client.get("/upload")
+def post_test_job(client, **fields):
+    return client.post("/jobs/new", data={"job_type": "test", **fields})
+
+
+def test_new_job_page_lists_job_types_and_limits(client):
+    r = client.get("/jobs/new")
     assert r.status_code == 200
+    assert 'name="job_type"' in r.text
+    assert 'value="ocr"' in r.text and 'value="test"' in r.text
     assert 'name="file"' in r.text and "50 MB" in r.text
+    assert 'name="cpu"' in r.text and 'name="mem"' in r.text
+
+
+def test_new_job_needs_a_known_job_type(client, s3, created):
+    for fields in ({}, {"job_type": "bitcoin"}):
+        r = client.post("/jobs/new", data=fields)
+        assert r.status_code == 422 and "Choose a job type" in r.text
+    assert s3.objects == {} and created == []
+
+
+def test_ocr_job_uses_its_default_resources_whatever_is_sent(client, s3):
+    r = post_pdf(client, make_pdf(1), cpu="16", mem="4096")
+    job_id = r.headers["location"].removeprefix("/jobs/")
+    pending = s3.json(f"jobs/{job_id}/pending.json")
+    assert (pending["cpu_request"], pending["mem_request"]) == (1, 512)
+
+
+def test_test_job_is_created_at_once_with_chosen_resources(client, s3, created):
+    r = post_test_job(client, cpu="4", mem="1024")
+    assert r.status_code == 303
+    ((token, spec),) = created
+    assert token == "tok123"
+    assert r.headers["location"] == f"/jobs/{spec['job_id']}"
+    assert spec["job_type"] == "test" and spec["tasks"] == [{"input": {}}]
+    assert (spec["cpu_request"], spec["mem_request"]) == (4, 1024)
+    assert s3.objects == {}  # nothing to upload
+
+
+def test_test_job_falls_back_to_defaults_when_blank(client, created):
+    post_test_job(client, cpu="", mem=" ")
+    ((_, spec),) = created
+    assert (spec["cpu_request"], spec["mem_request"]) == (1, 64)
+
+
+@pytest.mark.parametrize(
+    "fields, message",
+    [
+        ({"cpu": "0"}, "between 1 and 16"),
+        ({"cpu": "1.5"}, "whole number"),
+        ({"mem": "8192"}, "between 64 and 4096"),
+        ({"mem": "lots"}, "whole number"),
+    ],
+)
+def test_test_job_rejects_bad_resources(client, created, fields, message):
+    r = post_test_job(client, **fields)
+    assert r.status_code == 422 and message in r.text
+    assert created == []
+
+
+def test_test_job_reports_coordinator_failure(client, monkeypatch):
+    async def down(token, spec):
+        raise status_error(500)
+
+    monkeypatch.setattr(coordinator, "create_job", down)
+    r = post_test_job(client, cpu="2")
+    assert r.status_code == 503 and "be created. Please try again" in r.text
+    assert 'value="2"' in r.text  # what the user typed is kept
+
+
+def test_test_job_with_expired_session_goes_to_login(client, monkeypatch):
+    async def expired(token, spec):
+        raise status_error(401)
+
+    monkeypatch.setattr(coordinator, "create_job", expired)
+    r = post_test_job(client)
+    assert r.status_code == 303 and r.headers["location"].startswith("/login")
 
 
 def test_upload_saves_pdf_and_redirects_to_job(client, s3):
@@ -145,13 +221,15 @@ def test_upload_rejects_oversized_file(client, s3, monkeypatch):
 
 
 def test_upload_without_file_asks_for_one(client):
-    r = client.post("/upload", data={})
+    r = client.post("/jobs/new", data={"job_type": "ocr"})
     assert r.status_code == 422 and "Choose a PDF" in r.text
 
 
 def test_upload_requires_login(s3):
     r = TestClient(app, follow_redirects=False).post(
-        "/upload", files={"file": ("a.pdf", make_pdf(1), "application/pdf")}
+        "/jobs/new",
+        data={"job_type": "ocr"},
+        files={"file": ("a.pdf", make_pdf(1), "application/pdf")},
     )
     assert r.status_code == 303 and r.headers["location"].startswith("/login")
     assert s3.objects == {}
@@ -240,6 +318,31 @@ def test_hook_creates_job_with_uploaders_token_once_complete(client, hook, s3, c
     # the token is not kept once it has been used
     assert f"jobs/{JOB_ID}/pending.json" not in s3.objects
     assert f"pending-index/{USER['id']}/{JOB_ID}" not in s3.objects
+
+
+def test_hook_creates_job_with_the_resources_saved_at_upload(client, hook, s3, created):
+    seed_pending(s3)
+    pending = s3.json(f"jobs/{JOB_ID}/pending.json")
+    s3.objects[f"jobs/{JOB_ID}/pending.json"] = json.dumps(
+        {**pending, "cpu_request": 2, "mem_request": 768}
+    ).encode()
+    seed_pages(s3, 25)
+    signed_post(client, ok_event())
+    ((_, spec),) = created
+    assert (spec["cpu_request"], spec["mem_request"]) == (2, 768)
+
+
+def test_hook_falls_back_to_fixed_resources_for_older_uploads(
+    client, hook, s3, created
+):
+    seed_pending(s3)  # saved before uploads recorded their resources
+    seed_pages(s3, 25)
+    signed_post(client, ok_event())
+    ((_, spec),) = created
+    assert (spec["cpu_request"], spec["mem_request"]) == (
+        settings.task_cpu,
+        settings.task_mem_mib,
+    )
 
 
 def test_hook_duplicate_callback_is_harmless(client, hook, s3, created):
@@ -334,6 +437,13 @@ def stub_job(monkeypatch, job=None, error=None):
         return job
 
     monkeypatch.setattr(coordinator, "get_job", fake_get)
+
+
+def test_job_page_lists_every_stage_in_order(client):
+    html = client.get(f"/jobs/{JOB_ID}").text
+    steps = ["submitted", "prepare", "queue", "run", "check", "done"]
+    positions = [html.index(f'data-step="{step}"') for step in steps]
+    assert positions == sorted(positions)
 
 
 def test_job_page_renders_shell(client):
@@ -564,7 +674,7 @@ def test_job_list_empty_and_error_states(client, monkeypatch):
         return []
 
     monkeypatch.setattr(coordinator, "list_jobs", empty)
-    assert "Upload a PDF" in client.get("/jobs").text
+    assert "Create a job" in client.get("/jobs").text
 
     async def down(token, limit=20, offset=0):
         raise httpx.ConnectError("down")
@@ -639,7 +749,7 @@ def test_job_list_hides_other_users_and_finished_uploads(client, monkeypatch, s3
     s3.objects[f"pending-index/{USER['id']}/{UUID(int=9)}"] = b""
     r = client.get("/jobs")
     assert str(UUID(int=8)) not in r.text and str(UUID(int=9)) not in r.text
-    assert "Upload a PDF" in r.text  # still the empty state
+    assert "Create a job" in r.text  # still the empty state
 
 
 def test_job_list_does_not_repeat_a_job_the_coordinator_has(client, monkeypatch, s3):

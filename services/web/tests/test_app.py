@@ -1,3 +1,4 @@
+import re
 from urllib.parse import quote
 from uuid import UUID
 
@@ -51,7 +52,7 @@ def test_login_success_sets_httponly_cookie(monkeypatch, no_redirects):
     monkeypatch.setattr(coordinator, "login", fake_login)
     r = no_redirects.post("/login", data={"email": "a@b.com", "password": "secret123"})
     assert r.status_code == 303
-    assert r.headers["location"] == "/upload"
+    assert r.headers["location"] == "/jobs/new"
     cookie = r.headers["set-cookie"]
     assert f"{settings.session_cookie}=tok123" in cookie
     assert "HttpOnly" in cookie and "SameSite=lax" in cookie
@@ -80,7 +81,7 @@ def test_login_ignores_offsite_next(monkeypatch, no_redirects, next_url):
     r = no_redirects.post(
         "/login", data={"email": "a@b.com", "password": "secret123", "next": next_url}
     )
-    assert r.headers["location"] == "/upload"
+    assert r.headers["location"] == "/jobs/new"
 
 
 def test_login_follows_local_next(monkeypatch, no_redirects):
@@ -118,7 +119,7 @@ def test_signup_success(monkeypatch, no_redirects):
         },
     )
     assert r.status_code == 303
-    assert r.headers["location"] == "/upload"
+    assert r.headers["location"] == "/jobs/new"
     assert "HttpOnly" in r.headers["set-cookie"]
 
 
@@ -180,7 +181,7 @@ def test_logout_clears_cookie(monkeypatch):
     )
 
 
-PROTECTED = ["/upload", "/jobs", f"/jobs/{UUID(int=1)}", "/account", "/admin/nodes"]
+PROTECTED = ["/jobs/new", "/jobs", f"/jobs/{UUID(int=1)}", "/account", "/admin/nodes"]
 USER = {"id": str(UUID(int=2)), "email": "a@b.com", "role": "USER"}
 ADMIN = {**USER, "role": "ADMIN"}
 
@@ -271,7 +272,7 @@ def test_no_navbar_when_logged_out(no_redirects):
     for path in ("/login", "/signup"):
         html = no_redirects.get(path).text
         assert "<aside" not in html and "<nav" not in html
-        assert "/upload" not in html and "/admin/nodes" not in html
+        assert "/jobs/new" not in html and "/admin/nodes" not in html
         assert "Campus OCR" in html and "idle campus PCs" in html
 
 
@@ -280,7 +281,32 @@ def test_home_redirects_to_login_when_logged_out(no_redirects):
     assert r.status_code == 303 and r.headers["location"] == "/login"
 
 
+# Only Google Fonts may come from elsewhere; scripts and styles are served here.
+ALLOWED_HOSTS = ("https://fonts.googleapis.com", "https://fonts.gstatic.com")
+
+
+def test_pages_load_scripts_and_styles_only_from_this_site(monkeypatch):
+    signed_in = _signed_in(monkeypatch)
+    pages = [client.get("/login").text, client.get("/signup").text]
+    pages += [signed_in.get(path).text for path in ("/jobs/new", "/account")]
+    for html in pages:
+        for url in re.findall(r'<(?:script|link)[^>]*(?:src|href)="([^"]+)"', html):
+            local = url.startswith(("/", "http://testserver/"))
+            assert local or url.startswith(ALLOWED_HOSTS), url
+        assert 'href="http://testserver/static/app.css"' in html
+
+
+def test_built_stylesheet_and_vendored_scripts_are_served():
+    for path in (
+        "app.css",
+        "vendor/basecoat/basecoat.min.js",
+        "vendor/basecoat/sidebar.min.js",
+    ):
+        r = client.get(f"/static/{path}")
+        assert r.status_code == 200 and r.content, path
+
+
 def test_nav_shown_when_logged_in(monkeypatch):
     html = _signed_in(monkeypatch).get("/account").text
-    assert 'href="/upload"' in html and 'href="/jobs"' in html
+    assert 'href="/jobs/new"' in html and 'href="/jobs"' in html
     assert "Log out" in html and 'href="/signup"' not in html

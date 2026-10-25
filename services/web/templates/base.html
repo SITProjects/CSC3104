@@ -1,25 +1,66 @@
 <!doctype html>
+{% from "_macros.html" import icon %}
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Idle-Compute Cloud{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono&display=swap">
+  {# Built from styles/app.css by build-css.sh: Basecoat (shadcn/ui components as
+     CSS classes) plus the Tailwind utilities the pages use. #}
+  <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}">
+  <script src="{{ url_for('static', path='vendor/basecoat/basecoat.min.js') }}" defer></script>
+  <script src="{{ url_for('static', path='vendor/basecoat/sidebar.min.js') }}" defer></script>
 </head>
-<body{% if not signed_in %} class="logged-out"{% endif %}>
+<body>
   {% if signed_in %}
-  <aside>
-    <a class="brand" href="/">Idle-Compute Cloud</a>
-    <nav>
-      {% for label, path in nav_items %}
-      <a href="{{ path }}">{{ label }}</a>
-      {% endfor %}
-    </nav>
-    <nav class="auth">
-      <form class="logout" method="post" action="/logout"><button type="submit" class="link">Log out</button></form>
+  {% set nav_icons = {"/jobs/new": "plus", "/jobs": "list", "/account": "user", "/admin/nodes": "server"} %}
+  {% set nav_paths = nav_items|map(attribute=1)|list %}
+  {% set here = request.url.path %}
+  <aside id="sidebar" class="sidebar" data-side="left">
+    <nav aria-label="Main navigation">
+      <header>
+        <a href="/" class="flex items-center gap-2 px-2 py-1.5 font-semibold">
+          <span class="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">{{ icon("cpu", "size-4") }}</span>
+          Idle-Compute Cloud
+        </a>
+      </header>
+      <section class="scrollbar-sm">
+        <div role="group" aria-labelledby="nav-heading">
+          <h3 id="nav-heading">Campus OCR</h3>
+          <ul>
+            {% for label, path in nav_items %}
+            <li>
+              <a href="{{ path }}"{% if here == path or (here.startswith(path ~ "/") and here not in nav_paths) %} aria-current="page"{% endif %}>
+                {{ icon(nav_icons.get(path, "list")) }}
+                <span>{{ label }}</span>
+              </a>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+      </section>
+      <footer>
+        <form method="post" action="/logout">
+          <button type="submit" class="btn w-full justify-start" data-variant="ghost">{{ icon("log-out") }} Log out</button>
+        </form>
+      </footer>
     </nav>
   </aside>
+  <main class="min-w-0">
+    <header class="sticky top-0 z-10 flex h-14 items-center gap-2 border-b bg-background px-4 md:hidden">
+      <button type="button" class="btn" data-variant="ghost" data-size="icon" aria-label="Open menu"
+              aria-controls="sidebar" onclick="document.getElementById('sidebar').toggle()">{{ icon("panel-left") }}</button>
+      <span class="font-semibold">Idle-Compute Cloud</span>
+    </header>
+    <div class="mx-auto w-full {% block width %}max-w-2xl{% endblock %} px-4 py-8 md:px-8">{% block content %}{% endblock %}</div>
+  </main>
+  {% else %}
+  <main class="flex min-h-screen items-center justify-center px-4 py-12">
+    <div class="w-full max-w-sm">{{ self.content() }}</div>
+  </main>
   {% endif %}
-  <main>{% block content %}{% endblock %}</main>
 </body>
 </html>
