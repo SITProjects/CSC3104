@@ -7,14 +7,17 @@ Set NODE_AGENT_DEMO=1 for the 30-second idle wait.
 """
 
 import asyncio
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import config
 import uvicorn
 from decision import IdleDetector, NodeState, Reading, Transition
 from fastapi import FastAPI
+from heartbeat import Heartbeat
 from pydantic import BaseModel, Field
 from taint import NodeTainter, connect
 
@@ -27,13 +30,43 @@ detector = IdleDetector()
 state_changed = asyncio.Event()
 
 
+def record(event: str, **fields) -> None:
+    """Append one JSON line to the evaluation log. Wall-clock time, so lines can
+    be matched with pod and coordinator timestamps. A failed write is logged
+    and never stops the agent."""
+    if not config.EVENT_LOG:
+        return
+    line = json.dumps(
+        {
+            "time": datetime.now(UTC).isoformat(timespec="milliseconds"),
+            "node": config.NODE_NAME,
+            "event": event,
+            **fields,
+        }
+    )
+    try:
+        with open(config.EVENT_LOG, "a") as file:
+            file.write(line + "\n")
+    except OSError:
+        log.exception("could not write %s", config.EVENT_LOG)
+
+
 def handle(change: Transition | None) -> None:
     """React to a state change."""
     if change is None:
         return
     log.info("%s -> %s (%s)", change.old, change.new, change.reason)
     state_changed.set()
-    # TODO step 5: write the change to the evaluation log file.
+    # The key press came idle_seconds before this line. None when the change
+    # came from a silent sensor, not a reading.
+    last = detector.last_reading
+    record(
+        "state",
+        old=change.old,
+        new=change.new,
+        reason=change.reason,
+        idle_seconds=last.idle_seconds if last else None,
+    )
 
 
 async def keep_taint_in_sync(tainter: NodeTainter) -> None:
@@ -71,6 +104,7 @@ async def keep_taint_in_sync(tainter: NodeTainter) -> None:
                     "added" if wanted is NodeState.BUSY else "removed",
                     tainter.node_name,
                 )
+                record("taint", added=wanted is NodeState.BUSY)
         try:
             await asyncio.wait_for(state_changed.wait(), config.TAINT_RESYNC_S)
         except TimeoutError:
@@ -84,6 +118,20 @@ async def taint_on_exit(tainter: NodeTainter) -> None:
         await asyncio.wait_for(asyncio.to_thread(tainter.close), config.TAINT_RETRY_S)
     except Exception:
         log.exception("could not taint %s on exit", tainter.node_name)
+
+
+async def send_heartbeats(heartbeat: Heartbeat) -> None:
+    """Every HEARTBEAT_S seconds, send the coordinator our state and the
+    Windows host's CPU load (the sensor's, which includes our task pods)."""
+    while True:
+        last = detector.last_reading
+        try:
+            await asyncio.to_thread(
+                heartbeat.send, detector.state, last.cpu_percent if last else 0.0
+            )
+        except Exception:
+            log.exception("heartbeat failed")
+        await asyncio.sleep(config.HEARTBEAT_S)
 
 
 async def watch_for_silence() -> None:
@@ -112,6 +160,17 @@ async def lifespan(app: FastAPI):
         log.info("managing the owner-active taint on node %s", config.NODE_NAME)
     else:
         log.warning("NODE_AGENT_TAINT=0: decisions are only logged, node not tainted")
+    if config.COORDINATOR_URL:
+        heartbeat = Heartbeat(
+            config.COORDINATOR_URL,
+            config.NODE_NAME,
+            config.COORDINATOR_TOKEN_FILE,
+            config.HEARTBEAT_TIMEOUT_S,
+        )
+        tasks.append(asyncio.create_task(send_heartbeats(heartbeat)))
+        log.info("sending heartbeats to %s", heartbeat.url)
+    else:
+        log.warning("COORDINATOR_URL not set: no heartbeats, coordinator sees OFFLINE")
     yield
     for task in tasks:
         task.cancel()
@@ -146,7 +205,7 @@ async def receive_state(reading: SensorReading) -> AgentState:
 
 @app.get("/state")
 async def current_state() -> AgentState:
-    """Latest decision, for checking by hand and for the step 4/5 code."""
+    """Latest decision, for checking by hand."""
     return snapshot()
 
 

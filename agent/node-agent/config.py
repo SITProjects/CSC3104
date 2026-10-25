@@ -42,6 +42,31 @@ TAINT_RETRY_S = _float("NODE_AGENT_TAINT_RETRY_S", 2)
 # removed or added it by hand
 TAINT_RESYNC_S = _float("NODE_AGENT_TAINT_RESYNC_S", 60)
 
+# ---------- coordinator heartbeats ----------
+
+# The coordinator's internal API. The agent runs on the host, not in a pod, so
+# cluster DNS does not work here: use the Service's ClusterIP, from
+#   kubectl -n idlecloud-system get svc coordinator
+# Empty turns heartbeats off.
+COORDINATOR_URL = os.environ.get("COORDINATOR_URL", "").rstrip("/")
+# Node-bound token only the coordinator accepts, written by make-kubeconfig.sh
+COORDINATOR_TOKEN_FILE = os.environ.get(
+    "NODE_AGENT_COORDINATOR_TOKEN", "/etc/idlecloud/coordinator.token"
+)
+# The coordinator marks a node OFFLINE after 30 s without one, so stay well under
+HEARTBEAT_S = _float("NODE_AGENT_HEARTBEAT_S", 10)
+HEARTBEAT_TIMEOUT_S = _float("NODE_AGENT_HEARTBEAT_TIMEOUT_S", 3)
+
+# ---------- evaluation log ----------
+
+# One JSON line per state change and per taint change, for the eviction-speed
+# graph. Next to this file, not the working directory, so it is in the same
+# place however the agent is started. Empty turns it off.
+EVENT_LOG = os.environ.get(
+    "NODE_AGENT_EVENT_LOG",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "node-agent-events.jsonl"),
+)
+
 # ---------- server ----------
 
 # Loopback only: anything that can reach this port can claim the PC is idle, so it
