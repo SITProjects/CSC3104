@@ -11,8 +11,12 @@ set -euo pipefail
 
 NODE="${1:?usage: $0 <node-name> [output-file]}"
 OUT="${2:-node-agent-$NODE.kubeconfig}"
+TOKEN_OUT="coordinator-$NODE.token"
 NS=idlecloud-system
 SA="node-agent-$NODE"
+# Shared by all agents for coordinator heartbeats only; no RBAC rules
+HEARTBEAT_SA=node-agent-heartbeat
+HEARTBEAT_DURATION="${HEARTBEAT_DURATION:-8760h}"
 # The K3s API through WireGuard, not the public IP (6443 is closed to the internet)
 SERVER="${SERVER:-https://10.10.0.1:6443}"
 
@@ -63,7 +67,22 @@ metadata:
   annotations:
     kubernetes.io/service-account.name: $SA
 type: kubernetes.io/service-account-token
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: $HEARTBEAT_SA
+  namespace: $NS
 EOF
+
+# Heartbeat token: only works for sending this node's heartbeats to the
+# coordinator, cannot be used against the cluster, and stops working if the
+# node is removed.
+umask 077
+kubectl -n "$NS" create token "$HEARTBEAT_SA" \
+  --audience idlecloud-coordinator \
+  --bound-object-kind Node --bound-object-name "$NODE" \
+  --duration "$HEARTBEAT_DURATION" >"$TOKEN_OUT"
 
 # The token controller fills the Secret in a moment
 for _ in $(seq 20); do
@@ -74,7 +93,6 @@ done
 [ -n "$TOKEN" ] || { echo "token for $SA was never created" >&2; exit 1; }
 CA=$(kubectl -n "$NS" get secret "$SA-token" -o jsonpath='{.data.ca\.crt}')
 
-umask 077
 cat >"$OUT" <<EOF
 apiVersion: v1
 kind: Config
@@ -95,6 +113,6 @@ contexts:
 current-context: $SA
 EOF
 
-echo "wrote $OUT"
+echo "wrote $OUT and $TOKEN_OUT (heartbeat token, valid $HEARTBEAT_DURATION)"
 echo "check: kubectl auth can-i patch nodes/$NODE --as=system:serviceaccount:$NS:$SA  (yes)"
 echo "       kubectl auth can-i patch nodes --as=system:serviceaccount:$NS:$SA  (no)"
