@@ -66,7 +66,14 @@ def verify_signature(
 
 
 async def save_upload(
-    job_id: UUID, owner_id: str, token: str, filename: str, data: bytes, pages: int
+    job_id: UUID,
+    owner_id: str,
+    token: str,
+    filename: str,
+    data: bytes,
+    pages: int,
+    cpu: int,
+    mem: int,
 ) -> None:
     """
     Stores the PDF so the page splitter starts.
@@ -83,6 +90,8 @@ async def save_upload(
             "token": token,
             "filename": filename,
             "page_count": pages,
+            "cpu_request": cpu,
+            "mem_request": mem,
             "created_at": datetime.now(UTC).isoformat(),
         },
     )
@@ -178,9 +187,15 @@ async def create_job_if_ready(job_id: UUID) -> bool:
     if await asyncio.to_thread(storage.count_pages, job_id) < expected:
         return False
     try:
-        await coordinator.create_job(
-            pending["token"], jobs.job_spec(str(job_id), expected)
+        # uploads saved before users chose resources fall back to the old fixed ones
+        spec = jobs.job_spec(
+            str(job_id),
+            "ocr",
+            pending.get("cpu_request", settings.task_cpu),
+            pending.get("mem_request", settings.task_mem_mib),
+            expected,
         )
+        await coordinator.create_job(pending["token"], spec)
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
         if code == 401:

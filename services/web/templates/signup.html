@@ -1,37 +1,44 @@
 {% extends "base.html" %}
+{% from "_macros.html" import error_alert %}
 {% block title %}Sign up{% endblock %}
 {% block content %}
 {% include "_auth_hero.html" %}
-<section class="auth-card">
-  <h2>Create your account</h2>
-  <p class="lede">Sign up to run OCR on idle campus PCs.</p>
+<div class="card">
+  <header>
+    <h2>Create your account</h2>
+    <p>Sign up to run OCR on idle campus PCs.</p>
+  </header>
+  <section class="grid gap-4">
+    {% if error %}{{ error_alert(error) }}{% endif %}
 
-  {% if error %}
-  <div class="alert" role="alert">{{ error }}</div>
-  {% endif %}
-
-  <form method="post" action="/signup" novalidate>
-    <label>Email
-      <input type="email" name="email" value="{{ email or '' }}"
-             autocomplete="username" autofocus required>
-    </label>
-    <label>Password
-      <span class="password-field">
-        <input type="password" name="password" minlength="8" maxlength="128"
-               autocomplete="new-password" aria-describedby="pw-hint" required>
-        <button type="button" class="toggle-password" aria-label="Show password">Show</button>
-      </span>
-      <small id="pw-hint" class="hint">8 to 128 characters.</small>
-    </label>
-    <label>Confirm password
-      <input type="password" name="confirm_password" minlength="8" maxlength="128"
-             autocomplete="new-password" required>
-    </label>
-    <p class="field-error" id="match-error" role="alert" hidden>Passwords do not match.</p>
-    <button type="submit" class="primary">Create account</button>
-  </form>
-
-  <p class="alt">Already have an account? <a href="/login">Log in</a></p>
-</section>
+    <form method="post" action="/signup" class="grid gap-4" novalidate>
+      <div role="group" class="field">
+        <label class="label" for="email">Email</label>
+        <input class="input" id="email" type="email" name="email" value="{{ email or '' }}"
+               autocomplete="username" autofocus required>
+      </div>
+      <div role="group" class="field">
+        <label class="label" for="password">Password</label>
+        <div class="relative">
+          <input class="input pe-16" id="password" type="password" name="password" minlength="8" maxlength="128"
+                 autocomplete="new-password" aria-describedby="pw-hint" required>
+          <button type="button" class="toggle-password btn absolute end-1 top-1/2 -translate-y-1/2"
+                  data-variant="ghost" data-size="xs" aria-label="Show password">Show</button>
+        </div>
+        <p id="pw-hint">8 to 128 characters.</p>
+      </div>
+      <div role="group" class="field">
+        <label class="label" for="confirm_password">Confirm password</label>
+        <input class="input" id="confirm_password" type="password" name="confirm_password"
+               minlength="8" maxlength="128" autocomplete="new-password" required>
+        <p class="text-destructive" id="match-error" role="alert" hidden>Passwords do not match.</p>
+      </div>
+      <button type="submit" class="btn w-full">Create account</button>
+    </form>
+  </section>
+  <footer class="justify-center text-sm text-muted-foreground">
+    <p>Already have an account? <a class="text-foreground underline underline-offset-4" href="/login">Log in</a></p>
+  </footer>
+</div>
 <script src="{{ url_for('static', path='auth.js') }}" defer></script>
 {% endblock %}

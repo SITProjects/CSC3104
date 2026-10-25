@@ -5,6 +5,7 @@ final text. Nothing here talks to the network, so it is easy to test.
 
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import pymupdf
@@ -20,6 +21,103 @@ ACTIVE_STATES = frozenset({"SCHEDULED", "RUNNING", "DONE"})
 
 class UploadError(ValueError):
     """The upload can't become a job. The message is safe to show to the user."""
+
+
+@dataclass(frozen=True)
+class JobType:
+    """A job type users can pick on the New job page."""
+
+    name: str  # the coordinator's job_types.name
+    label: str
+    description: str
+    needs_pdf: bool
+    # the coordinator's default_cpu and default_mem for this type
+    default_cpu: int
+    default_mem: int
+    # whether users may ask for other CPU and memory; if not, the defaults apply
+    custom_resources: bool
+
+
+# Mirrors the job types seeded in shared/migrations (002 and 003). The coordinator
+# has no endpoint to list them, and it refuses a job_type it doesn't know.
+JOB_TYPES = {
+    t.name: t
+    for t in (
+        JobType(
+            "ocr",
+            "OCR",
+            "Reads the text from every page of a scanned PDF.",
+            needs_pdf=True,
+            default_cpu=1,
+            default_mem=512,
+            # ten pages of Tesseract per task: a steady load these defaults fit
+            custom_resources=False,
+        ),
+        JobType(
+            "test",
+            "Test workload",
+            "Runs a short command that prints one line. Use it to check the cluster.",
+            needs_pdf=False,
+            default_cpu=1,
+            default_mem=64,
+            # changing the request is how to check where the scheduler places a job
+            custom_resources=True,
+        ),
+    )
+}
+
+# The coordinator's limits on one copy of a task (JobSpec in its models.py)
+MIN_CPU, MAX_CPU = 1, 16  # cores
+MIN_MEM, MAX_MEM = 64, 4096  # MiB
+
+
+def parse_job_type(value: str | None) -> JobType:
+    """
+    Finds the job type the user picked.
+
+    raises:
+        UploadError: If nothing, or an unknown type, was picked.
+    """
+    if not value or value not in JOB_TYPES:
+        raise UploadError("Choose a job type.")
+    return JOB_TYPES[value]
+
+
+def _whole_number(
+    value: str | None, default: int, what: str, low: int, high: int
+) -> int:
+    text = (value or "").strip()
+    if not text:
+        return default
+    try:
+        number = int(text)
+    except ValueError:
+        raise UploadError(f"The {what} must be a whole number.") from None
+    if not low <= number <= high:
+        raise UploadError(f"The {what} must be between {low} and {high}.")
+    return number
+
+
+def parse_resources(
+    job_type: JobType, cpu: str | None, mem: str | None
+) -> tuple[int, int]:
+    """
+    Picks the CPU and memory for a job. Types that don't allow custom resources
+    always get their defaults, and so does a blank field.
+
+    returns:
+        tuple: (cores, MiB).
+    raises:
+        UploadError: If either is given but not a whole number or out of range.
+    """
+    if not job_type.custom_resources:
+        return job_type.default_cpu, job_type.default_mem
+    return (
+        _whole_number(
+            cpu, job_type.default_cpu, "number of CPU cores", MIN_CPU, MAX_CPU
+        ),
+        _whole_number(mem, job_type.default_mem, "memory in MiB", MIN_MEM, MAX_MEM),
+    )
 
 
 class ResultUnavailable(RuntimeError):
@@ -79,16 +177,30 @@ def build_tasks(page_count: int) -> list[dict[str, Any]]:
     ]
 
 
-def job_spec(job_id: str, page_count: int) -> dict[str, Any]:
-    """The body for the coordinator's POST /jobs. Users never choose resources."""
+def job_spec(
+    job_id: str, job_type: str, cpu: int, mem: int, page_count: int = 0
+) -> dict[str, Any]:
+    """
+    The body for the coordinator's POST /jobs.
+
+    args:
+        job_type: "ocr" splits page_count pages into tasks; any other type runs
+            one task with no input.
+        cpu: Cores for each copy of a task.
+        mem: MiB for each copy of a task.
+    """
+    if job_type == "ocr":
+        params, tasks = {"page_count": page_count}, build_tasks(page_count)
+    else:
+        params, tasks = {}, [{"input": {}}]
     return {
         "job_id": job_id,
-        "job_type": "ocr",
-        "params": {"page_count": page_count},
-        "tasks": build_tasks(page_count),
+        "job_type": job_type,
+        "params": params,
+        "tasks": tasks,
         "replicas_per_task": settings.replicas_per_task,
-        "cpu_request": settings.task_cpu,
-        "mem_request": settings.task_mem_mib,
+        "cpu_request": cpu,
+        "mem_request": mem,
     }
 
 

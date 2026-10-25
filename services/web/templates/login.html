@@ -1,31 +1,38 @@
 {% extends "base.html" %}
+{% from "_macros.html" import error_alert %}
 {% block title %}Log in{% endblock %}
 {% block content %}
 {% include "_auth_hero.html" %}
-<section class="auth-card">
-  <h2>Welcome back</h2>
-  <p class="lede">Log in to upload PDFs and follow your OCR jobs.</p>
+<div class="card">
+  <header>
+    <h2>Welcome back</h2>
+    <p>Log in to upload PDFs and follow your OCR jobs.</p>
+  </header>
+  <section class="grid gap-4">
+    {% if error %}{{ error_alert(error) }}{% endif %}
 
-  {% if error %}
-  <div class="alert" role="alert">{{ error }}</div>
-  {% endif %}
-
-  <form method="post" action="/login" novalidate>
-    <input type="hidden" name="next" value="{{ next or '' }}">
-    <label>Email
-      <input type="email" name="email" value="{{ email or '' }}"
-             autocomplete="username" autofocus required>
-    </label>
-    <label>Password
-      <span class="password-field">
-        <input type="password" name="password" autocomplete="current-password" required>
-        <button type="button" class="toggle-password" aria-label="Show password">Show</button>
-      </span>
-    </label>
-    <button type="submit" class="primary">Log in</button>
-  </form>
-
-  <p class="alt">New here? <a href="/signup">Create an account</a></p>
-</section>
+    <form method="post" action="/login" class="grid gap-4" novalidate>
+      <input type="hidden" name="next" value="{{ next or '' }}">
+      <div role="group" class="field">
+        <label class="label" for="email">Email</label>
+        <input class="input" id="email" type="email" name="email" value="{{ email or '' }}"
+               autocomplete="username" autofocus required>
+      </div>
+      <div role="group" class="field">
+        <label class="label" for="password">Password</label>
+        <div class="relative">
+          <input class="input pe-16" id="password" type="password" name="password"
+                 autocomplete="current-password" required>
+          <button type="button" class="toggle-password btn absolute end-1 top-1/2 -translate-y-1/2"
+                  data-variant="ghost" data-size="xs" aria-label="Show password">Show</button>
+        </div>
+      </div>
+      <button type="submit" class="btn w-full">Log in</button>
+    </form>
+  </section>
+  <footer class="justify-center text-sm text-muted-foreground">
+    <p>New here? <a class="text-foreground underline underline-offset-4" href="/signup">Create an account</a></p>
+  </footer>
+</div>
 <script src="{{ url_for('static', path='auth.js') }}" defer></script>
 {% endblock %}

@@ -16,6 +16,16 @@
   };
   const label = (s) => STATUS_TEXT[s] || s;
 
+  // Keep the colours in step with status_badge in templates/_macros.html.
+  const TONE = {
+    RUNNING: "bg-blue-100 text-blue-800", SCHEDULED: "bg-blue-100 text-blue-800",
+    PREPARING: "bg-blue-100 text-blue-800", VOTING: "bg-blue-100 text-blue-800",
+    COMPLETED: "bg-green-100 text-green-800", VERIFIED: "bg-green-100 text-green-800",
+    DONE: "bg-green-100 text-green-800",
+    EVICTED: "bg-amber-100 text-amber-800", LOST: "bg-amber-100 text-amber-800",
+  };
+  const DESTRUCTIVE = new Set(["FAILED", "DISPUTED", "CANCELLED"]);
+
   function el(tag, className, text) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -23,17 +33,22 @@
     return node;
   }
 
-  function badge(status) {
-    return el("span", `badge badge-${status.toLowerCase()}`, label(status));
+  function styleBadge(node, status) {
+    node.className = `badge ${TONE[status] || ""}`.trim();
+    node.dataset.variant = DESTRUCTIVE.has(status) ? "destructive" : "secondary";
+    node.textContent = label(status);
+    return node;
   }
 
+  const badge = (status) => styleBadge(el("span"), status);
+
   function bar(value) {
-    const wrap = el("div", "mini-progress");
-    const p = el("progress");
+    const wrap = el("div", "flex min-w-32 items-center gap-2");
+    const p = el("progress", "h-1.5 w-full appearance-none overflow-hidden rounded-full bg-muted [&::-webkit-progress-bar]:bg-muted [&::-webkit-progress-value]:bg-primary [&::-moz-progress-bar]:bg-primary");
     p.max = 100;
     p.value = value;
     p.setAttribute("aria-label", `${value}%`);
-    wrap.append(p, el("span", "hint", `${value}%`));
+    wrap.append(p, el("span", "text-xs tabular-nums text-muted-foreground", `${value}%`));
     return wrap;
   }
 
@@ -46,13 +61,13 @@
   }
 
   function copyItem(r) {
-    const item = el("li", "copy");
-    item.append(el("span", "node", r.node || "–"), " · ", badge(copyState(r)));
+    const item = el("li", "flex flex-wrap items-center gap-1.5");
+    item.append(el("span", "font-medium", r.node || "–"), " · ", badge(copyState(r)));
     if (r.status === "RUNNING" && r.node) item.append(` ${r.progress}%`);
     if (r.restarts > 0) {
       // counts every relaunch: an eviction, a lost pod or a failed launch
       const n = r.restarts;
-      item.append(el("span", "restart", ` ↻ ${n} ${n === 1 ? "retry" : "retries"}`));
+      item.append(el("span", "text-xs text-amber-700", `↻ ${n} ${n === 1 ? "retry" : "retries"}`));
     }
     return item;
   }
@@ -74,14 +89,14 @@
 
   function renderTask(task) {
     const row = el("tr");
-    row.append(el("th", null, `#${task.index + 1}`));
+    row.append(el("th", "tabular-nums", `#${task.index + 1}`));
     row.firstChild.scope = "row";
     const status = el("td");
     status.append(badge(taskState(task)));
     const progress = el("td");
     progress.append(bar(task.progress));
     const copies = el("td");
-    const list = el("ul", "copies");
+    const list = el("ul", "grid gap-1.5");
     task.replicas.forEach((r) => list.append(copyItem(r)));
     copies.append(list);
     row.append(status, progress, copies, el("td", null, voteText(task)));
@@ -89,14 +104,12 @@
   }
 
   function render(job) {
-    const badgeEl = $("status-badge");
-    badgeEl.className = `badge badge-${job.status.toLowerCase()}`;
-    badgeEl.textContent = label(job.status);
+    styleBadge($("status-badge"), job.status);
 
     $("overall").value = job.progress;
     const err = $("job-error");
     err.hidden = !job.error;
-    err.textContent = job.error || "";
+    $("job-error-text").textContent = job.error || "";
 
     let text;
     if (job.stage === "preparing") text = "Preparing your pages. This usually takes under a minute.";

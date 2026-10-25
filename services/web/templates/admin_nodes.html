@@ -1,22 +1,24 @@
 {% extends "base.html" %}
+{% from "_macros.html" import error_alert, status_badge %}
 {% block title %}Admin: nodes{% endblock %}
+{% block width %}max-w-7xl{% endblock %}
 {% block content %}
-<h1>Admin: nodes</h1>
+<h1 class="text-2xl font-semibold tracking-tight">Admin: nodes</h1>
 {% if error %}
-<p role="alert">{{ error }}</p>
+<div class="mt-6">{{ error_alert(error) }}</div>
 {% else %}
 {% macro money(value) -%}
   {% if value is none %}Unknown{% else %}${{ "%.6f"|format(value|float) }}{% endif %}
 {%- endmacro %}
-<p>Burst workers and estimated cost per job in USD. Updated {{ burst.observed_at }}.</p>
-<p>Costs use the saved instance and disk rate, allocated by requested CPU and run time.
+<p class="mt-2 text-muted-foreground">Burst workers and estimated cost per job in USD. Updated {{ burst.observed_at }}.</p>
+<p class="mt-2 text-sm text-muted-foreground">Costs use the saved instance and disk rate, allocated by requested CPU and run time.
   Spot costs use the On-Demand rate as an upper estimate. Boot and idle time remain unattributed.
   Figures may be incomplete if a task pod was not observed.</p>
 
-<section aria-labelledby="burst-workers">
-  <h2 id="burst-workers">Burst workers ({{ burst.machine_count }})</h2>
-  <div class="table-scroll" tabindex="0" role="region" aria-label="Burst workers">
-    <table>
+<section class="mt-8 grid gap-3" aria-labelledby="burst-workers">
+  <h2 id="burst-workers" class="text-lg font-semibold">Burst workers ({{ burst.machine_count }})</h2>
+  <div class="table-container" tabindex="0" role="region" aria-label="Burst workers">
+    <table class="table">
       <caption>Recorded active workers first, then recent history</caption>
       <thead><tr>
         <th scope="col">Worker / instance</th><th scope="col">Type / market</th>
@@ -27,64 +29,64 @@
       <tbody>
       {% for machine in burst.machines %}
         <tr>
-          <td>{{ machine.node_name }}<br><small>{{ machine.instance_id }} · slot {{ machine.slot }}</small></td>
-          <td>{{ machine.machine }}<br><small>{{ machine.market or "Unknown market" }}</small></td>
+          <td>{{ machine.node_name }}<br><small class="text-muted-foreground">{{ machine.instance_id }} · slot {{ machine.slot }}</small></td>
+          <td>{{ machine.machine }}<br><small class="text-muted-foreground">{{ machine.market or "Unknown market" }}</small></td>
           <td>{{ "Active record" if machine.running else "Ended" }}
             {% if machine.state %}<br>{{ machine.state }}{% endif %}
             {% if machine.trust_score is not none %}<br>Trust {{ "%.3f"|format(machine.trust_score|float) }}{% endif %}
             {% if machine.cpu_percent is not none %}<br>CPU {{ "%.1f"|format(machine.cpu_percent) }}%{% endif %}
-            {% if machine.last_heartbeat %}<br><small>Heartbeat {{ machine.last_heartbeat }}</small>{% endif %}
+            {% if machine.last_heartbeat %}<br><small class="text-muted-foreground">Heartbeat {{ machine.last_heartbeat }}</small>{% endif %}
           </td>
-          <td><small>{{ machine.launched_at }}<br>to {{ machine.ended_at or "ongoing" }}</small></td>
+          <td><small class="text-muted-foreground">{{ machine.launched_at }}<br>to {{ machine.ended_at or "ongoing" }}</small></td>
           <td>{{ money(machine.usd_per_hour) }}</td>
           <td>{{ money(machine.total_usd) }}</td>
           <td>{{ money(machine.attributed_usd) }}
-            {% if machine.has_estimated_runs %}<br><small>Open run estimate</small>{% endif %}
-            {% if machine.has_unknown_price %}<br><small>Incomplete pricing</small>{% endif %}
+            {% if machine.has_estimated_runs %}<br><small class="text-muted-foreground">Open run estimate</small>{% endif %}
+            {% if machine.has_unknown_price %}<br><small class="text-muted-foreground">Incomplete pricing</small>{% endif %}
           </td>
           <td>{{ money(machine.unattributed_usd) }}</td>
         </tr>
       {% else %}
-        <tr><td colspan="8">No burst workers recorded on this page.</td></tr>
+        <tr><td colspan="8" class="text-muted-foreground">No burst workers recorded on this page.</td></tr>
       {% endfor %}
       </tbody>
     </table>
   </div>
-  <nav class="pagination" aria-label="Worker pages">
-    {% if machine_offset > 0 %}<a href="?machine_offset={{ [0, machine_offset - page_size]|max }}&amp;job_offset={{ job_offset }}">Previous workers</a>{% endif %}
-    {% if machine_offset + page_size < burst.machine_count %}<a href="?machine_offset={{ machine_offset + page_size }}&amp;job_offset={{ job_offset }}">Next workers</a>{% endif %}
+  <nav class="flex gap-2" aria-label="Worker pages">
+    {% if machine_offset > 0 %}<a class="btn" data-variant="outline" data-size="sm" href="?machine_offset={{ [0, machine_offset - page_size]|max }}&amp;job_offset={{ job_offset }}">Previous workers</a>{% endif %}
+    {% if machine_offset + page_size < burst.machine_count %}<a class="btn" data-variant="outline" data-size="sm" href="?machine_offset={{ machine_offset + page_size }}&amp;job_offset={{ job_offset }}">Next workers</a>{% endif %}
   </nav>
 </section>
 
-<section aria-labelledby="burst-jobs">
-  <h2 id="burst-jobs">Cost per job ({{ burst.job_count }})</h2>
-  <div class="table-scroll" tabindex="0" role="region" aria-label="Cost per job">
-    <table>
+<section class="mt-8 grid gap-3" aria-labelledby="burst-jobs">
+  <h2 id="burst-jobs" class="text-lg font-semibold">Cost per job ({{ burst.job_count }})</h2>
+  <div class="table-container" tabindex="0" role="region" aria-label="Cost per job">
+    <table class="table">
       <caption>All jobs, newest first. Zero means no burst run was seen.</caption>
       <thead><tr><th scope="col">Job</th><th scope="col">Status</th><th scope="col">Burst runs</th><th scope="col">Estimated cost (USD)</th></tr></thead>
       <tbody>
       {% for job in burst.jobs %}
         <tr>
-          <td><a href="/jobs/{{ job.job_id }}">{{ job.job_id }}</a><br><small>{{ job.job_type }}</small></td>
-          <td>{{ job.status }}</td>
+          <td><a class="font-mono font-medium underline-offset-4 hover:underline" href="/jobs/{{ job.job_id }}">{{ job.job_id }}</a><br><small class="text-muted-foreground">{{ job.job_type }}</small></td>
+          <td>{{ status_badge(job.status) }}</td>
           <td>{{ job.runs }}</td>
           <td>{{ money(job.usd) }}
-            {% if job.has_unknown_price %}<br><small>Incomplete pricing{% if job.usd is not none %}: known subtotal only{% endif %}</small>{% endif %}
-            {% if job.has_estimated_runs %}<br><small>Includes runs without a recorded finish</small>{% endif %}
+            {% if job.has_unknown_price %}<br><small class="text-muted-foreground">Incomplete pricing{% if job.usd is not none %}: known subtotal only{% endif %}</small>{% endif %}
+            {% if job.has_estimated_runs %}<br><small class="text-muted-foreground">Includes runs without a recorded finish</small>{% endif %}
           </td>
         </tr>
       {% else %}
-        <tr><td colspan="4">No jobs on this page.</td></tr>
+        <tr><td colspan="4" class="text-muted-foreground">No jobs on this page.</td></tr>
       {% endfor %}
       </tbody>
     </table>
   </div>
-  <nav class="pagination" aria-label="Job pages">
-    {% if job_offset > 0 %}<a href="?machine_offset={{ machine_offset }}&amp;job_offset={{ [0, job_offset - page_size]|max }}">Previous jobs</a>{% endif %}
-    {% if job_offset + page_size < burst.job_count %}<a href="?machine_offset={{ machine_offset }}&amp;job_offset={{ job_offset + page_size }}">Next jobs</a>{% endif %}
+  <nav class="flex gap-2" aria-label="Job pages">
+    {% if job_offset > 0 %}<a class="btn" data-variant="outline" data-size="sm" href="?machine_offset={{ machine_offset }}&amp;job_offset={{ [0, job_offset - page_size]|max }}">Previous jobs</a>{% endif %}
+    {% if job_offset + page_size < burst.job_count %}<a class="btn" data-variant="outline" data-size="sm" href="?machine_offset={{ machine_offset }}&amp;job_offset={{ job_offset + page_size }}">Next jobs</a>{% endif %}
   </nav>
 </section>
-<p><small>Active means no end time has been recorded yet. Heartbeats may be stale.
+<p class="mt-8"><small class="text-muted-foreground">Active means no end time has been recorded yet. Heartbeats may be stale.
   Historical workers do not show a replacement worker's state or trust.
   Unattributed cost can be negative when the estimated records disagree.</small></p>
 {% endif %}

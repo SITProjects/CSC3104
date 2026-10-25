@@ -1,25 +1,98 @@
 <!doctype html>
+{% from "_macros.html" import icon %}
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Idle-Compute Cloud{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono&display=swap">
+  {# Basecoat (basecoatui.com): shadcn/ui components as plain CSS classes. #}
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/basecoat-css@1.0.2/dist/basecoat.cdn.min.css">
+  {# Basecoat's CDN file has no layout utilities (flex, gap-4, ...), so Tailwind's
+     browser build makes them from the classes on the page. The @theme blocks
+     point Tailwind at Basecoat's tokens so classes like text-muted-foreground
+     match the components. #}
+  <style type="text/tailwindcss">
+    /* Tailwind's reset loads after Basecoat's and would undo these two rules. */
+    @layer base {
+      * { border-color: var(--color-border); outline-color: var(--color-ring); }
+      body { background-color: var(--color-background); color: var(--color-foreground); }
+    }
+    @theme static {
+      --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+      --font-mono: "Geist Mono", ui-monospace, monospace;
+    }
+    @theme inline {
+      --radius-sm: calc(var(--radius) - 4px);
+      --radius-md: calc(var(--radius) - 2px);
+      --radius-lg: var(--radius);
+      --radius-xl: calc(var(--radius) + 4px);
+      --color-background: var(--background);
+      --color-foreground: var(--foreground);
+      --color-card: var(--card);
+      --color-primary: var(--primary);
+      --color-primary-foreground: var(--primary-foreground);
+      --color-muted: var(--muted);
+      --color-muted-foreground: var(--muted-foreground);
+      --color-accent: var(--accent);
+      --color-destructive: var(--destructive);
+      --color-border: var(--border);
+      --color-ring: var(--ring);
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/basecoat-css@1.0.2/dist/js/basecoat.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/basecoat-css@1.0.2/dist/js/sidebar.min.js" defer></script>
 </head>
-<body{% if not signed_in %} class="logged-out"{% endif %}>
+<body>
   {% if signed_in %}
-  <aside>
-    <a class="brand" href="/">Idle-Compute Cloud</a>
-    <nav>
-      {% for label, path in nav_items %}
-      <a href="{{ path }}">{{ label }}</a>
-      {% endfor %}
-    </nav>
-    <nav class="auth">
-      <form class="logout" method="post" action="/logout"><button type="submit" class="link">Log out</button></form>
+  {% set nav_icons = {"/jobs/new": "plus", "/jobs": "list", "/account": "user", "/admin/nodes": "server"} %}
+  {% set nav_paths = nav_items|map(attribute=1)|list %}
+  {% set here = request.url.path %}
+  <aside id="sidebar" class="sidebar" data-side="left">
+    <nav aria-label="Main navigation">
+      <header>
+        <a href="/" class="flex items-center gap-2 px-2 py-1.5 font-semibold">
+          <span class="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">{{ icon("cpu", "size-4") }}</span>
+          Idle-Compute Cloud
+        </a>
+      </header>
+      <section class="scrollbar-sm">
+        <div role="group" aria-labelledby="nav-heading">
+          <h3 id="nav-heading">Campus OCR</h3>
+          <ul>
+            {% for label, path in nav_items %}
+            <li>
+              <a href="{{ path }}"{% if here == path or (here.startswith(path ~ "/") and here not in nav_paths) %} aria-current="page"{% endif %}>
+                {{ icon(nav_icons.get(path, "list")) }}
+                <span>{{ label }}</span>
+              </a>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+      </section>
+      <footer>
+        <form method="post" action="/logout">
+          <button type="submit" class="btn w-full justify-start" data-variant="ghost">{{ icon("log-out") }} Log out</button>
+        </form>
+      </footer>
     </nav>
   </aside>
+  <main class="min-w-0">
+    <header class="sticky top-0 z-10 flex h-14 items-center gap-2 border-b bg-background px-4 md:hidden">
+      <button type="button" class="btn" data-variant="ghost" data-size="icon" aria-label="Open menu"
+              aria-controls="sidebar" onclick="document.getElementById('sidebar').toggle()">{{ icon("panel-left") }}</button>
+      <span class="font-semibold">Idle-Compute Cloud</span>
+    </header>
+    <div class="mx-auto w-full {% block width %}max-w-2xl{% endblock %} px-4 py-8 md:px-8">{% block content %}{% endblock %}</div>
+  </main>
+  {% else %}
+  <main class="flex min-h-screen items-center justify-center px-4 py-12">
+    <div class="w-full max-w-sm">{{ self.content() }}</div>
+  </main>
   {% endif %}
-  <main>{% block content %}{% endblock %}</main>
 </body>
 </html>

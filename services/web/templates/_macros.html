@@ -1,0 +1,38 @@
+{# Shared bits of markup. Import with {% from "_macros.html" import icon %}. #}
+
+{# Lucide icons (lucide.dev, ISC licence), inlined because Basecoat ships none. #}
+{% macro icon(name, class="") -%}
+{%- set paths = {
+  "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
+  "upload": '<path d="M12 3v12"/><path d="m17 8-5-5-5 5"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>',
+  "download": '<path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/>',
+  "list": '<path d="M3 5h.01"/><path d="M3 12h.01"/><path d="M3 19h.01"/><path d="M8 5h13"/><path d="M8 12h13"/><path d="M8 19h13"/>',
+  "user": '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  "server": '<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',
+  "cpu": '<path d="M12 20v2"/><path d="M12 2v2"/><path d="M17 20v2"/><path d="M17 2v2"/><path d="M2 12h2"/><path d="M2 17h2"/><path d="M2 7h2"/><path d="M20 12h2"/><path d="M20 17h2"/><path d="M20 7h2"/><path d="M7 20v2"/><path d="M7 2v2"/><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="8" y="8" width="8" height="8" rx="1"/>',
+  "log-out": '<path d="m16 17 5-5-5-5"/><path d="M21 12H9"/><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>',
+  "panel-left": '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/>',
+  "circle-alert": '<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>',
+} -%}
+<svg class="lucide {{ class }}" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{{ paths[name]|safe }}</svg>
+{%- endmacro %}
+
+{# Error box. The text sits in its own element so scripts can change it without
+   removing the icon. #}
+{% macro error_alert(message, id=none) -%}
+<div {% if id %}id="{{ id }}" {% endif %}class="alert" data-variant="destructive" role="alert" {% if not message %}hidden{% endif %}>
+  {{- icon("circle-alert") -}}
+  <h2 {% if id %}id="{{ id }}-text"{% endif %}>{{ message or "" }}</h2>
+</div>
+{%- endmacro %}
+
+{# Status pill. Keep the colours in step with styleBadge in static/job.js. #}
+{% macro status_badge(status) -%}
+{%- set s = status|upper -%}
+{%- set tone = "" -%}
+{%- if s in ("RUNNING", "SCHEDULED", "PREPARING", "VOTING") -%}{% set tone = "bg-blue-100 text-blue-800" %}
+{%- elif s in ("COMPLETED", "VERIFIED", "DONE") -%}{% set tone = "bg-green-100 text-green-800" %}
+{%- elif s in ("EVICTED", "LOST") -%}{% set tone = "bg-amber-100 text-amber-800" %}
+{%- endif -%}
+<span class="badge {{ tone }}" data-variant="{{ 'destructive' if s in ('FAILED', 'DISPUTED', 'CANCELLED') else 'secondary' }}">{{ status|lower|capitalize }}</span>
+{%- endmacro %}

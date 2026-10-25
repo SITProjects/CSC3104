@@ -2,12 +2,19 @@
 
 Owner: member 5.
 
-Provide PDF uploads, the public job API, page-ready callbacks, live progress,
+Provide the New job page (`/jobs/new`: pick a job type, upload a PDF for OCR,
+and choose CPU and memory where the job type allows it), the public job API, page-ready callbacks, live progress,
 result downloads, and the node administration view. Calculate workload resource
 requests and pass jobs to the coordinator.
 
-Jinja2 templates are in `templates/`, plain CSS/JavaScript in `static/`. The OCR
+Jinja2 templates are in `templates/`, plain JavaScript in `static/`. The OCR
 workload lives separately in `worker/ocr-task/`.
+
+Styling uses [Basecoat](https://basecoatui.com) (shadcn/ui components as CSS
+classes such as `btn`, `card`, `badge` and `table`) plus Tailwind utility
+classes. Both load from a CDN in `templates/base.html`, so there is no CSS build
+step and no stylesheet of our own. Shared markup (icons, status badges, error
+alerts) is in `templates/_macros.html`.
 
 ## Run locally
 

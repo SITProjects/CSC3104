@@ -1,24 +1,52 @@
-// Upload page: check the file before sending, show upload progress, and put any
-// server error on the page. Without JavaScript the form still posts normally.
+// New job page: show the fields the chosen job type needs, check a PDF before
+// sending it, show upload progress, and put any server error on the page.
+// Without JavaScript the form still posts normally and the server checks it all.
 (() => {
-  const form = document.getElementById("upload-form");
+  const form = document.getElementById("job-form");
   if (!form) return;
-  const input = document.getElementById("file");
-  const title = document.getElementById("file-title");
-  const errorBox = document.getElementById("upload-error");
-  const submit = document.getElementById("upload-submit");
-  const progress = document.getElementById("upload-progress");
-  const bar = document.getElementById("upload-bar");
-  const status = document.getElementById("upload-status");
+  const $ = (id) => document.getElementById(id);
+  const typeSelect = $("job_type");
+  const typeHint = $("job-type-hint");
+  const pdfSection = $("pdf-section");
+  const resources = $("resources-section");
+  const input = $("file");
+  const title = $("file-title");
+  const errorBox = $("form-error");
+  const errorText = $("form-error-text");
+  const submit = $("job-submit");
+  const progress = $("upload-progress");
+  const bar = $("upload-bar");
+  const status = $("upload-status");
   const maxBytes = Number(form.dataset.maxBytes);
   const maxMb = form.dataset.maxMb;
 
   const showError = (message) => {
-    errorBox.textContent = message;
+    errorText.textContent = message;
     errorBox.hidden = !message;
   };
   const size = (bytes) =>
     bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`;
+  const chosen = () => typeSelect.selectedOptions[0]?.dataset ?? {};
+  const needsPdf = () => chosen().needsPdf === "true";
+
+  // Hidden fields are also disabled, so they are neither checked nor sent.
+  function showFieldsFor() {
+    const type = chosen();
+    if (type.description) typeHint.textContent = type.description;
+    pdfSection.hidden = type.needsPdf !== "true";
+    input.disabled = pdfSection.hidden;
+    input.required = !pdfSection.hidden;
+    resources.hidden = type.customResources !== "true";
+    for (const field of resources.querySelectorAll("input")) {
+      field.disabled = resources.hidden;
+      field.placeholder = `Default: ${type[field.name] ?? ""}`;
+    }
+  }
+  typeSelect.addEventListener("change", () => {
+    showFieldsFor();
+    showError("");
+  });
+  showFieldsFor();
 
   // Returns a problem with the chosen file, or "" if it looks fine.
   const problem = (file) => {
@@ -36,14 +64,27 @@
   });
 
   form.addEventListener("submit", (event) => {
-    const file = input.files[0];
-    const message = problem(file);
-    if (message) {
+    if (!typeSelect.value) {
       event.preventDefault();
+      showError("Choose a job type.");
+      return;
+    }
+    if (!form.checkValidity()) {
+      event.preventDefault();
+      form.reportValidity();
+      return;
+    }
+    // A job without an upload is quick, so let the browser post it as usual.
+    if (!needsPdf()) {
+      submit.disabled = true;
+      return;
+    }
+    const message = problem(input.files[0]);
+    event.preventDefault();
+    if (message) {
       showError(message);
       return;
     }
-    event.preventDefault();
     showError("");
     submit.disabled = true;
     progress.hidden = false;
@@ -69,7 +110,7 @@
         return;
       }
       const doc = new DOMParser().parseFromString(xhr.responseText, "text/html");
-      const alert = doc.querySelector(".alert");
+      const alert = doc.querySelector("#form-error:not([hidden])");
       fail(alert ? alert.textContent.trim() : "The upload failed. Please try again.");
     });
     xhr.addEventListener("error", () => fail("The upload was interrupted. Please try again."));
