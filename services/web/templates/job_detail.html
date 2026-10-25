@@ -20,6 +20,40 @@
 
   {{ error_alert(none, "job-error") }}
 
+  {# The stages every job moves through. job.js marks each one done, current or
+     failed; "prepare" only applies to PDF uploads and is hidden for other types. #}
+  {% set stages = [
+    ("submitted", "Submitted", "We have your job."),
+    ("prepare", "Preparing pages", "Each page of the PDF is turned into an image."),
+    ("queue", "Queued", "Waiting for idle lab PCs to pick up the tasks."),
+    ("run", "Running", "Each task runs on three PCs. A copy moves if a PC's owner returns."),
+    ("check", "Checking results", "The copies vote. A task is verified when most of them agree."),
+    ("done", "Completed", "The result is ready."),
+  ] %}
+  <section class="card" aria-labelledby="stages-heading">
+    <section>
+      <h2 id="stages-heading" class="sr-only">Job stages</h2>
+      <ol id="stages" class="grid gap-5 lg:auto-cols-fr lg:grid-flow-col lg:gap-3">
+        {% for step, title, description in stages %}
+        <li id="stage-{{ step }}" class="group relative flex gap-3 lg:flex-col" data-step="{{ step }}" data-state="{{ 'done' if loop.first else 'todo' }}">
+          {# line to the next step: down on narrow screens, across on wide ones #}
+          <span aria-hidden="true" class="absolute top-9 -bottom-5 left-3.5 w-0.5 bg-border group-last:hidden group-data-[state=done]:bg-primary lg:top-3.5 lg:-right-3 lg:bottom-auto lg:left-9 lg:h-0.5 lg:w-auto"></span>
+          <span aria-hidden="true" class="relative flex size-7 shrink-0 items-center justify-center rounded-full border-2 bg-background text-xs font-semibold text-muted-foreground group-data-[state=current]:border-primary group-data-[state=current]:text-foreground group-data-[state=done]:border-primary group-data-[state=done]:bg-primary group-data-[state=done]:text-primary-foreground group-data-[state=failed]:border-destructive group-data-[state=failed]:bg-destructive group-data-[state=failed]:text-white">
+            <span data-number class="group-data-[state=done]:hidden group-data-[state=failed]:hidden">{{ loop.index }}</span>
+            {{ icon("check", "hidden size-4 group-data-[state=done]:block") }}
+            {{ icon("x", "hidden size-4 group-data-[state=failed]:block") }}
+          </span>
+          <div class="min-w-0 pe-2">
+            <p class="text-sm font-medium group-data-[state=todo]:text-muted-foreground">{{ title }}
+              <span class="sr-only" data-state-label>{{ "done" if loop.first else "not started" }}</span></p>
+            <p class="mt-0.5 text-xs text-muted-foreground">{{ description }}</p>
+          </div>
+        </li>
+        {% endfor %}
+      </ol>
+    </section>
+  </section>
+
   <section class="card" aria-label="Overall progress" aria-live="polite">
     <section class="grid gap-3">
       <progress id="overall" class="h-2 w-full appearance-none overflow-hidden rounded-full bg-muted [&::-webkit-progress-bar]:bg-muted [&::-webkit-progress-value]:bg-primary [&::-moz-progress-bar]:bg-primary" max="100" value="0" aria-label="Overall progress"></progress>
@@ -36,7 +70,7 @@
 
   <section id="tasks-section" class="grid gap-3" aria-labelledby="tasks-heading" hidden>
     <h2 id="tasks-heading" class="text-lg font-semibold">Tasks</h2>
-    <p class="text-sm text-muted-foreground">Each task runs on three different PCs. A task is verified when most of them return the same text. If a PC's owner comes back, its copy moves elsewhere and carries on from where it stopped.</p>
+    <p class="text-sm text-muted-foreground">One row per task, with the PCs running its copies and how their vote went.</p>
     <div class="table-container" tabindex="0" role="region" aria-label="Tasks">
       <table class="table">
         <thead><tr>

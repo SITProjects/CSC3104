@@ -179,6 +179,7 @@ def test_progress_view_completed_is_terminal_and_full():
 def test_preparing_view_states():
     waiting = jobs.preparing_view({"state": "rendering"}, "id1")
     assert (waiting["stage"], waiting["terminal"]) == ("preparing", False)
+    assert waiting["job_type"] == "ocr"  # the page shows the preparing stage
     failed = jobs.preparing_view({"state": "failed", "error": "Password"}, "id1")
     assert (failed["stage"], failed["terminal"], failed["error"]) == (
         "failed",

@@ -79,6 +79,36 @@
     return started ? "RUNNING" : "PENDING";
   }
 
+  // The job's stages, in order; see the stages list in templates/job_detail.html.
+  const STAGE_TEXT = { done: "done", current: "in progress", todo: "not started" };
+  const CHECKING = new Set(["VOTING", "VERIFIED", "DISPUTED", "FAILED"]);
+
+  // Which stage the job is at now.
+  function currentStage(job) {
+    if (job.stage === "preparing" || job.stage === "failed") return "prepare";
+    if (job.status === "COMPLETED") return "done";
+    if (!job.tasks.some((t) => taskState(t) !== "PENDING")) return "queue";
+    return job.tasks.every((t) => CHECKING.has(t.status)) ? "check" : "run";
+  }
+
+  function renderStages(job) {
+    $("stage-prepare").hidden = job.job_type !== "ocr";
+    const steps = [...document.querySelectorAll("#stages > li:not([hidden])")];
+    const at = steps.findIndex((li) => li.dataset.step === currentStage(job));
+    const stopped = job.status === "FAILED" || job.status === "CANCELLED";
+    steps.forEach((li, i) => {
+      let state = i < at ? "done" : i > at ? "todo" : "current";
+      if (state === "current" && stopped) state = "failed";
+      if (state === "current" && li.dataset.step === "done") state = "done";
+      li.dataset.state = state;
+      if (state === "current" || state === "failed") li.setAttribute("aria-current", "step");
+      else li.removeAttribute("aria-current");
+      li.querySelector("[data-number]").textContent = i + 1;
+      li.querySelector("[data-state-label]").textContent =
+        state === "failed" ? label(job.status).toLowerCase() : STAGE_TEXT[state];
+    });
+  }
+
   function voteText(task) {
     const v = task.votes;
     if (!v) return "";
@@ -105,6 +135,7 @@
 
   function render(job) {
     styleBadge($("status-badge"), job.status);
+    renderStages(job);
 
     $("overall").value = job.progress;
     const err = $("job-error");

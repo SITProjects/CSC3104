@@ -1,3 +1,4 @@
+import re
 from urllib.parse import quote
 from uuid import UUID
 
@@ -278,6 +279,31 @@ def test_no_navbar_when_logged_out(no_redirects):
 def test_home_redirects_to_login_when_logged_out(no_redirects):
     r = no_redirects.get("/")
     assert r.status_code == 303 and r.headers["location"] == "/login"
+
+
+# Only Google Fonts may come from elsewhere; scripts and styles are served here.
+ALLOWED_HOSTS = ("https://fonts.googleapis.com", "https://fonts.gstatic.com")
+
+
+def test_pages_load_scripts_and_styles_only_from_this_site(monkeypatch):
+    signed_in = _signed_in(monkeypatch)
+    pages = [client.get("/login").text, client.get("/signup").text]
+    pages += [signed_in.get(path).text for path in ("/jobs/new", "/account")]
+    for html in pages:
+        for url in re.findall(r'<(?:script|link)[^>]*(?:src|href)="([^"]+)"', html):
+            local = url.startswith(("/", "http://testserver/"))
+            assert local or url.startswith(ALLOWED_HOSTS), url
+        assert 'href="http://testserver/static/app.css"' in html
+
+
+def test_built_stylesheet_and_vendored_scripts_are_served():
+    for path in (
+        "app.css",
+        "vendor/basecoat/basecoat.min.js",
+        "vendor/basecoat/sidebar.min.js",
+    ):
+        r = client.get(f"/static/{path}")
+        assert r.status_code == 200 and r.content, path
 
 
 def test_nav_shown_when_logged_in(monkeypatch):

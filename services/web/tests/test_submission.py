@@ -439,6 +439,13 @@ def stub_job(monkeypatch, job=None, error=None):
     monkeypatch.setattr(coordinator, "get_job", fake_get)
 
 
+def test_job_page_lists_every_stage_in_order(client):
+    html = client.get(f"/jobs/{JOB_ID}").text
+    steps = ["submitted", "prepare", "queue", "run", "check", "done"]
+    positions = [html.index(f'data-step="{step}"') for step in steps]
+    assert positions == sorted(positions)
+
+
 def test_job_page_renders_shell(client):
     r = client.get(f"/jobs/{JOB_ID}")
     assert r.status_code == 200

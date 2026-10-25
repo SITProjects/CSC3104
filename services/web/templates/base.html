@@ -8,43 +8,11 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono&display=swap">
-  {# Basecoat (basecoatui.com): shadcn/ui components as plain CSS classes. #}
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/basecoat-css@1.0.2/dist/basecoat.cdn.min.css">
-  {# Basecoat's CDN file has no layout utilities (flex, gap-4, ...), so Tailwind's
-     browser build makes them from the classes on the page. The @theme blocks
-     point Tailwind at Basecoat's tokens so classes like text-muted-foreground
-     match the components. #}
-  <style type="text/tailwindcss">
-    /* Tailwind's reset loads after Basecoat's and would undo these two rules. */
-    @layer base {
-      * { border-color: var(--color-border); outline-color: var(--color-ring); }
-      body { background-color: var(--color-background); color: var(--color-foreground); }
-    }
-    @theme static {
-      --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
-      --font-mono: "Geist Mono", ui-monospace, monospace;
-    }
-    @theme inline {
-      --radius-sm: calc(var(--radius) - 4px);
-      --radius-md: calc(var(--radius) - 2px);
-      --radius-lg: var(--radius);
-      --radius-xl: calc(var(--radius) + 4px);
-      --color-background: var(--background);
-      --color-foreground: var(--foreground);
-      --color-card: var(--card);
-      --color-primary: var(--primary);
-      --color-primary-foreground: var(--primary-foreground);
-      --color-muted: var(--muted);
-      --color-muted-foreground: var(--muted-foreground);
-      --color-accent: var(--accent);
-      --color-destructive: var(--destructive);
-      --color-border: var(--border);
-      --color-ring: var(--ring);
-    }
-  </style>
-  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/basecoat-css@1.0.2/dist/js/basecoat.min.js" defer></script>
-  <script src="https://cdn.jsdelivr.net/npm/basecoat-css@1.0.2/dist/js/sidebar.min.js" defer></script>
+  {# Built from styles/app.css by build-css.sh: Basecoat (shadcn/ui components as
+     CSS classes) plus the Tailwind utilities the pages use. #}
+  <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}">
+  <script src="{{ url_for('static', path='vendor/basecoat/basecoat.min.js') }}" defer></script>
+  <script src="{{ url_for('static', path='vendor/basecoat/sidebar.min.js') }}" defer></script>
 </head>
 <body>
   {% if signed_in %}

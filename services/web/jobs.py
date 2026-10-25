@@ -287,6 +287,7 @@ def preparing_view(pending: dict[str, Any], job_id: str) -> dict[str, Any]:
     return {
         "stage": "failed" if failed else "preparing",
         "id": job_id,
+        "job_type": "ocr",  # only PDF uploads are prepared
         "status": "FAILED" if failed else "PREPARING",
         "terminal": failed,
         "error": pending.get("error") if failed else None,

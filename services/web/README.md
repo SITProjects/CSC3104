@@ -12,9 +12,18 @@ workload lives separately in `worker/ocr-task/`.
 
 Styling uses [Basecoat](https://basecoatui.com) (shadcn/ui components as CSS
 classes such as `btn`, `card`, `badge` and `table`) plus Tailwind utility
-classes. Both load from a CDN in `templates/base.html`, so there is no CSS build
-step and no stylesheet of our own. Shared markup (icons, status badges, error
-alerts) is in `templates/_macros.html`.
+classes. Pages load no code from a CDN: Basecoat is vendored (see
+`styles/vendor/README.md`), and `static/app.css` is built ahead of time from
+`styles/app.css` by a pinned, checksum-verified Tailwind CLI. Shared markup
+(icons, status badges, error alerts) is in `templates/_macros.html`.
+
+After adding or changing classes in `templates/` or `static/*.js`, rebuild the
+stylesheet and commit `static/app.css` with your change (the pre-commit hook
+does this for you):
+
+```sh
+services/web/build-css.sh          # or --watch while editing
+```
 
 ## Run locally
 
