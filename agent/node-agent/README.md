@@ -14,8 +14,25 @@ heartbeats. Run inside the worker's Linux environment.
 - No sensor reading for 30 seconds: BUSY.
 - High CPU never turns an IDLE node BUSY, because our own task pods raise the
   host's CPU too.
+- Owner schedule: never lent from 08:00 to 09:00 local time. The node goes BUSY
+  at 08:00 even if the PC is idle, and can go IDLE again from 09:00.
 
 Every number is in `config.py` and can be overridden with an environment variable.
+
+## Owner schedule
+
+Set the hours with `NODE_AGENT_BLOCKED`, as `HH:MM-HH:MM` windows separated by
+commas. The default is `08:00-09:00`, and empty turns it off:
+
+```bash
+NODE_AGENT_BLOCKED="08:00-09:00,13:00-14:00" python server.py
+NODE_AGENT_BLOCKED="" python server.py     # no blocked hours
+```
+
+A window that ends before it starts crosses midnight (`22:00-02:00`). A badly
+written window stops the agent at start-up, so the PC is never lent by mistake.
+The windows use WSL's local time. Check it with `date`, and if it is not the
+PC's timezone, set `TZ`, for example `TZ=Asia/Singapore`.
 
 ## Run
 

@@ -19,13 +19,15 @@ from decision import IdleDetector, NodeState, Reading, Transition
 from fastapi import FastAPI
 from heartbeat import Heartbeat
 from pydantic import BaseModel, Field
+from schedule import parse
 from taint import NodeTainter, connect
 
 log = logging.getLogger("node-agent")
 
 # Every handler and the loops are async, so they all run on one event loop
 # thread and never touch the detector at the same time. Keep them async.
-detector = IdleDetector()
+# A bad NODE_AGENT_BLOCKED fails here, at start-up.
+detector = IdleDetector(schedule=parse(config.BLOCKED))
 # Set on every state change to wake keep_taint_in_sync
 state_changed = asyncio.Event()
 
@@ -151,6 +153,7 @@ async def lifespan(app: FastAPI):
         config.IDLE_INPUT_S,
         " (demo mode)" if config.DEMO_MODE else "",
     )
+    log.info("never lent during: %s (local time)", detector.schedule)
     tasks = [asyncio.create_task(watch_for_silence())]
     tainter = None
     if config.TAINT_ENABLED:
