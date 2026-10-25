@@ -46,6 +46,10 @@ class CoordinatorClient:
     async def me(self, token: str) -> dict:
         return await self._send("GET", "/auth/me", token)
 
+    async def job_quota(self, token: str) -> dict:
+        """{"active": unfinished jobs, "limit": how many are allowed at once}"""
+        return await self._send("GET", "/jobs/quota", token)
+
     async def list_jobs(self, token: str, limit: int = 20, offset: int = 0) -> list:
         params = {"limit": limit, "offset": offset}
         return await self._send("GET", "/jobs", token, params=params)
@@ -59,6 +63,47 @@ class CoordinatorClient:
 
     async def cancel_job(self, token: str, job_id: UUID) -> None:
         await self._send("POST", f"/jobs/{job_id}/cancel", token)
+
+    async def admin_nodes(self, token: str) -> list:
+        return await self._send("GET", "/admin/nodes", token)
+
+    async def admin_jobs(
+        self,
+        token: str,
+        limit: int = 20,
+        offset: int = 0,
+        owner_id: UUID | None = None,
+    ) -> list:
+        params = {"limit": limit, "offset": offset}
+        if owner_id is not None:
+            params["owner_id"] = str(owner_id)
+        return await self._send("GET", "/admin/jobs", token, params=params)
+
+    async def admin_job_counts(self, token: str) -> dict:
+        return await self._send("GET", "/admin/job-counts", token)
+
+    async def admin_users(self, token: str, limit: int = 50, offset: int = 0) -> list:
+        params = {"limit": limit, "offset": offset}
+        return await self._send("GET", "/admin/users", token, params=params)
+
+    async def admin_user(self, token: str, user_id: UUID) -> dict:
+        # typed as UUID so the value can't change the path
+        return await self._send("GET", f"/admin/users/{user_id}", token)
+
+    async def admin_events(
+        self,
+        token: str,
+        job_id: UUID | None = None,
+        node_name: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list:
+        params = {"limit": limit, "offset": offset}
+        if job_id is not None:
+            params["job_id"] = str(job_id)
+        if node_name:
+            params["node_name"] = node_name
+        return await self._send("GET", "/admin/events", token, params=params)
 
     async def burst_overview(
         self,

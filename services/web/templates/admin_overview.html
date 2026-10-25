@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% from "_macros.html" import admin_header, error_alert, status_badge %}
+{% block title %}Overview{% endblock %}
+{% block width %}max-w-6xl{% endblock %}
+{% block content %}
+{{ admin_header("Overview", updated) }}
+
+<div class="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+  {% for state, label in (("IDLE", "Idle, lending"), ("BUSY", "Owner busy"), ("OFFLINE", "Offline")) %}
+  <div class="card px-4 py-3">
+    <p class="text-sm text-muted-foreground">{{ label }}</p>
+    <p class="text-3xl font-semibold tabular-nums">{{ node_counts[state] if not errors.nodes else "–" }}</p>
+  </div>
+  {% endfor %}
+  <a class="card px-4 py-3 hover:bg-muted" href="/admin/jobs">
+    <p class="text-sm text-muted-foreground">Jobs running</p>
+    <p class="text-3xl font-semibold tabular-nums">{{ job_counts.RUNNING if job_counts else "–" }}</p>
+    {% if job_counts %}<p class="text-xs text-muted-foreground">{{ job_counts.PENDING }} queued</p>{% endif %}
+  </a>
+</div>
+{% if errors.counts %}<div class="mt-3">{{ error_alert(errors.counts) }}</div>{% endif %}
+
+<section class="mt-8 grid gap-3" aria-labelledby="nodes">
+  <h2 id="nodes" class="text-lg font-semibold">Worker nodes ({{ nodes|length }})</h2>
+  {% if errors.nodes %}{{ error_alert(errors.nodes) }}{% else %}
+  <div class="table-container" tabindex="0" role="region" aria-label="Worker nodes">
+    <table class="table">
+      <caption>Select a node to see its events.</caption>
+      <thead><tr>
+        <th scope="col">Node</th><th scope="col">State</th><th scope="col">CPU</th>
+        <th scope="col">Last heartbeat</th><th scope="col">Trust</th><th scope="col">Votes agreed</th>
+      </tr></thead>
+      <tbody>
+      {% for n in nodes %}
+        <tr>
+          <td><a class="font-mono font-medium underline-offset-4 hover:underline" href="/admin/events?node={{ n.name|urlencode }}">{{ n.name }}</a></td>
+          <td>{{ status_badge(n.state) }}</td>
+          <td class="tabular-nums">
+            {% if n.cpu_percent is not none %}
+            <div class="flex items-center gap-2">
+              <div class="h-2 w-16 rounded-full bg-muted" aria-hidden="true"><div class="h-2 rounded-full bg-primary" style="width: {{ [n.cpu_percent, 100]|min }}%"></div></div>
+              {{ "%.0f"|format(n.cpu_percent) }}%
+            </div>
+            {% else %}<span class="text-muted-foreground">–</span>{% endif %}
+          </td>
+          <td>{{ n.heartbeat_ago }}</td>
+          <td class="tabular-nums">{{ "%.3f"|format(n.trust_score) }}</td>
+          <td class="tabular-nums">{% if n.agree_rate is not none %}{{ n.agree_rate }}% <span class="text-xs text-muted-foreground">({{ n.total_agree }} of {{ n.total_agree + n.total_disagree }})</span>{% else %}<span class="text-muted-foreground">No votes yet</span>{% endif %}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6" class="text-muted-foreground">No worker has sent a heartbeat yet.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

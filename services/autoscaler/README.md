@@ -580,7 +580,7 @@ watcher's taint at 13 minutes, and termination at 15 minutes. Check with
 
 ## Estimated burst cost (Step 5c)
 
-The admin page (`/admin/nodes` in the web app) shows burst workers and cost per
+The admin dashboard (`/admin` in the web app) shows burst workers and cost per
 job. It reads them through the coordinator's admin-only `GET /admin/burst`,
 which reads the three SQL views in `shared/migrations/004_burst_cost.sql`.
 Every figure is an estimate.
@@ -638,7 +638,7 @@ plus unattributed still equals the total.
 How the pieces connect:
 
 ```
-/admin/nodes page  ->  CoordinatorClient.burst_overview()  ->  GET /admin/burst  ->  004 views
+/admin dashboard   ->  CoordinatorClient.burst_overview()  ->  GET /admin/burst  ->  004 views
 (services/web)         (services/web/coordinator.py)          (services/coordinator/burst.py)
 ```
 

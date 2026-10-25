@@ -181,7 +181,13 @@ def test_logout_clears_cookie(monkeypatch):
     )
 
 
-PROTECTED = ["/jobs/new", "/jobs", f"/jobs/{UUID(int=1)}", "/account", "/admin/nodes"]
+PROTECTED = [
+    "/jobs/new",
+    "/jobs",
+    f"/jobs/{UUID(int=1)}",
+    "/account",
+    "/admin",
+]
 USER = {"id": str(UUID(int=2)), "email": "a@b.com", "role": "USER"}
 ADMIN = {**USER, "role": "ADMIN"}
 
@@ -194,8 +200,12 @@ def _signed_in(monkeypatch, user=USER):
     async def fake_list_jobs(token, limit=20, offset=0):
         return []
 
+    async def fake_quota(token):
+        return {"active": 0, "limit": 3}
+
     monkeypatch.setattr(coordinator, "me", fake_me)
     monkeypatch.setattr(coordinator, "list_jobs", fake_list_jobs)
+    monkeypatch.setattr(coordinator, "job_quota", fake_quota)
     c = TestClient(app, follow_redirects=False)
     c.cookies.set(settings.session_cookie, "tok123")
     return c
@@ -225,21 +235,6 @@ def test_protected_pages_clear_expired_token(monkeypatch, path):
 @pytest.mark.parametrize("path", PROTECTED[:4])
 def test_protected_pages_open_when_logged_in(monkeypatch, path):
     assert _signed_in(monkeypatch).get(path).status_code == 200
-
-
-def test_admin_page_needs_admin_role(monkeypatch):
-    async def fake_burst(token, **kwargs):
-        return {
-            "observed_at": "now",
-            "machine_count": 0,
-            "machines": [],
-            "job_count": 0,
-            "jobs": [],
-        }
-
-    monkeypatch.setattr(coordinator, "burst_overview", fake_burst)
-    assert _signed_in(monkeypatch, USER).get("/admin/nodes").status_code == 403
-    assert _signed_in(monkeypatch, ADMIN).get("/admin/nodes").status_code == 200
 
 
 def test_coordinator_down_is_not_a_login_redirect(monkeypatch):
@@ -272,7 +267,7 @@ def test_no_navbar_when_logged_out(no_redirects):
     for path in ("/login", "/signup"):
         html = no_redirects.get(path).text
         assert "<aside" not in html and "<nav" not in html
-        assert "/jobs/new" not in html and "/admin/nodes" not in html
+        assert "/jobs/new" not in html and 'href="/admin"' not in html
         assert "Campus OCR" in html and "idle campus PCs" in html
 
 
@@ -301,9 +296,25 @@ def test_built_stylesheet_and_vendored_scripts_are_served():
         "app.css",
         "vendor/basecoat/basecoat.min.js",
         "vendor/basecoat/sidebar.min.js",
+        "vendor/basecoat/dropdown-menu.min.js",
     ):
         r = client.get(f"/static/{path}")
         assert r.status_code == 200 and r.content, path
+
+
+def test_profile_menu_replaces_account_link(monkeypatch):
+    html = _signed_in(monkeypatch).get("/jobs").text
+    sidebar_links = html.split('id="profile-menu"')[0]
+    assert 'href="/account"' not in sidebar_links  # no longer a sidebar link
+    menu = html.split('id="profile-menu"')[1]
+    assert USER["email"] in menu
+    assert 'role="menuitem" href="/account"' in menu
+    assert 'action="/logout"' in menu
+
+
+def test_account_page_shows_the_user(monkeypatch):
+    html = _signed_in(monkeypatch, ADMIN).get("/account").text
+    assert USER["email"] in html and "Administrator" in html
 
 
 def test_nav_shown_when_logged_in(monkeypatch):

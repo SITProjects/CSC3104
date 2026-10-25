@@ -13,12 +13,13 @@
   <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}">
   <script src="{{ url_for('static', path='vendor/basecoat/basecoat.min.js') }}" defer></script>
   <script src="{{ url_for('static', path='vendor/basecoat/sidebar.min.js') }}" defer></script>
+  <script src="{{ url_for('static', path='vendor/basecoat/dropdown-menu.min.js') }}" defer></script>
 </head>
 <body>
   {% if signed_in %}
-  {% set nav_icons = {"/jobs/new": "plus", "/jobs": "list", "/account": "user", "/admin/nodes": "server"} %}
-  {% set nav_paths = nav_items|map(attribute=1)|list %}
-  {% set here = request.url.path %}
+  {# a user's role is only known on pages that look the user up (current_user) #}
+  {% set is_admin = user is not none and user.role == "ADMIN" %}
+  {% set active = nav_active(request.url.path) %}
   <aside id="sidebar" class="sidebar" data-side="left">
     <nav aria-label="Main navigation">
       <header>
@@ -31,21 +32,49 @@
         <div role="group" aria-labelledby="nav-heading">
           <h3 id="nav-heading">Campus OCR</h3>
           <ul>
-            {% for label, path in nav_items %}
+            {% for item in nav_items if is_admin or not item.admin %}
             <li>
-              <a href="{{ path }}"{% if here == path or (here.startswith(path ~ "/") and here not in nav_paths) %} aria-current="page"{% endif %}>
-                {{ icon(nav_icons.get(path, "list")) }}
-                <span>{{ label }}</span>
+              {% if item.children %}
+              {# collapsible group, open while one of its pages is shown #}
+              <details {% if active in item.children|map(attribute="path") %}open{% endif %}>
+                <summary>{{ icon(item.icon) }}<span>{{ item.label }}</span></summary>
+                <ul>
+                  {% for child in item.children %}
+                  <li><a href="{{ child.path }}"{% if child.path == active %} aria-current="page"{% endif %}><span>{{ child.label }}</span></a></li>
+                  {% endfor %}
+                </ul>
+              </details>
+              {% else %}
+              <a href="{{ item.path }}"{% if item.path == active %} aria-current="page"{% endif %}>
+                {{ icon(item.icon) }}
+                <span>{{ item.label }}</span>
               </a>
+              {% endif %}
             </li>
             {% endfor %}
           </ul>
         </div>
       </section>
       <footer>
-        <form method="post" action="/logout">
-          <button type="submit" class="btn w-full justify-start" data-variant="ghost">{{ icon("log-out") }} Log out</button>
-        </form>
+        {# Profile menu: account settings and log out. Plain links and a form, so
+           both still work if the dropdown script fails to load. #}
+        <div id="profile-menu" class="dropdown-menu w-full">
+          <button type="button" id="profile-menu-trigger" class="btn h-auto w-full justify-start gap-2 px-2 py-1.5" data-variant="ghost"
+                  aria-haspopup="menu" aria-controls="profile-menu-menu" aria-expanded="false" aria-label="Profile menu">
+            <span class="avatar" data-size="sm"><span class="bg-primary text-primary-foreground">{{ icon("user", "size-4") }}</span></span>
+            <span class="min-w-0 flex-1 truncate text-left">{{ user.email if user else "My account" }}</span>
+            {{ icon("chevrons-up-down", "size-4 text-muted-foreground") }}
+          </button>
+          <div id="profile-menu-popover" class="w-full" data-popover data-side="top" aria-hidden="true">
+            <div role="menu" id="profile-menu-menu" aria-labelledby="profile-menu-trigger">
+              <a role="menuitem" href="/account">{{ icon("settings") }} Account settings</a>
+              <hr role="separator">
+              <form method="post" action="/logout">
+                <button type="submit" role="menuitem" data-variant="destructive">{{ icon("log-out") }} Log out</button>
+              </form>
+            </div>
+          </div>
+        </div>
       </footer>
     </nav>
   </aside>
