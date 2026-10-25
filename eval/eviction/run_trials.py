@@ -151,7 +151,7 @@ def main() -> None:
     new_file = not args.out.exists()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("a", newline="") as file:
-        writer = csv.DictWriter(file, FIELDS)
+        writer = csv.DictWriter(file, FIELDS, lineterminator="\n")
         if new_file:
             writer.writeheader()
         for trial in range(1, args.trials + 1):

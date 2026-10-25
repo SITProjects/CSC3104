@@ -159,7 +159,7 @@ def main() -> None:
         raise SystemExit("no trials matched; is the event log from the same run?")
 
     with args.out.open("w", newline="") as file:
-        writer = csv.DictWriter(file, rows[0].keys())
+        writer = csv.DictWriter(file, rows[0].keys(), lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
     plot(rows, args.graph)
