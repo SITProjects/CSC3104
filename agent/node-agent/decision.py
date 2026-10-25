@@ -2,7 +2,7 @@
 in, state changes come out. Nothing here talks to Kubernetes or the network, so
 every rule can be tested with fake clocks.
 
-Rules (from the implementation plan):
+Rules:
 1. Input in the last BUSY_INPUT_S seconds means BUSY right away.
 2. IDLE only after no input for IDLE_INPUT_S and CPU below IDLE_CPU_PERCENT for
    IDLE_CPU_READINGS readings in a row.
@@ -101,6 +101,8 @@ class IdleDetector:
                 f"CPU under {self.t.idle_cpu_percent:.0f}% "
                 f"for {self.low_cpu_streak} readings",
             )
+        if self.state is NodeState.BUSY:
+            self.reason = "waiting to go idle"
         return None
 
     def tick(self, now: float) -> Transition | None:
@@ -121,9 +123,10 @@ class IdleDetector:
         return self._set(NodeState.BUSY, f"no sensor reading for {silent_s:.0f}s")
 
     def _set(self, new: NodeState, reason: str) -> Transition | None:
+        # Save the reason even if the state stays the same, so it is never out of date
+        self.reason = reason
         if new is self.state:
             return None
         change = Transition(self.state, new, reason)
         self.state = new
-        self.reason = reason
         return change
