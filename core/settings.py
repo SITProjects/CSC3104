@@ -33,5 +33,7 @@ LEASE_NAMESPACE = os.environ.get("LEASE_NAMESPACE", "idlecloud-system")
 LEASE_SECONDS = 15
 RENEW_INTERVAL = 5  # seconds
 RENEW_DEADLINE = 10  # seconds
+# Jobs one user may have unfinished (PENDING or RUNNING) at once
+MAX_ACTIVE_JOBS_PER_USER = int(os.environ.get("MAX_ACTIVE_JOBS_PER_USER", "3"))
 # User logins: how long a bearer token from /auth/login lasts
 SESSION_TTL_SECONDS = 24 * 3600

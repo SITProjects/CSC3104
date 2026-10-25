@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from services.coordinator.models import JobSpec
-from shared.db import JobType
+from shared.db import JobType, User
 from shared.db.models import Job, JobStatus, Replica, ReplicaStatus, Task, TaskStatus
 
 
@@ -92,6 +92,41 @@ async def list_jobs(
     if owner_id is not None:
         stmt = stmt.where(Job.owner_id == owner_id)
     return list((await session.scalars(stmt.limit(limit).offset(offset))).all())
+
+
+ACTIVE_STATUSES = (JobStatus.PENDING, JobStatus.RUNNING)
+
+
+async def count_active_jobs(
+    session: AsyncSession, owner_id: uuid.UUID, lock: bool = False
+) -> int:
+    """
+    Counts the user's unfinished (PENDING or RUNNING) jobs.
+
+    args:
+        lock: Lock the user's row first (inside a transaction), so concurrent
+            submissions by the same user are counted one after another.
+    """
+    if lock:
+        await session.execute(
+            select(User.id).where(User.id == owner_id).with_for_update()
+        )
+    return await session.scalar(
+        select(func.count())
+        .select_from(Job)
+        .where(Job.owner_id == owner_id, Job.status.in_(ACTIVE_STATUSES))
+    )
+
+
+async def count_jobs_by_status(session: AsyncSession) -> dict[str, int]:
+    """
+    returns:
+        dict: How many jobs are in each status, every status present even if zero.
+    """
+    rows = await session.execute(select(Job.status, func.count()).group_by(Job.status))
+    counts = dict.fromkeys((s.value for s in JobStatus), 0)
+    counts.update({status.value: count for status, count in rows.all()})
+    return counts
 
 
 async def cancel_job(session: AsyncSession, job_id: uuid.UUID) -> list[tuple[int, int]]:

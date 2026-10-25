@@ -1,6 +1,7 @@
 from .models import (
     BurstSlot,
     Event,
+    EventView,
     Job,
     JobStatus,
     JobSummary,
@@ -15,6 +16,7 @@ from .models import (
     User,
     UserRole,
     UserSession,
+    UserSummary,
     UserView,
 )
 from .session import session_manager
@@ -22,6 +24,7 @@ from .session import session_manager
 __all__ = [
     "BurstSlot",
     "Event",
+    "EventView",
     "Job",
     "JobStatus",
     "JobSummary",
@@ -36,6 +39,7 @@ __all__ = [
     "User",
     "UserRole",
     "UserSession",
+    "UserSummary",
     "UserView",
     "session_manager",
 ]

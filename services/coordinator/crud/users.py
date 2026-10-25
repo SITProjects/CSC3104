@@ -4,12 +4,12 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException
-from sqlalchemy import delete, select
+from sqlalchemy import Select, delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.settings import SESSION_TTL_SECONDS
-from shared.db import User, UserSession
+from shared.db import Job, User, UserSession
 
 
 def hash_token(token: str) -> str:
@@ -29,6 +29,36 @@ async def create_user(session: AsyncSession, email: str, password_hash: str) -> 
 async def delete_expired_sessions(session: AsyncSession) -> None:
     now = datetime.now(UTC)
     await session.execute(delete(UserSession).where(UserSession.expires_at <= now))
+
+
+def _users_with_job_count() -> Select:
+    """Each user with the number of jobs they own, newest account first."""
+    return (
+        select(User, func.count(Job.id))
+        .outerjoin(Job, Job.owner_id == User.id)
+        .group_by(User.id)
+        .order_by(User.created_at.desc(), User.id)
+    )
+
+
+async def list_users(
+    session: AsyncSession, limit: int, offset: int
+) -> list[tuple[User, int]]:
+    """
+    returns:
+        list: (user, job count) pairs, newest account first.
+    """
+    rows = await session.execute(_users_with_job_count().limit(limit).offset(offset))
+    return [(user, count) for user, count in rows.all()]
+
+
+async def get_user_with_job_count(
+    session: AsyncSession, user_id: uuid.UUID
+) -> tuple[User, int] | None:
+    row = (
+        await session.execute(_users_with_job_count().where(User.id == user_id))
+    ).first()
+    return (row[0], row[1]) if row else None
 
 
 async def get_user_by_email(session: AsyncSession, email: str) -> User | None:
