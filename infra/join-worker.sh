@@ -82,6 +82,17 @@ EOF
 
 systemctl daemon-reload
 
+# Give pods 30 s to checkpoint on PC shutdown. Must be a config drop-in:
+# as a --kubelet-arg it stops the kubelet starting.
+install -d -m 755 /var/lib/rancher/k3s/agent/etc/kubelet.conf.d
+
+cat > /var/lib/rancher/k3s/agent/etc/kubelet.conf.d/50-graceful-shutdown.conf <<'EOF'
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+shutdownGracePeriod: 30s
+shutdownGracePeriodCriticalPods: 0s
+EOF
+
 # Download the installer, then install the matching K3s version.
 INSTALLER="$(mktemp)"
 trap 'rm -f -- "$INSTALLER"' EXIT

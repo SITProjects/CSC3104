@@ -1,0 +1,77 @@
+# Limits what a node agent may change on its node. RBAC (make-kubeconfig.sh)
+# already limits each agent to get and patch its own node, but a patch could
+# still change anything on it. The token sits on the lab PC, so its owner could
+# use it to remove the verifier's quarantine taint, set idlecloud/trust=high or
+# uncordon the node. This policy allows only adding or removing the exact
+# owner-active taint. Everything else must stay as it was.
+#
+# One policy for all node agents. Only requests from node-agent-* accounts are
+# checked, so kubelets, the verifier, the autoscaler and admins are never
+# affected. make-kubeconfig.sh applies it, or by hand:
+#   kubectl apply -f agent/node-agent/node-agent-policy.yml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: node-agent-owner-taint-only
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]  # a PATCH arrives here as an UPDATE
+        resources: ["nodes"]
+  matchConditions:
+    - name: only-node-agents
+      expression: >-
+        request.userInfo.username.startsWith("system:serviceaccount:idlecloud-system:node-agent-")
+  variables:
+    # Same test as _is_ours in taint.py: key and effect, so another
+    # owner-active taint with a different effect counts as someone else's
+    - name: oldOthers
+      expression: >-
+        oldObject.spec.?taints.orValue([]).filter(t,
+        !(t.key == "idlecloud/owner-active" && t.effect == "NoExecute"))
+    - name: newOthers
+      expression: >-
+        object.spec.?taints.orValue([]).filter(t,
+        !(t.key == "idlecloud/owner-active" && t.effect == "NoExecute"))
+    - name: newOurs
+      expression: >-
+        object.spec.?taints.orValue([]).filter(t,
+        t.key == "idlecloud/owner-active" && t.effect == "NoExecute")
+  validations:
+    # Also checked by resourceNames, but a wrong ClusterRole should not open
+    # every node
+    - expression: >-
+        request.userInfo.username ==
+        "system:serviceaccount:idlecloud-system:node-agent-" + object.metadata.name
+      message: a node agent may only change its own node
+    # Compares whole taints, not only the key, so timeAdded is not checked.
+    # The API server fills that in for NoExecute taints.
+    - expression: >-
+        variables.newOthers == variables.oldOthers &&
+        variables.newOurs.size() <= 1 &&
+        variables.newOurs.all(t, t.value == "true")
+      message: a node agent may only add or remove the taint idlecloud/owner-active=true:NoExecute
+    - expression: >-
+        object.metadata.?labels.orValue({}) == oldObject.metadata.?labels.orValue({}) &&
+        object.metadata.?annotations.orValue({}) == oldObject.metadata.?annotations.orValue({}) &&
+        object.metadata.?finalizers.orValue([]) == oldObject.metadata.?finalizers.orValue([]) &&
+        object.metadata.?ownerReferences.orValue([]) == oldObject.metadata.?ownerReferences.orValue([])
+      message: a node agent may not change labels, annotations, finalizers or owner references
+    - expression: >-
+        object.spec.?unschedulable.orValue(false) == oldObject.spec.?unschedulable.orValue(false) &&
+        object.spec.?providerID.orValue("") == oldObject.spec.?providerID.orValue("") &&
+        object.spec.?podCIDR.orValue("") == oldObject.spec.?podCIDR.orValue("") &&
+        object.spec.?podCIDRs.orValue([]) == oldObject.spec.?podCIDRs.orValue([]) &&
+        object.spec.?externalID.orValue("") == oldObject.spec.?externalID.orValue("")
+      message: a node agent may only change node taints, nothing else in the spec
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: node-agent-owner-taint-only
+spec:
+  policyName: node-agent-owner-taint-only
+  validationActions: [Deny]

@@ -17,12 +17,14 @@ RETRY_ATTEMPTS = 3
 HOUSEKEEPING_INTERVAL = 60  # seconds
 # Node heartbeats: a projected service-account token for this audience, checked
 # with a TokenReview. Only these service accounts may send heartbeats, and only
-# for the node their Pod runs on.
+# for the node their Pod runs on, or the Node their token is bound to (lab PC
+# node agents, see agent/node-agent/make-kubeconfig.sh).
 HEARTBEAT_AUDIENCE = "idlecloud-coordinator"
 HEARTBEAT_SERVICE_ACCOUNTS = frozenset(
     os.environ.get(
         "HEARTBEAT_SERVICE_ACCOUNTS",
-        "system:serviceaccount:idlecloud-system:spot-watcher",
+        "system:serviceaccount:idlecloud-system:spot-watcher,"
+        "system:serviceaccount:idlecloud-system:node-agent-heartbeat",
     ).split(",")
 )
 POD_NAME = os.environ.get("POD_NAME") or socket.gethostname()
