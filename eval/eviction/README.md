@@ -61,3 +61,6 @@ current page first.
 Key press to taint is spread between about 0 and 5 seconds. That is the sensor's
 5-second reading interval: a key press waits for the next reading. A shorter
 interval would evict faster but send more readings.
+
+`taint_to_delete_s` is always 0.0: the deletion happens within one 50 ms poll
+of the taint.
