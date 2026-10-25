@@ -1,5 +1,3 @@
-"""Reconcile database trust into Kubernetes without blocking voting."""
-
 import asyncio
 import logging
 
