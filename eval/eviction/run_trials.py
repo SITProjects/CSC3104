@@ -128,6 +128,9 @@ def run_trial(core: client.CoreV1Api, node: str, trial: int, trials: int) -> dic
             seen = measure(core, node, name)
         finally:
             delete_pod(core, name)
+        if seen["taint_seen"] is None:
+            print("  taint never observed before the pod stopped, retrying")
+            continue
         taint_to_stop = seen["pod_stopped"] - seen["taint_seen"]
         print(f"  recorded: pod stopped {taint_to_stop:.2f}s after the taint appeared")
         return {"trial": trial, "pod": name, "prompted": prompt, **seen}
@@ -144,20 +147,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Trial numbers restart at 1, so adding to an old file would duplicate them
+    if args.out.exists():
+        sys.exit(f"{args.out} already exists; move or delete it first")
+
     config.load_kube_config()
     core = client.CoreV1Api()
     core.read_node(args.node)  # fail now if the name is wrong
 
-    new_file = not args.out.exists()
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    with args.out.open("a", newline="") as file:
+    with args.out.open("x", newline="") as file:
         writer = csv.DictWriter(file, FIELDS, lineterminator="\n")
-        if new_file:
-            writer.writeheader()
+        writer.writeheader()
         for trial in range(1, args.trials + 1):
             writer.writerow(run_trial(core, args.node, trial, args.trials))
             file.flush()  # keep finished trials if the run is stopped
-    print(f"\nDone. {args.trials} trials appended to {args.out}")
+    print(f"\nDone. {args.trials} trials written to {args.out}")
 
 
 if __name__ == "__main__":

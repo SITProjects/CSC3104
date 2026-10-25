@@ -40,8 +40,10 @@ current page first.
    Each trial waits for the PC to be lent, starts a pod, then prints
    `PRESS A KEY ON THE WORKER NOW`. Press one key on the worker, then leave the
    PC alone until the next prompt. A trial where the PC is taken back early is
-   retried. Results are appended to `eval/results/eviction_k8s.csv` after each
-   trial, so a stopped run keeps its finished trials.
+   retried. Results are written to `eval/results/eviction_k8s.csv` after each
+   trial, so a stopped run keeps its finished trials. The script refuses to
+   start if that file already exists: move or delete it (and clear the event
+   log as in step 1) before running again.
 
 3. **Copy both files into `eval/results/`:** `eviction_k8s.csv` from EC2, and
    the worker's `agent/node-agent/node-agent-events.jsonl` as
