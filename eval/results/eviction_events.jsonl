@@ -1,0 +1,84 @@
+{"time": "2026-10-25T07:46:09.608+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 34s, CPU under 40% for 8 readings", "idle_seconds": 33.9}
+{"time": "2026-10-25T07:46:09.720+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:46:19.347+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 2s ago", "idle_seconds": 1.5}
+{"time": "2026-10-25T07:46:19.411+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:46:49.418+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 32s, CPU under 40% for 16 readings", "idle_seconds": 31.5}
+{"time": "2026-10-25T07:46:49.477+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:46:59.163+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 0s ago", "idle_seconds": 0.1}
+{"time": "2026-10-25T07:46:59.213+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:47:29.268+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 30s, CPU under 40% for 24 readings", "idle_seconds": 30.0}
+{"time": "2026-10-25T07:47:29.332+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:47:49.613+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 4s ago", "idle_seconds": 3.5}
+{"time": "2026-10-25T07:47:49.679+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:48:19.682+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 34s, CPU under 40% for 34 readings", "idle_seconds": 33.5}
+{"time": "2026-10-25T07:48:19.762+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:48:49.805+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 4s ago", "idle_seconds": 4.2}
+{"time": "2026-10-25T07:48:49.905+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:49:19.778+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 34s, CPU under 40% for 46 readings", "idle_seconds": 34.2}
+{"time": "2026-10-25T07:49:19.855+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:49:34.374+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 3s ago", "idle_seconds": 3.2}
+{"time": "2026-10-25T07:49:34.469+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:50:04.498+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 33s, CPU under 40% for 7 readings", "idle_seconds": 33.3}
+{"time": "2026-10-25T07:50:04.581+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:50:19.931+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 0s ago", "idle_seconds": 0.5}
+{"time": "2026-10-25T07:50:20.012+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:50:50.032+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 31s, CPU under 40% for 16 readings", "idle_seconds": 30.6}
+{"time": "2026-10-25T07:50:50.098+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:50:59.783+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 3s ago", "idle_seconds": 2.7}
+{"time": "2026-10-25T07:50:59.868+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:51:29.837+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 33s, CPU under 40% for 24 readings", "idle_seconds": 32.8}
+{"time": "2026-10-25T07:51:29.911+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:51:39.568+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 0s ago", "idle_seconds": 0.3}
+{"time": "2026-10-25T07:51:39.625+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:52:09.647+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 30s, CPU under 40% for 32 readings", "idle_seconds": 30.3}
+{"time": "2026-10-25T07:52:09.697+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:52:20.211+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 3s ago", "idle_seconds": 3.1}
+{"time": "2026-10-25T07:52:20.255+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:52:50.272+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 33s, CPU under 40% for 40 readings", "idle_seconds": 33.2}
+{"time": "2026-10-25T07:52:50.342+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:53:00.012+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 4s ago", "idle_seconds": 3.5}
+{"time": "2026-10-25T07:53:00.068+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:53:44.659+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 48s, CPU under 40% for 3 readings", "idle_seconds": 48.5}
+{"time": "2026-10-25T07:53:44.735+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:53:55.259+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 2s ago", "idle_seconds": 2.2}
+{"time": "2026-10-25T07:53:55.364+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:54:25.353+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 32s, CPU under 40% for 11 readings", "idle_seconds": 32.2}
+{"time": "2026-10-25T07:54:25.445+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:54:35.081+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 3s ago", "idle_seconds": 3.3}
+{"time": "2026-10-25T07:54:35.142+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:55:05.122+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 33s, CPU under 40% for 19 readings", "idle_seconds": 33.4}
+{"time": "2026-10-25T07:55:05.218+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:55:14.842+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 1s ago", "idle_seconds": 0.9}
+{"time": "2026-10-25T07:55:14.995+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:55:44.931+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 31s, CPU under 40% for 27 readings", "idle_seconds": 31.0}
+{"time": "2026-10-25T07:55:45.036+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:55:55.538+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 3s ago", "idle_seconds": 3.2}
+{"time": "2026-10-25T07:55:55.605+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:56:25.556+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 33s, CPU under 40% for 35 readings", "idle_seconds": 33.3}
+{"time": "2026-10-25T07:56:25.645+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:57:05.430+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 4s ago", "idle_seconds": 4.2}
+{"time": "2026-10-25T07:57:05.476+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:57:35.500+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 34s, CPU under 40% for 49 readings", "idle_seconds": 34.2}
+{"time": "2026-10-25T07:57:35.559+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:57:45.239+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 2s ago", "idle_seconds": 2.0}
+{"time": "2026-10-25T07:57:45.286+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:58:15.279+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 32s, CPU under 40% for 57 readings", "idle_seconds": 32.0}
+{"time": "2026-10-25T07:58:15.350+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:58:25.896+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 3s ago", "idle_seconds": 2.8}
+{"time": "2026-10-25T07:58:25.962+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:58:55.080+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 33s, CPU under 40% for 65 readings", "idle_seconds": 32.9}
+{"time": "2026-10-25T07:58:55.186+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:59:05.724+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 2s ago", "idle_seconds": 2.0}
+{"time": "2026-10-25T07:59:05.812+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T07:59:35.777+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 32s, CPU under 40% for 73 readings", "idle_seconds": 32.1}
+{"time": "2026-10-25T07:59:35.833+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T07:59:45.521+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 4s ago", "idle_seconds": 3.6}
+{"time": "2026-10-25T07:59:45.592+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T08:00:15.557+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 34s, CPU under 40% for 81 readings", "idle_seconds": 33.6}
+{"time": "2026-10-25T08:00:15.619+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T08:00:25.281+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 4s ago", "idle_seconds": 4.3}
+{"time": "2026-10-25T08:00:25.350+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
+{"time": "2026-10-25T08:04:55.989+00:00", "node": "desktop-cdvabed", "event": "state", "old": "BUSY", "new": "IDLE", "reason": "no input for 30s, CPU under 40% for 17 readings", "idle_seconds": 30.0}
+{"time": "2026-10-25T08:04:56.060+00:00", "node": "desktop-cdvabed", "event": "taint", "added": false}
+{"time": "2026-10-25T08:05:05.725+00:00", "node": "desktop-cdvabed", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 0s ago", "idle_seconds": 0.0}
+{"time": "2026-10-25T08:05:06.207+00:00", "node": "desktop-cdvabed", "event": "taint", "added": true}
