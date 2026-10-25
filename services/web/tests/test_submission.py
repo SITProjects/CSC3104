@@ -1,0 +1,809 @@
+"""Upload, page-ready callback, progress status/stream, download and cancel."""
+
+import json
+import time
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from services.web import storage, uploads
+from services.web.app import app
+from services.web.coordinator import coordinator
+from services.web.settings import settings
+from services.web.tests.test_jobs import H, make_pdf, replica, sample_job
+
+USER = {"id": str(UUID(int=2)), "email": "a@b.com", "role": "USER"}
+JOB_ID = UUID(int=7)
+SECRET = "shh"
+
+
+class FakeS3:
+    def __init__(self):
+        self.objects: dict[str, bytes] = {}
+
+    def install(self, monkeypatch):
+        monkeypatch.setattr(
+            storage, "put_bytes", lambda k, b, t: self.objects.update({k: b})
+        )
+        monkeypatch.setattr(storage, "get_bytes", lambda k: self.objects.get(k))
+        monkeypatch.setattr(storage, "delete", lambda k: self.objects.pop(k, None))
+        monkeypatch.setattr(
+            storage,
+            "count_pages",
+            lambda job_id: sum(
+                k.startswith(f"jobs/{job_id}/pages/") for k in self.objects
+            ),
+        )
+        monkeypatch.setattr(
+            storage,
+            "put_json",
+            lambda k, v: self.objects.update({k: json.dumps(v).encode()}),
+        )
+        monkeypatch.setattr(
+            storage,
+            "get_json",
+            lambda k: json.loads(self.objects[k]) if k in self.objects else None,
+        )
+
+        prefix = "pending-index/"
+        monkeypatch.setattr(
+            storage,
+            "list_pending",
+            lambda owner_id, limit=20: [
+                k.rsplit("/", 1)[1]
+                for k in self.objects
+                if k.startswith(f"{prefix}{owner_id}/")
+            ][:limit],
+        )
+
+    def json(self, key):
+        return json.loads(self.objects[key])
+
+
+@pytest.fixture
+def s3(monkeypatch):
+    fake = FakeS3()
+    fake.install(monkeypatch)
+    return fake
+
+
+def status_error(code: int) -> httpx.HTTPStatusError:
+    req = httpx.Request("GET", "http://coordinator/x")
+    return httpx.HTTPStatusError(
+        "err", request=req, response=httpx.Response(code, request=req)
+    )
+
+
+@pytest.fixture
+def client(monkeypatch, s3):
+    async def fake_me(token):
+        assert token == "tok123"
+        return USER
+
+    monkeypatch.setattr(coordinator, "me", fake_me)
+    c = TestClient(app, follow_redirects=False)
+    c.cookies.set(settings.session_cookie, "tok123")
+    return c
+
+
+@pytest.fixture
+def created(monkeypatch):
+    """Records POST /jobs calls to the coordinator."""
+    calls = []
+
+    async def fake_create(token, spec):
+        calls.append((token, spec))
+        return {"job_id": spec["job_id"]}
+
+    monkeypatch.setattr(coordinator, "create_job", fake_create)
+    return calls
+
+
+# --- upload ------------------------------------------------------------------
+
+
+def post_pdf(client, data, name="scan.pdf"):
+    return client.post("/upload", files={"file": (name, data, "application/pdf")})
+
+
+def test_upload_page_shows_limits(client):
+    r = client.get("/upload")
+    assert r.status_code == 200
+    assert 'name="file"' in r.text and "50 MB" in r.text
+
+
+def test_upload_saves_pdf_and_redirects_to_job(client, s3):
+    r = post_pdf(client, make_pdf(3))
+    assert r.status_code == 303
+    job_id = r.headers["location"].removeprefix("/jobs/")
+    UUID(job_id)  # a real job id
+    assert s3.objects[f"jobs/{job_id}/input.pdf"].startswith(b"%PDF-")
+    pending = s3.json(f"jobs/{job_id}/pending.json")
+    assert pending["state"] == "rendering"
+    assert f"pending-index/{USER['id']}/{job_id}" in s3.objects
+    assert (pending["owner_id"], pending["token"], pending["page_count"]) == (
+        USER["id"],
+        "tok123",
+        3,
+    )
+
+
+def test_upload_rejects_non_pdf(client, s3):
+    r = post_pdf(client, b"not a pdf at all", "notes.pdf")
+    assert r.status_code == 422 and "not a PDF" in r.text
+    assert s3.objects == {}
+
+
+def test_upload_rejects_oversized_file(client, s3, monkeypatch):
+    monkeypatch.setattr(settings, "max_upload_mb", 0)
+    r = post_pdf(client, make_pdf(1))
+    assert r.status_code == 413 and "over 0 MB" in r.text
+    assert s3.objects == {}
+
+
+def test_upload_without_file_asks_for_one(client):
+    r = client.post("/upload", data={})
+    assert r.status_code == 422 and "Choose a PDF" in r.text
+
+
+def test_upload_requires_login(s3):
+    r = TestClient(app, follow_redirects=False).post(
+        "/upload", files={"file": ("a.pdf", make_pdf(1), "application/pdf")}
+    )
+    assert r.status_code == 303 and r.headers["location"].startswith("/login")
+    assert s3.objects == {}
+
+
+def test_upload_reports_storage_failure(client, monkeypatch):
+    from botocore.exceptions import EndpointConnectionError
+
+    def boom(*args):
+        raise EndpointConnectionError(endpoint_url="http://minio")
+
+    monkeypatch.setattr(storage, "put_json", boom)
+    r = post_pdf(client, make_pdf(1))
+    assert r.status_code == 503 and "store the file" in r.text
+
+
+# --- pages-ready callback ----------------------------------------------------
+
+
+def signed_post(client, payload, secret=SECRET, now=None):
+    body = json.dumps(payload).encode()
+    ts = str(int(now or time.time()))
+    import hashlib
+    import hmac
+
+    sig = hmac.new(
+        secret.encode(), f"{ts}.".encode() + body, hashlib.sha256
+    ).hexdigest()
+    return client.post(
+        "/hooks/pages-ready",
+        content=body,
+        headers={
+            "X-Idlecloud-Timestamp": ts,
+            "X-Idlecloud-Signature": sig,
+            "Content-Type": "application/json",
+        },
+    )
+
+
+@pytest.fixture
+def hook(monkeypatch):
+    monkeypatch.setattr(settings, "hmac_secret", SECRET)
+
+
+def seed_pending(s3, pages=25, state="rendering"):
+    s3.objects[f"jobs/{JOB_ID}/pending.json"] = json.dumps(
+        {"state": state, "owner_id": USER["id"], "token": "tok123", "page_count": pages}
+    ).encode()
+
+
+def seed_pages(s3, count):
+    for n in range(1, count + 1):
+        s3.objects[f"jobs/{JOB_ID}/pages/{n:04d}.png"] = b"png"
+
+
+def ok_event(**extra):
+    return {"status": "ok", "job_id": str(JOB_ID), "page_count": 25, **extra}
+
+
+def test_hook_rejects_bad_signature_and_old_timestamps(client, hook, created):
+    assert signed_post(client, ok_event(), secret="wrong").status_code == 401
+    assert signed_post(client, ok_event(), now=time.time() - 3600).status_code == 401
+    assert client.post("/hooks/pages-ready", json=ok_event()).status_code == 401
+    assert created == []
+
+
+def test_hook_is_off_without_a_secret(client, created):
+    assert client.post("/hooks/pages-ready", json=ok_event()).status_code == 503
+
+
+def test_hook_waits_until_every_page_exists(client, hook, s3, created):
+    seed_pending(s3)
+    seed_pages(s3, 20)
+    assert signed_post(client, ok_event(page_start=1, page_end=20)).status_code == 200
+    assert created == []
+    assert f"jobs/{JOB_ID}/pending.json" in s3.objects
+
+
+def test_hook_creates_job_with_uploaders_token_once_complete(client, hook, s3, created):
+    seed_pending(s3)
+    seed_pages(s3, 25)
+    assert signed_post(client, ok_event(page_start=21, page_end=25)).status_code == 200
+    ((token, spec),) = created
+    assert token == "tok123"
+    assert spec["job_id"] == str(JOB_ID) and len(spec["tasks"]) == 3
+    # the token is not kept once it has been used
+    assert f"jobs/{JOB_ID}/pending.json" not in s3.objects
+    assert f"pending-index/{USER['id']}/{JOB_ID}" not in s3.objects
+
+
+def test_hook_duplicate_callback_is_harmless(client, hook, s3, created):
+    seed_pending(s3)
+    seed_pages(s3, 25)
+    signed_post(client, ok_event())
+    assert signed_post(client, ok_event()).status_code == 200
+    assert len(created) == 1
+
+
+def test_hook_treats_coordinator_conflict_as_done(client, hook, s3, monkeypatch):
+    async def conflict(token, spec):
+        raise status_error(409)
+
+    monkeypatch.setattr(coordinator, "create_job", conflict)
+    seed_pending(s3)
+    seed_pages(s3, 25)
+    assert signed_post(client, ok_event()).status_code == 200
+    assert f"jobs/{JOB_ID}/pending.json" not in s3.objects
+
+
+def test_hook_asks_lambda_to_retry_when_coordinator_is_down(
+    client, hook, s3, monkeypatch
+):
+    async def down(token, spec):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(coordinator, "create_job", down)
+    seed_pending(s3)
+    seed_pages(s3, 25)
+    assert signed_post(client, ok_event()).status_code == 503
+    assert f"jobs/{JOB_ID}/pending.json" in s3.objects
+
+
+def test_hook_expired_session_fails_upload_and_drops_token(
+    client, hook, s3, monkeypatch
+):
+    async def expired(token, spec):
+        raise status_error(401)
+
+    monkeypatch.setattr(coordinator, "create_job", expired)
+    seed_pending(s3)
+    seed_pages(s3, 25)
+    assert signed_post(client, ok_event()).status_code == 200
+    pending = s3.json(f"jobs/{JOB_ID}/pending.json")
+    assert pending["state"] == "failed" and "token" not in pending
+
+
+def test_hook_failure_is_shown_to_the_user(client, hook, s3, created):
+    seed_pending(s3)
+    r = signed_post(
+        client,
+        {
+            "status": "failed",
+            "job_id": str(JOB_ID),
+            "error": "PDF is password protected",
+        },
+    )
+    assert r.status_code == 200 and created == []
+    pending = s3.json(f"jobs/{JOB_ID}/pending.json")
+    assert (
+        pending["state"] == "failed" and pending["error"] == "PDF is password protected"
+    )
+    assert "token" not in pending
+
+
+def test_hook_ignores_unknown_jobs(client, hook, created):
+    assert signed_post(client, ok_event()).status_code == 200
+    assert created == []
+
+
+def test_verify_signature_unit():
+    body = b"{}"
+    ts = 1_000_000
+    import hashlib
+    import hmac
+
+    sig = hmac.new(b"k", f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
+    assert uploads.verify_signature("k", body, str(ts), sig, now=ts + 10)
+    assert not uploads.verify_signature("k", body, str(ts), sig, now=ts + 301)
+    assert not uploads.verify_signature("", body, str(ts), sig, now=ts)
+    assert not uploads.verify_signature("k", body, "abc", sig, now=ts)
+
+
+# --- progress ----------------------------------------------------------------
+
+
+def stub_job(monkeypatch, job=None, error=None):
+    async def fake_get(token, job_id):
+        if error:
+            raise error
+        return job
+
+    monkeypatch.setattr(coordinator, "get_job", fake_get)
+
+
+def test_job_page_renders_shell(client):
+    r = client.get(f"/jobs/{JOB_ID}")
+    assert r.status_code == 200
+    assert f'data-job-id="{JOB_ID}"' in r.text and "job.js" in r.text
+
+
+def test_status_returns_progress_view(client, monkeypatch):
+    stub_job(monkeypatch, sample_job())
+    body = client.get(f"/jobs/{JOB_ID}/status").json()
+    assert body["stage"] == "active" and body["tasks_total"] == 2
+    assert body["tasks"][1]["replicas"][0]["restarts"] == 1
+
+
+def test_status_while_pages_are_being_prepared(client, monkeypatch, s3):
+    stub_job(monkeypatch, error=status_error(404))
+    seed_pending(s3)
+    body = client.get(f"/jobs/{JOB_ID}/status").json()
+    assert (body["stage"], body["status"], body["terminal"]) == (
+        "preparing",
+        "PREPARING",
+        False,
+    )
+
+
+def test_status_shows_failed_preparation(client, monkeypatch, s3):
+    stub_job(monkeypatch, error=status_error(404))
+    s3.objects[f"jobs/{JOB_ID}/pending.json"] = json.dumps(
+        {
+            "state": "failed",
+            "owner_id": USER["id"],
+            "error": "PDF is password protected",
+        }
+    ).encode()
+    body = client.get(f"/jobs/{JOB_ID}/status").json()
+    assert (body["stage"], body["error"]) == ("failed", "PDF is password protected")
+
+
+def test_status_hides_other_users_pending_uploads(client, monkeypatch, s3):
+    stub_job(monkeypatch, error=status_error(404))
+    seed_pending(s3)
+    s3.objects[f"jobs/{JOB_ID}/pending.json"] = json.dumps(
+        {"state": "rendering", "owner_id": str(UUID(int=99))}
+    ).encode()
+    assert client.get(f"/jobs/{JOB_ID}/status").status_code == 404
+
+
+def test_status_unknown_job_is_404(client, monkeypatch):
+    stub_job(monkeypatch, error=status_error(404))
+    assert client.get(f"/jobs/{JOB_ID}/status").status_code == 404
+
+
+def test_status_coordinator_down_is_503(client, monkeypatch):
+    stub_job(monkeypatch, error=httpx.ConnectError("down"))
+    assert client.get(f"/jobs/{JOB_ID}/status").status_code == 503
+
+
+def sse_events(text: str) -> list[tuple[str | None, dict]]:
+    out = []
+    for block in text.strip().split("\n\n"):
+        if block.startswith(":"):
+            continue
+        event, data = None, None
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                event = line[7:]
+            elif line.startswith("data: "):
+                data = json.loads(line[6:])
+        out.append((event, data))
+    return out
+
+
+def test_stream_sends_update_then_done_for_finished_job(client, monkeypatch):
+    stub_job(monkeypatch, sample_job("COMPLETED"))
+    r = client.get(f"/jobs/{JOB_ID}/stream")
+    assert r.headers["content-type"].startswith("text/event-stream")
+    events = sse_events(r.text)
+    assert events[0][0] is None and events[0][1]["status"] == "COMPLETED"
+    assert events[-1][0] == "done"
+
+
+def test_stream_pushes_changes_until_job_ends(client, monkeypatch):
+    monkeypatch.setattr(settings, "stream_interval", 0)
+    states = iter(
+        [sample_job("RUNNING"), sample_job("RUNNING"), sample_job("COMPLETED")]
+    )
+
+    async def fake_get(token, job_id):
+        return next(states)
+
+    monkeypatch.setattr(coordinator, "get_job", fake_get)
+    events = sse_events(client.get(f"/jobs/{JOB_ID}/stream").text)
+    # the repeated RUNNING snapshot is not sent twice
+    assert [e[1].get("status") for e in events if e[0] is None] == [
+        "RUNNING",
+        "COMPLETED",
+    ]
+    assert events[-1][0] == "done"
+
+
+def test_stream_reports_unknown_job(client, monkeypatch):
+    stub_job(monkeypatch, error=status_error(404))
+    assert sse_events(client.get(f"/jobs/{JOB_ID}/stream").text)[0][0] == "gone"
+
+
+def test_stream_reports_expired_session(client, monkeypatch):
+    stub_job(monkeypatch, error=status_error(401))
+    assert sse_events(client.get(f"/jobs/{JOB_ID}/stream").text)[0][0] == "auth"
+
+
+def test_stream_survives_a_coordinator_blip(client, monkeypatch):
+    monkeypatch.setattr(settings, "stream_interval", 0)
+    calls = iter([httpx.ConnectError("blip"), sample_job("FAILED")])
+
+    async def flaky(token, job_id):
+        item = next(calls)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(coordinator, "get_job", flaky)
+    events = sse_events(client.get(f"/jobs/{JOB_ID}/stream").text)
+    assert events[0][1]["status"] == "FAILED" and events[-1][0] == "done"
+
+
+# --- download and cancel -----------------------------------------------------
+
+
+def completed_job():
+    job = sample_job("COMPLETED")
+    job["tasks"] = [
+        {
+            "id": 1,
+            "task_index": 0,
+            "status": "VERIFIED",
+            "final_hash": H,
+            "replicas": [replica(1, "DONE", 100, result_hash=H)],
+        }
+    ]
+    return job
+
+
+def test_download_builds_text_from_winning_replicas(client, monkeypatch, s3):
+    stub_job(monkeypatch, completed_job())
+    s3.objects[f"jobs/{JOB_ID}/replicas/1/result.json"] = json.dumps(
+        {"pages": {"pages/0001.png": "hello", "pages/0002.png": "world"}}
+    ).encode()
+    r = client.get(f"/jobs/{JOB_ID}/result.txt")
+    assert r.status_code == 200
+    assert r.text == "hello\n\nworld\n"
+    assert "attachment" in r.headers["content-disposition"]
+
+
+def test_download_prefers_prebuilt_result(client, monkeypatch, s3):
+    stub_job(monkeypatch, completed_job())
+    s3.objects[f"jobs/{JOB_ID}/output/result.txt"] = b"prebuilt"
+    assert client.get(f"/jobs/{JOB_ID}/result.txt").text == "prebuilt"
+
+
+def test_download_not_ready_while_running(client, monkeypatch):
+    stub_job(monkeypatch, sample_job("RUNNING"))
+    assert client.get(f"/jobs/{JOB_ID}/result.txt").status_code == 409
+
+
+def test_download_missing_result_file_is_409(client, monkeypatch):
+    stub_job(monkeypatch, completed_job())
+    assert client.get(f"/jobs/{JOB_ID}/result.txt").status_code == 409
+
+
+def test_download_unknown_job_is_404(client, monkeypatch):
+    stub_job(monkeypatch, error=status_error(404))
+    assert client.get(f"/jobs/{JOB_ID}/result.txt").status_code == 404
+
+
+def test_cancel_redirects_back_to_job(client, monkeypatch):
+    called = {}
+
+    async def fake_cancel(token, job_id):
+        called["args"] = (token, job_id)
+
+    monkeypatch.setattr(coordinator, "cancel_job", fake_cancel)
+    r = client.post(f"/jobs/{JOB_ID}/cancel")
+    assert r.status_code == 303 and r.headers["location"] == f"/jobs/{JOB_ID}"
+    assert called["args"] == ("tok123", JOB_ID)
+
+
+@pytest.mark.parametrize("code, expected", [(409, 303), (404, 404), (500, 503)])
+def test_cancel_maps_coordinator_errors(client, monkeypatch, code, expected):
+    async def fail(token, job_id):
+        raise status_error(code)
+
+    monkeypatch.setattr(coordinator, "cancel_job", fail)
+    assert client.post(f"/jobs/{JOB_ID}/cancel").status_code == expected
+
+
+# --- job list ----------------------------------------------------------------
+
+
+def test_job_list_shows_rows_and_paging(client, monkeypatch):
+    rows = [
+        {
+            "id": str(UUID(int=i)),
+            "owner_id": USER["id"],
+            "job_type": "ocr",
+            "status": "COMPLETED" if i % 2 else "RUNNING",
+            "task_count": 4,
+            "created_at": "2026-10-24T10:00:00+00:00",
+            "finished_at": "2026-10-24T10:02:05+00:00" if i % 2 else None,
+        }
+        for i in range(1, 22)
+    ]
+
+    async def fake_list(token, limit=20, offset=0):
+        assert limit == 21
+        return rows
+
+    monkeypatch.setattr(coordinator, "list_jobs", fake_list)
+    r = client.get("/jobs")
+    assert r.status_code == 200
+    assert "2m 5s" in r.text and "24 Oct 2026 10:00 UTC" in r.text
+    assert "Older jobs" in r.text and "Newer jobs" not in r.text
+    assert r.text.count("/jobs/00000000-") == 20  # the 21st row only signals "more"
+
+
+def test_job_list_empty_and_error_states(client, monkeypatch):
+    async def empty(token, limit=20, offset=0):
+        return []
+
+    monkeypatch.setattr(coordinator, "list_jobs", empty)
+    assert "Upload a PDF" in client.get("/jobs").text
+
+    async def down(token, limit=20, offset=0):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(coordinator, "list_jobs", down)
+    r = client.get("/jobs")
+    assert r.status_code == 503 and "be loaded right now" in r.text
+
+
+# --- local rendering fallback ------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_local_render_makes_pages_and_creates_job(monkeypatch, s3, created):
+    seed_pending(s3, pages=3)
+    await uploads.render_locally(JOB_ID, make_pdf(3))
+    assert sorted(k for k in s3.objects if "/pages/" in k) == [
+        f"jobs/{JOB_ID}/pages/{n:04d}.png" for n in (1, 2, 3)
+    ]
+    assert s3.objects[f"jobs/{JOB_ID}/pages/0001.png"].startswith(b"\x89PNG")
+    ((_token, spec),) = created
+    assert spec["tasks"][0]["input"]["files"] == [
+        f"pages/{n:04d}.png" for n in (1, 2, 3)
+    ]
+
+
+# --- uploads still being prepared show up in the job list --------------------
+
+
+def mark_pending(s3, job_id=JOB_ID, owner=USER["id"], **fields):
+    s3.objects[f"pending-index/{owner}/{job_id}"] = b""
+    s3.objects[f"jobs/{job_id}/pending.json"] = json.dumps(
+        {
+            "state": "rendering",
+            "owner_id": owner,
+            "filename": "thesis.pdf",
+            "created_at": datetime.now(UTC).isoformat(),
+            **fields,
+        }
+    ).encode()
+
+
+def stub_list(monkeypatch, rows):
+    async def fake_list(token, limit=20, offset=0):
+        return rows
+
+    monkeypatch.setattr(coordinator, "list_jobs", fake_list)
+
+
+def test_job_list_shows_uploads_still_preparing(client, monkeypatch, s3):
+    stub_list(monkeypatch, [])
+    mark_pending(s3)
+    r = client.get("/jobs")
+    assert r.status_code == 200
+    assert "Preparing" in r.text and "thesis.pdf" in r.text
+    assert f"/jobs/{JOB_ID}" in r.text
+    assert "location.reload" in r.text  # keeps checking until the job exists
+
+
+def test_job_list_shows_failed_uploads_with_reason(client, monkeypatch, s3):
+    stub_list(monkeypatch, [])
+    mark_pending(s3, state="failed", error="PDF is password protected")
+    r = client.get("/jobs")
+    assert "Failed" in r.text and "PDF is password protected" in r.text
+    assert "location.reload" not in r.text
+
+
+def test_job_list_hides_other_users_and_finished_uploads(client, monkeypatch, s3):
+    stub_list(monkeypatch, [])
+    mark_pending(s3, job_id=UUID(int=8), owner=str(UUID(int=99)))  # someone else's
+    # created already: the marker is stale and its pending.json is gone
+    s3.objects[f"pending-index/{USER['id']}/{UUID(int=9)}"] = b""
+    r = client.get("/jobs")
+    assert str(UUID(int=8)) not in r.text and str(UUID(int=9)) not in r.text
+    assert "Upload a PDF" in r.text  # still the empty state
+
+
+def test_job_list_does_not_repeat_a_job_the_coordinator_has(client, monkeypatch, s3):
+    stub_list(
+        monkeypatch,
+        [
+            {
+                "id": str(JOB_ID),
+                "owner_id": USER["id"],
+                "job_type": "ocr",
+                "status": "RUNNING",
+                "task_count": 2,
+                "created_at": "2026-10-24T10:00:00+00:00",
+                "finished_at": None,
+            }
+        ],
+    )
+    mark_pending(s3)  # the marker hasn't been cleaned up yet
+    assert client.get("/jobs").text.count(f"/jobs/{JOB_ID}") == 1
+
+
+def test_job_list_still_works_when_s3_is_down(client, monkeypatch):
+    from botocore.exceptions import EndpointConnectionError
+
+    stub_list(monkeypatch, [])
+
+    def boom(*args, **kwargs):
+        raise EndpointConnectionError(endpoint_url="http://minio")
+
+    monkeypatch.setattr(storage, "list_pending", boom)
+    assert client.get("/jobs").status_code == 200
+
+
+# --- expiry of uploads that never get their pages ------------------------------
+
+
+def long_ago(minutes=31):
+    return (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
+
+
+def test_stale_upload_is_failed_and_token_deleted_when_viewed(client, monkeypatch, s3):
+    stub_job(monkeypatch, error=status_error(404))
+    mark_pending(s3, token="tok123", created_at=long_ago())
+    body = client.get(f"/jobs/{JOB_ID}/status").json()
+    assert body["stage"] == "failed" and "took too long" in body["error"]
+    pending = s3.json(f"jobs/{JOB_ID}/pending.json")
+    assert pending["state"] == "failed" and "token" not in pending
+
+
+def test_recent_upload_is_left_alone(client, monkeypatch, s3):
+    stub_job(monkeypatch, error=status_error(404))
+    mark_pending(s3, token="tok123", created_at=long_ago(5))
+    assert client.get(f"/jobs/{JOB_ID}/status").json()["stage"] == "preparing"
+    assert s3.json(f"jobs/{JOB_ID}/pending.json")["token"] == "tok123"
+
+
+def test_job_list_expires_stale_uploads_too(client, monkeypatch, s3):
+    stub_list(monkeypatch, [])
+    mark_pending(s3, token="tok123", created_at=long_ago())
+    r = client.get("/jobs")
+    assert "Failed" in r.text and "took too long" in r.text
+    assert "token" not in s3.json(f"jobs/{JOB_ID}/pending.json")
+
+
+def test_late_callback_does_not_start_an_expired_upload(client, hook, s3, created):
+    seed_pending(s3, pages=3)
+    pending = s3.json(f"jobs/{JOB_ID}/pending.json")
+    pending["created_at"] = long_ago()
+    s3.objects[f"jobs/{JOB_ID}/pending.json"] = json.dumps(pending).encode()
+    seed_pages(s3, 3)
+    assert signed_post(client, ok_event(page_count=3)).status_code == 200
+    assert created == []
+    assert "token" not in s3.json(f"jobs/{JOB_ID}/pending.json")
+
+
+# --- cancelling and dismissing uploads that have no coordinator job --------------
+
+
+def stub_cancel_404(monkeypatch):
+    async def not_found(token, job_id):
+        raise status_error(404)
+
+    monkeypatch.setattr(coordinator, "cancel_job", not_found)
+
+
+def test_cancel_while_preparing_forgets_the_upload(client, monkeypatch, s3):
+    stub_cancel_404(monkeypatch)
+    mark_pending(s3, token="tok123")
+    r = client.post(f"/jobs/{JOB_ID}/cancel")
+    assert r.status_code == 303 and r.headers["location"] == "/jobs"
+    assert f"jobs/{JOB_ID}/pending.json" not in s3.objects
+    assert f"pending-index/{USER['id']}/{JOB_ID}" not in s3.objects
+
+
+def test_dismiss_a_failed_upload(client, monkeypatch, s3):
+    stub_cancel_404(monkeypatch)
+    mark_pending(s3, state="failed", error="PDF is password protected")
+    assert client.post(f"/jobs/{JOB_ID}/cancel").status_code == 303
+    assert f"jobs/{JOB_ID}/pending.json" not in s3.objects
+
+
+def test_cannot_cancel_someone_elses_upload(client, monkeypatch, s3):
+    stub_cancel_404(monkeypatch)
+    other = str(UUID(int=99))
+    mark_pending(s3, owner=other)
+    assert client.post(f"/jobs/{JOB_ID}/cancel").status_code == 404
+    assert f"jobs/{JOB_ID}/pending.json" in s3.objects
+
+
+def test_cancel_unknown_job_is_still_404(client, monkeypatch):
+    stub_cancel_404(monkeypatch)
+    assert client.post(f"/jobs/{JOB_ID}/cancel").status_code == 404
+
+
+def test_job_list_offers_cancel_and_dismiss_for_pending_rows(client, monkeypatch, s3):
+    stub_list(monkeypatch, [])
+    mark_pending(s3)
+    mark_pending(s3, job_id=UUID(int=8), state="failed", error="bad")
+    html = client.get("/jobs").text
+    assert f'action="/jobs/{JOB_ID}/cancel"' in html and ">Cancel<" in html
+    assert f'action="/jobs/{UUID(int=8)}/cancel"' in html and ">Dismiss<" in html
+
+
+# --- callback and upload size limits -----------------------------------------
+
+
+def test_hook_refuses_big_bodies_before_checking_them(client, hook, created):
+    ts = str(int(time.time()))
+    r = client.post(
+        "/hooks/pages-ready",
+        content=b"x" * (settings.callback_max_bytes + 1),
+        headers={"X-Idlecloud-Timestamp": ts, "X-Idlecloud-Signature": "abc"},
+    )
+    assert r.status_code == 413
+
+
+def test_hook_refuses_stale_or_unsigned_requests_without_reading(client, hook):
+    old = str(int(time.time()) - 3600)
+    big = b"x" * (settings.callback_max_bytes + 1)
+    stale = client.post(
+        "/hooks/pages-ready",
+        content=big,
+        headers={"X-Idlecloud-Timestamp": old, "X-Idlecloud-Signature": "abc"},
+    )
+    unsigned = client.post(
+        "/hooks/pages-ready",
+        content=big,
+        headers={"X-Idlecloud-Timestamp": str(int(time.time()))},
+    )
+    assert stale.status_code == 401 and unsigned.status_code == 401
+
+
+def test_oversized_upload_is_refused_from_its_content_length(client, s3, monkeypatch):
+    monkeypatch.setattr(settings, "max_upload_mb", 1)
+    data = b"%PDF-" + b"0" * (3 * 1024 * 1024)
+    r = post_pdf(client, data)
+    assert r.status_code == 413 and "over 1 MB" in r.text
+    assert s3.objects == {}
+
+
+def test_filename_is_cleaned_and_capped(client, s3):
+    name = "../../etc/" + "a" * 400 + "\x00\x07.pdf"
+    r = post_pdf(client, make_pdf(1), name)
+    job_id = r.headers["location"].removeprefix("/jobs/")
+    stored = s3.json(f"jobs/{job_id}/pending.json")["filename"]
+    assert len(stored) <= settings.max_filename_chars
+    assert "/" not in stored and "\x00" not in stored and "etc" not in stored
