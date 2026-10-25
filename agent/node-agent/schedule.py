@@ -52,6 +52,8 @@ def parse(text: str) -> Schedule:
             continue
         try:
             start, end = (time.fromisoformat(p.strip()) for p in part.split("-"))
+            if start.tzinfo or end.tzinfo:
+                raise ValueError("timezone not allowed")
         except ValueError:
             raise ValueError(f"bad schedule window {part!r}, expected HH:MM-HH:MM")
         if start == end:
