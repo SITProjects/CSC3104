@@ -12,6 +12,10 @@ A tray icon shows green while the PC is lent out and grey while not (hover for
 the reason). Each change is also logged as one line, such as `Lending compute`.
 Set `IDLECLOUD_TRAY=0` for the log line only.
 
+With no console (the .exe), logs go to `%LOCALAPPDATA%\idlecloud\sensor.log`.
+If the sensor hits an unexpected error, the icon turns grey with
+"sensor stopped, restart it" and the traceback is in that log.
+
 ## Build the .exe (developers only)
 
 Lab PCs don't run these steps; they get the .exe through `install-worker.ps1`.

@@ -10,9 +10,12 @@ A tray icon shows the owner whether the PC is lent out.
 import ctypes
 import logging
 import os
+import sys
 import threading
 import time
 from collections.abc import Callable
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import httpx
 import psutil
@@ -21,6 +24,9 @@ AGENT_URL = os.environ.get("IDLECLOUD_AGENT_URL", "http://localhost:9100/state")
 INTERVAL = 5  # seconds between readings
 REQUEST_TIMEOUT = 2  # seconds to wait for the node agent before giving up
 TRAY_ENABLED = os.environ.get("IDLECLOUD_TRAY", "1") != "0"
+LOG_FILE = (
+    Path(os.environ.get("LOCALAPPDATA", Path.home())) / "idlecloud" / "sensor.log"
+)
 
 log = logging.getLogger("windows-sensor")
 
@@ -83,6 +89,8 @@ class LendingStatus:
     def update(self, reply: dict | None) -> bool:
         """Apply the agent's reply (None if unreachable). Returns True if the
         owner should be told, i.e. lending started or stopped."""
+        if not isinstance(reply, dict):
+            reply = None  # valid JSON but not the agent's reply
         # Only IDLE means lent. Anything else, including no answer, is not:
         # the agent itself treats a missing sensor as BUSY.
         lending = reply is not None and reply.get("state") == "IDLE"
@@ -99,11 +107,13 @@ class LendingStatus:
 
 def run(stop: threading.Event, on_change: Callable[[LendingStatus], None]) -> None:
     """Read and send a reading every INTERVAL seconds until `stop` is set.
-    Calls on_change whenever lending starts or stops."""
+    Calls on_change whenever the status text changes, and logs a line
+    whenever lending starts or stops."""
     # The first cpu_percent() call has nothing to compare against and always returns
     # 0.0, so prime it once before the loop.
     psutil.cpu_percent(interval=None)
     status = LendingStatus()
+    shown = None
 
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
         while not stop.is_set():
@@ -121,6 +131,9 @@ def run(stop: threading.Event, on_change: Callable[[LendingStatus], None]) -> No
                     log.info("sent %s", reading)
                 if status.update(reply):
                     log.info("%s", status.text)
+                # Update the tray tooltip whenever the reason for not lending changes
+                if status.text != shown:
+                    shown = status.text
                     on_change(status)
             # Sleep for whatever is left of the interval so readings stay ~5 s apart
             # even when the POST was slow. wait() returns early on quit.
@@ -145,9 +158,12 @@ def run_with_tray(stop: threading.Event) -> bool:
     green, grey = dot("#2e9d4f"), dot("#8a8f98")
 
     def show(status: LendingStatus) -> None:
-        icon.icon = green if status.lending else grey
+        set_icon(status.lending, status.text)
+
+    def set_icon(lending: bool, text: str) -> None:
+        icon.icon = green if lending else grey
         # Windows cuts tooltips at 127 characters
-        icon.title = f"idlecloud: {status.text}"[:127]
+        icon.title = f"idlecloud: {text}"[:127]
 
     def quit_sensor(icon, item) -> None:
         # With no readings the agent goes BUSY within 30 s, so this also stops lending
@@ -165,15 +181,33 @@ def run_with_tray(stop: threading.Event) -> bool:
         # pystray runs this in its own thread, so the icon stays responsive
         # while the loop sleeps or waits on the agent
         icon.visible = True
-        run(stop, show)
+        try:
+            run(stop, show)
+        except Exception:
+            # Without this the icon would keep its last state, maybe green, while
+            # no readings are sent. The agent stops lending on its own once
+            # readings stop, so grey is the truth.
+            log.exception("sensor loop crashed")
+            set_icon(False, "Not lending: sensor stopped, restart it")
 
     icon.run(setup)
     return True
 
 
+def log_handler() -> logging.Handler:
+    """Write log lines to the console, or to LOG_FILE if there is no
+    console (as in the .exe)."""
+    if sys.stderr is not None:
+        return logging.StreamHandler()
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    return RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=2)
+
+
 def main() -> None:
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[log_handler()],
     )
     log.info("sensor started, reporting to %s every %ss", AGENT_URL, INTERVAL)
     stop = threading.Event()
