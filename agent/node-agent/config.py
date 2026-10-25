@@ -25,6 +25,9 @@ IDLE_CPU_PERCENT = _float("NODE_AGENT_IDLE_CPU_PERCENT", 20)
 IDLE_CPU_READINGS = int(os.environ.get("NODE_AGENT_IDLE_CPU_READINGS", "3"))
 # No sensor reading for this long means BUSY. Safe by default.
 STALE_S = _float("NODE_AGENT_STALE_S", 30)
+# Owner-set hours when the PC is never lent, "HH:MM-HH:MM", comma separated, in
+# local time (set TZ if WSL's clock is not the PC's timezone). Empty for none.
+BLOCKED = os.environ.get("NODE_AGENT_BLOCKED", "08:00-09:00")
 
 # ---------- owner-active taint ----------
 
