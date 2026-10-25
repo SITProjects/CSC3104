@@ -22,7 +22,7 @@ param(
     [string] $WgConfig,
     [string] $TokenFile,
     [string] $Distro = 'Ubuntu-24.04',
-    [string] $SensorExe = (Join-Path $PSScriptRoot 'windows-sensor\dist\idlecloud-sensor.exe'),
+    [string] $SensorExe,
     [switch] $Rejoin
 )
 
@@ -30,6 +30,10 @@ $ErrorActionPreference = 'Stop'
 # Without this, wsl.exe prints UTF-16 and `wsl -l` output cannot be compared.
 $env:WSL_UTF8 = '1'
 
+# Windows PowerShell 5.1 has no $PSScriptRoot in param defaults, so set it here.
+if (-not $SensorExe) {
+    $SensorExe = Join-Path $PSScriptRoot 'windows-sensor\dist\idlecloud-sensor.exe'
+}
 $JoinScript = Join-Path $PSScriptRoot '..\infra\join-worker.sh'
 $Stage = '/tmp/idlecloud-install'
 $StageUnc = "\\wsl$\$Distro" + ($Stage -replace '/', '\')
