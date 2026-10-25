@@ -8,10 +8,11 @@ def winning_hash(successful_hashes: list[str], total_replicas: int) -> str | Non
     Returns the result hash supported by a strict majority of replicas.
 
     A hash needs more than half of all replicas: two out of three, for example.
-    Failed replicas count towards the total but contribute no hash, so failures
-    never lower the majority threshold. The caller must wait for all replicas
-    to finish and supply one valid hash per successful replica (DONE with exit
-    code 0). This helper only compares hashes; it does not change task status.
+    Failed, unfinished and cancelled replicas count towards the total but
+    contribute no hash, so early stopping never lowers the majority threshold.
+    Supply one valid hash per participating successful replica (DONE with exit
+    code 0). A majority can be detected before every replica finishes. This
+    helper only compares hashes; it does not change task status.
 
     args:
         successful_hashes: The SHA-256 result hashes from successful replicas.
