@@ -64,6 +64,57 @@ sudo install -D -m 600 node-agent-<node-name>.kubeconfig /etc/idlecloud/node-age
 
 If the Kubernetes node name is not the lowercased hostname, set `NODE_NAME`.
 
+## Coordinator heartbeats
+
+Every 10 seconds the agent posts its state and the Windows host's CPU load to
+`/internal/nodes/<node>/heartbeat`. After 30 seconds without one, the
+coordinator marks the node OFFLINE and requeues its replicas.
+
+`make-kubeconfig.sh` also writes `coordinator-<node-name>.token`. This token is
+for the shared `node-agent-heartbeat` ServiceAccount, which has no RBAC rules.
+It is bound to this Node, so the coordinator accepts heartbeats from it for this
+node only. The API server does not accept it, because it was issued for the
+coordinator's audience. It lasts a year (`HEARTBEAT_DURATION`). Run the script
+again to renew it. Copy it to the worker:
+
+```bash
+sudo install -D -m 600 coordinator-<node-name>.token /etc/idlecloud/coordinator.token
+```
+
+The agent runs on the host, not in a pod, so cluster DNS does not work. Point it
+at the coordinator Service's ClusterIP, which kube-proxy routes from the node:
+
+```bash
+kubectl -n idlecloud-system get svc coordinator   # on an admin machine
+COORDINATOR_URL=http://<cluster-ip>:8001 python server.py
+```
+
+Without `COORDINATOR_URL` the agent sends no heartbeats, and the coordinator
+sees the node as OFFLINE.
+
+## Evaluation log
+
+Every state change and every taint change is appended as one JSON line to
+`node-agent-events.jsonl` (`NODE_AGENT_EVENT_LOG`; empty turns it off):
+
+```json
+{"time": "2026-10-24T09:00:01.120+00:00", "node": "pc1", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 2s ago", "idle_seconds": 2.0}
+{"time": "2026-10-24T09:00:01.310+00:00", "node": "pc1", "event": "taint", "added": true}
+```
+
+The key press happened `idle_seconds` before the `state` line, so key press to
+taint is that gap plus the time to the `taint` line.
+
+## Graceful shutdown
+
+`infra/join-worker.sh` sets `shutdownGracePeriod: 30s` in
+`/var/lib/rancher/k3s/agent/etc/kubelet.conf.d/50-graceful-shutdown.conf`. When
+the PC is switched off, task pods get SIGTERM and 30 seconds to save a
+checkpoint. It must be in this config file: `--kubelet-arg=shutdown-grace-period`
+is not a kubelet flag and stops the kubelet starting. This needs systemd in WSL2
+(`[boot] systemd=true`). Check it with `systemd-inhibit --list | grep kubelet`,
+which should show a `delay` lock.
+
 The server listens on `127.0.0.1` only. Anything that can reach the port can say
 the PC is idle, so do not expose it on the WireGuard network.
 
