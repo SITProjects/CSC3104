@@ -10,8 +10,9 @@
   const STATUS_TEXT = {
     PREPARING: "Preparing", PENDING: "Queued", RUNNING: "Running", VOTING: "Checking",
     VERIFIED: "Verified", DISPUTED: "Disputed", COMPLETED: "Completed",
-    FAILED: "Failed", CANCELLED: "Cancelled", SCHEDULED: "Starting",
-    EVICTED: "Moving", LOST: "Moving", DONE: "Done",
+    FAILED: "Failed", CANCELLED: "Cancelled", SCHEDULED: "Queued",
+    WAITING: "Waiting for a PC", EVICTED: "Moving to another PC",
+    LOST: "Moving to another PC", DONE: "Done",
   };
   const label = (s) => STATUS_TEXT[s] || s;
 
@@ -36,15 +37,31 @@
     return wrap;
   }
 
+  // The coordinator calls a copy RUNNING as soon as its Kubernetes Job exists,
+  // even before any PC has picked it up. Without a PC it is still waiting.
+  function copyState(r) {
+    if (r.status === "RUNNING" && !r.node) return "WAITING";
+    if (r.status === "SCHEDULED") return "PENDING";
+    return r.status;
+  }
+
   function copyItem(r) {
     const item = el("li", "copy");
-    item.append(el("span", "node", r.node || "waiting for a PC"), " · ", badge(r.status));
-    if (r.status === "RUNNING") item.append(` ${r.progress}%`);
+    item.append(el("span", "node", r.node || "–"), " · ", badge(copyState(r)));
+    if (r.status === "RUNNING" && r.node) item.append(` ${r.progress}%`);
     if (r.restarts > 0) {
+      // counts every relaunch: an eviction, a lost pod or a failed launch
       const n = r.restarts;
-      item.append(el("span", "restart", ` ↻ ${n} restart${n === 1 ? "" : "s"}`));
+      item.append(el("span", "restart", ` ↻ ${n} ${n === 1 ? "retry" : "retries"}`));
     }
     return item;
+  }
+
+  // A task only counts as running once one of its copies has a PC.
+  function taskState(task) {
+    if (task.status !== "RUNNING") return task.status;
+    const started = task.replicas.some((r) => r.node || r.status === "DONE");
+    return started ? "RUNNING" : "PENDING";
   }
 
   function voteText(task) {
@@ -60,7 +77,7 @@
     row.append(el("th", null, `#${task.index + 1}`));
     row.firstChild.scope = "row";
     const status = el("td");
-    status.append(badge(task.status));
+    status.append(badge(taskState(task)));
     const progress = el("td");
     progress.append(bar(task.progress));
     const copies = el("td");
@@ -101,9 +118,19 @@
       $("task-rows").replaceChildren(...job.tasks.map(renderTask));
     }
     $("download").hidden = job.status !== "COMPLETED";
-    // only once the coordinator has the job; before that there is nothing to cancel
-    $("cancel-form").hidden = job.terminal || job.stage !== "active";
+    // Cancel works while preparing too. A failed upload can only be dismissed.
+    const dismiss = job.stage === "failed";
+    $("cancel-form").hidden = job.terminal && !dismiss;
+    $("cancel-button").textContent = dismiss ? "Dismiss" : "Cancel job";
+    $("cancel-button").dataset.mode = dismiss ? "dismiss" : "cancel";
   }
+
+  $("cancel-form").addEventListener("submit", (e) => {
+    const asking = $("cancel-button").dataset.mode === "cancel";
+    if (asking && !confirm("Cancel this job? Work already done is discarded.")) {
+      e.preventDefault();
+    }
+  });
 
   function connect() {
     const source = new EventSource(`/jobs/${jobId}/stream`);

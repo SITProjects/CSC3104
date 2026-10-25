@@ -20,7 +20,8 @@
       <tr>
         <td><a href="/jobs/{{ job.id }}"><code>{{ job.id|string|truncate(8, True, "") }}</code></a><br><small>{{ job.filename or job.job_type }}</small></td>
         <td><span class="badge badge-{{ job.status|lower }}">{{ job.status|lower|capitalize }}</span>
-          {% if job.error %}<br><small>{{ job.error }}</small>{% endif %}</td>
+          {% if job.error %}<br><small>{{ job.error }}</small>{% endif %}
+          {% if job.pending %}<form class="inline" method="post" action="/jobs/{{ job.id }}/cancel"><button type="submit" class="link">{{ "Dismiss" if job.status == "FAILED" else "Cancel" }}</button></form>{% endif %}</td>
         <td>{{ job.task_count if job.task_count is not none else "–" }}</td>
         <td>{{ job.created }}</td>
         <td>{{ job.took }}{% if job.running %} <small>so far</small>{% endif %}</td>

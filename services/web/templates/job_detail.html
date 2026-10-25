@@ -10,9 +10,8 @@
     <div class="job-actions">
       <span id="status-badge" class="badge badge-pending">Loading</span>
       <a id="download" class="button" href="/jobs/{{ job_id }}/result.txt" hidden>Download text</a>
-      <form id="cancel-form" method="post" action="/jobs/{{ job_id }}/cancel" hidden
-            onsubmit="return confirm('Cancel this job? Work already done is discarded.')">
-        <button type="submit" class="secondary">Cancel job</button>
+      <form id="cancel-form" method="post" action="/jobs/{{ job_id }}/cancel" hidden>
+        <button type="submit" id="cancel-button" class="secondary" data-mode="cancel">Cancel job</button>
       </form>
     </div>
   </div>
@@ -24,7 +23,7 @@
     <p id="overall-text" class="hint">Connecting…</p>
     <dl class="stats" id="stats" hidden>
       <div><dt>Tasks verified</dt><dd id="stat-verified">0 / 0</dd></div>
-      <div><dt>Restarts after eviction</dt><dd id="stat-restarts">0</dd></div>
+      <div><dt>Retries</dt><dd id="stat-restarts">0</dd></div>
       <div><dt>Disputed</dt><dd id="stat-disputed">0</dd></div>
     </dl>
   </section>
