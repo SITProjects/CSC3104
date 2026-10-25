@@ -761,32 +761,26 @@ async def admin_nodes(
         "page_size": BURST_PAGE_SIZE,
     }
     status = 200
-    if not token:
-        context["error"] = (
-            "Log in with an admin account to view burst workers and costs."
+    # AdminOnly has already checked the session. The coordinator still checks
+    # again, since a session can expire or lose admin between the two calls.
+    try:
+        context["burst"] = await coordinator.burst_overview(
+            token,
+            machine_limit=BURST_PAGE_SIZE,
+            machine_offset=machine_offset,
+            job_limit=BURST_PAGE_SIZE,
+            job_offset=job_offset,
         )
-        status = 401
-    else:
-        try:
-            context["burst"] = await coordinator.burst_overview(
-                token,
-                machine_limit=BURST_PAGE_SIZE,
-                machine_offset=machine_offset,
-                job_limit=BURST_PAGE_SIZE,
-                job_offset=job_offset,
-            )
-        except httpx.HTTPStatusError as error:
-            code = error.response.status_code
-            status = code if code in (401, 403) else 503
-            context["error"] = {
-                401: "Your session has expired. Log in again to view burst costs.",
-                403: "An admin account is required to view burst workers and costs.",
-            }.get(code, "Burst cost data is unavailable. Please try again shortly.")
-        except httpx.RequestError:
-            status = 503
-            context["error"] = (
-                "The coordinator is unavailable. Please try again shortly."
-            )
+    except httpx.HTTPStatusError as error:
+        code = error.response.status_code
+        status = code if code in (401, 403) else 503
+        context["error"] = {
+            401: "Your session has expired. Log in again to view burst costs.",
+            403: "An admin account is required to view burst workers and costs.",
+        }.get(code, "Burst cost data is unavailable. Please try again shortly.")
+    except httpx.RequestError:
+        status = 503
+        context["error"] = "The coordinator is unavailable. Please try again shortly."
     return templates.TemplateResponse(
         request, "admin_nodes.html", context, status_code=status
     )
