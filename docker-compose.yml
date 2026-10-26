@@ -180,6 +180,10 @@ services:
     command: >-
       sh -c "sed 's#https://127.0.0.1:6443#https://k3-server:6443#' /k3s-config/config > /tmp/kubeconfig
       && exec python -m services.verifier.runner"
+    # The image's health check calls the coordinator's /healthz; the verifier
+    # serves no HTTP, so it would always be "unhealthy"
+    healthcheck:
+      disable: true
     environment:
       DATABASE_URL: postgresql://admin:password123@postgres:5432/csc3104
       KUBECONFIG: /tmp/kubeconfig
