@@ -44,9 +44,9 @@ async def get_dispute_exclusions(
         # Event details retain the PC name even if the node record is deleted.
         detail = event.detail if isinstance(event.detail, dict) else {}
         previous_nodes.append(detail.get("node_name"))
-        key = (detail.get("replica_id"), detail.get("attempt"))
-        if isinstance(key[0], int) and isinstance(key[1], int):
-            covered.add(key)
+        replica_id, attempt = detail.get("replica_id"), detail.get("attempt")
+        if isinstance(replica_id, int) and isinstance(attempt, int):
+            covered.add((replica_id, attempt))
 
     for replica in replicas:
         # Only history for this exact attempt can cover a cleared assignment.

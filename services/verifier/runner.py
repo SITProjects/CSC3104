@@ -9,6 +9,7 @@ from shared.db.session import SessionManager
 
 from .adaptive import adaptive_loop
 from .controller import verify_next_task
+from .finish import finish_loop
 from .k8s import trust_sync_loop
 from .output import output_loop
 
@@ -46,8 +47,8 @@ async def verifier_loop(
 
 async def run_verifier() -> None:
     """
-    Runs voting, output assembly, adaptive checks and trust sync, and closes the
-    pool on shutdown.
+    Runs voting, output assembly, ending failed and finished jobs, adaptive
+    checks and trust sync, and closes the pool on shutdown.
 
     Reads DATABASE_URL using the coordinator's database URL convention. The
     coordinator owns migrations; this service uses the existing tables. SIGTERM
@@ -74,6 +75,7 @@ async def run_verifier() -> None:
             background_tasks = [
                 asyncio.create_task(trust_sync_loop(manager.session_factory)),
                 asyncio.create_task(output_loop(manager.session_factory)),
+                asyncio.create_task(finish_loop(manager.session_factory)),
             ]
             if os.environ.get(
                 "ADAPTIVE_REPLICATION_ENABLED", "true"
