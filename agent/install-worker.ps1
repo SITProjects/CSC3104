@@ -6,23 +6,28 @@ Turns this Windows PC into an IdleCloud worker in one step.
 1. Turns on systemd in WSL2. K3s, WireGuard and graceful shutdown need it.
 2. Installs the Windows sensor .exe and registers it, and WSL, to start at
    every login.
-3. Runs infra/join-worker.sh inside Ubuntu to join the cluster over WireGuard,
+3. Installs the node agent in Ubuntu as a systemd service, so it starts at
+   boot and is restarted if it stops.
+4. Runs infra/join-worker.sh inside Ubuntu to join the cluster over WireGuard,
    then starts the sensor and WSL tasks.
 
 Get wg0.conf and agent-token from /etc/wireguard/peers/<name>/ on the hub,
 after member 1 runs `add-peer.sh worker <name>`. The token lasts 10 minutes,
 so run this soon after. Running it again skips the join if the K3s agent is
-already active (use -Rejoin to force it) and refreshes the sensor and tasks.
+already active (use -Rejoin to force it) and refreshes the sensor, tasks and
+node agent.
 
 Run in Windows PowerShell from the repo, as the PC's normal user:
 
   powershell -ExecutionPolicy Bypass -File .\agent\install-worker.ps1 `
-      -NodeName pc1 -WgConfig .\wg0.conf -TokenFile .\agent-token
+      -NodeName pc1 -WgConfig .\wg0.conf -TokenFile .\agent-token `
+      -CoordinatorUrl http://<cluster-ip>:8001
 #>
 param(
     [Parameter(Mandatory)] [string] $NodeName,
     [string] $WgConfig,
     [string] $TokenFile,
+    [string] $CoordinatorUrl,
     [string] $Distro = 'Ubuntu-24.04',
     [string] $SensorExe,
     [switch] $Rejoin
@@ -37,6 +42,7 @@ if (-not $SensorExe) {
     $SensorExe = Join-Path $PSScriptRoot 'windows-sensor\dist\idlecloud-sensor.exe'
 }
 $JoinScript = Join-Path $PSScriptRoot '..\infra\join-worker.sh'
+$AgentDir = Join-Path $PSScriptRoot 'node-agent'
 $Stage = '/tmp/idlecloud-install'
 $StageUnc = "\\wsl$\$Distro" + ($Stage -replace '/', '\')
 $TaskPath = '\IdleCloud\'
@@ -64,7 +70,7 @@ function Copy-ToStage([string] $Source, [string] $Name) {
     [IO.File]::WriteAllText("$StageUnc\$Name", $text, (New-Object Text.UTF8Encoding $false))
 }
 
-foreach ($path in @($JoinScript, $SensorExe)) {
+foreach ($path in @($JoinScript, $SensorExe, (Join-Path $AgentDir 'install-service.sh'))) {
     if (-not (Test-Path $path -PathType Leaf)) { throw "File not found: $path" }
 }
 
@@ -128,7 +134,23 @@ Register-ScheduledTask -TaskPath $TaskPath -TaskName 'WSL' -Action $wslAction `
 Register-ScheduledTask -TaskPath $TaskPath -TaskName 'Sensor' -Action $sensorAction `
     -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 
-# 3. Join the cluster
+# 3. Node agent as a systemd service. Also before the join, as it downloads
+# packages and can fail on a PC without internet access.
+Write-Host 'Installing the node agent service...'
+Initialize-Stage
+try {
+    $agentFiles = @(Get-ChildItem $AgentDir -Filter *.py) + @(
+        'requirements.txt', 'idlecloud-node-agent.service', 'install-service.sh' |
+            ForEach-Object { Get-Item (Join-Path $AgentDir $_) })
+    foreach ($file in $agentFiles) { Copy-ToStage $file.FullName $file.Name }
+    $agentArgs = @($NodeName)
+    if ($CoordinatorUrl) { $agentArgs += $CoordinatorUrl }
+    Invoke-Wsl bash "$Stage/install-service.sh" @agentArgs
+} finally {
+    & wsl.exe -d $Distro -u root --exec rm -rf $Stage
+}
+
+# 4. Join the cluster
 if ((Get-WslOutput systemctl is-active k3s-agent) -eq 'active' -and -not $Rejoin) {
     Write-Host 'K3s agent is already running, skipping the join (use -Rejoin to force it).'
 } else {
@@ -155,6 +177,7 @@ Write-Host @"
 
 Done. $NodeName should show as Ready in 'kubectl get nodes' within a minute.
 The node is not protected from task pods until the node agent runs. On an
-admin machine, run agent/node-agent/make-kubeconfig.sh $NodeName, then follow
-agent/node-agent/README.md.
+admin machine, run agent/node-agent/make-kubeconfig.sh $NodeName and copy its
+two files to /etc/idlecloud/ (see agent/README.md). The node agent then starts
+by itself within 10 seconds, and at every boot after that.
 "@

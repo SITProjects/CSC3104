@@ -36,19 +36,66 @@ PC's timezone, set `TZ`, for example `TZ=Asia/Singapore`.
 
 ## Run
 
-Inside Ubuntu (WSL2). Requires Python 3.11+ (Ubuntu 24.04 ships 3.12):
+On a worker, `install-worker.ps1` installs the agent as the systemd service
+`idlecloud-node-agent` (see [Service](#service)). Run it by hand only to
+develop or test it.
+
+Inside Ubuntu (WSL2), from a checkout of the repo. Requires Python 3.11+
+(Ubuntu 24.04 ships 3.12). Ubuntu 24.04 refuses `pip install` outside a virtual
+environment, so make one first:
 
 ```bash
 cd agent/node-agent
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-NODE_AGENT_DEMO=1 python server.py
 ```
 
-Then start the Windows sensor. Check the decision with
-`curl localhost:9100/state`.
+On a worker, stop the service first, since both use port 9100. With the
+kubeconfig and token in `/etc/idlecloud/`:
 
+```bash
+sudo systemctl stop idlecloud-node-agent
+COORDINATOR_URL=http://<cluster-ip>:8001 python3 server.py
+sudo systemctl start idlecloud-node-agent   # when done
+```
+
+[Coordinator heartbeats](#coordinator-heartbeats) shows how to find the
+ClusterIP. For a demo, add `NODE_AGENT_DEMO=1` for the 30-second idle wait.
 Without a cluster, add `NODE_AGENT_TAINT=0` and the agent only logs its
 decisions.
+
+The sensor starts at login on a worker. Check the decision with
+`curl localhost:9100/state`.
+
+### Service
+
+`install-service.sh` copies the agent to `/opt/idlecloud/node-agent/` with its
+own venv, and installs `idlecloud-node-agent.service`. `install-worker.ps1`
+runs it; to run it by hand, from this folder:
+
+```bash
+sudo bash install-service.sh <node-name> [http://<cluster-ip>:8001]
+```
+
+Run it again after changing the code, to copy it over and restart the agent.
+
+- Starts at boot and is restarted 10 seconds after it stops. Without the
+  kubeconfig it exits at start-up, so it keeps retrying until
+  `make-kubeconfig.sh`'s files are copied over, then runs.
+- Settings go in `/etc/idlecloud/node-agent.env`, one `NAME=value` per line
+  (`NODE_NAME`, `COORDINATOR_URL`, `NODE_AGENT_DEMO=1`, ...). Re-running the
+  script keeps them, except the ones passed to it. After a change:
+  `sudo systemctl restart idlecloud-node-agent`.
+- Logs: `journalctl -u idlecloud-node-agent -f`. The evaluation log is
+  `/var/log/idlecloud/node-agent-events.jsonl`.
+- On stop it taints the node before it exits. It is ordered after WireGuard
+  and K3s, so at shutdown it stops while the API server can still be reached.
+
+While the agent is not running, the node keeps its taint and gets no task pods,
+and the tray shows "node agent not running". The exception is an agent that
+dies without stopping cleanly (power cut, WSL killed) while IDLE: the node stays
+untainted until the service starts again.
 
 ## Owner-active taint
 
@@ -112,8 +159,10 @@ sees the node as OFFLINE.
 ## Evaluation log
 
 Every state change and every taint change is appended as one JSON line to
-`node-agent-events.jsonl` next to `server.py`, wherever the agent is started
-from (`NODE_AGENT_EVENT_LOG`; empty turns it off):
+`node-agent-events.jsonl` next to `server.py` (the service writes to
+`/var/log/idlecloud/` instead), wherever the agent is started
+from (`NODE_AGENT_EVENT_LOG`; empty turns it off). The file is not in Git; the
+eviction trials copy it into `eval/results/`.
 
 ```json
 {"time": "2026-10-24T09:00:01.120+00:00", "node": "pc1", "event": "state", "old": "IDLE", "new": "BUSY", "reason": "input 2s ago", "idle_seconds": 2.0}
@@ -132,6 +181,8 @@ checkpoint. It must be in this config file: `--kubelet-arg=shutdown-grace-period
 is not a kubelet flag and stops the kubelet starting. This needs systemd in WSL2
 (`[boot] systemd=true`). Check it with `systemd-inhibit --list | grep kubelet`,
 which should show a `delay` lock.
+
+## Server
 
 The server listens on `127.0.0.1` only. Anything that can reach the port can say
 the PC is idle, so do not expose it on the WireGuard network.

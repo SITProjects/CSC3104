@@ -1,0 +1,29 @@
+[Unit]
+Description=IdleCloud node agent (owner-active taint and heartbeats)
+Wants=network-online.target
+# Started after, so stopped before, WireGuard and K3s: on shutdown the agent
+# still reaches the API server to leave the node tainted
+After=network-online.target wg-quick@wg0.service k3s-agent.service
+# Keep retrying forever. Until make-kubeconfig.sh's files are in /etc/idlecloud
+# the agent exits at start-up, and it starts by itself once they are there.
+StartLimitIntervalSec=0
+
+[Service]
+# Written by install-service.sh. Its settings override the ones below.
+EnvironmentFile=/etc/idlecloud/node-agent.env
+Environment=NODE_AGENT_EVENT_LOG=/var/log/idlecloud/node-agent-events.jsonl
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WorkingDirectory=/opt/idlecloud/node-agent
+ExecStart=/opt/idlecloud/node-agent/.venv/bin/python server.py
+Restart=always
+RestartSec=10
+# Room for the taint on exit (TAINT_RETRY_S) before systemd kills it
+TimeoutStopSec=15
+LogsDirectory=idlecloud
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
