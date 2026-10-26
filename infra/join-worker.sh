@@ -100,10 +100,19 @@ trap 'rm -f -- "$INSTALLER"' EXIT
 curl --fail --silent --show-error --location \
     https://get.k3s.io -o "$INSTALLER"
 
-INSTALL_K3S_VERSION="$VERSION" sh "$INSTALLER" agent \
-    --server https://10.10.0.1:6443 \
-    --token-file /etc/rancher/k3s/agent-token \
-    --node-name "$NAME" \
-    --node-ip "$IP" \
-    --flannel-iface wg0 \
+AGENT_ARGS=(
+    --server https://10.10.0.1:6443
+    --token-file /etc/rancher/k3s/agent-token
+    --node-name "$NAME"
+    --node-ip "$IP"
+    --flannel-iface wg0
     --node-label idlecloud/role=worker
+)
+
+# Campus PCs join tainted, so they get no tasks until the node agent runs and
+# sees the PC is idle. Burst workers have no node agent to remove it.
+if (( OCTET < 200 )); then
+    AGENT_ARGS+=(--node-taint idlecloud/owner-active=true:NoExecute)
+fi
+
+INSTALL_K3S_VERSION="$VERSION" sh "$INSTALLER" agent "${AGENT_ARGS[@]}"
