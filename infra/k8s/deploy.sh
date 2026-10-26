@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-# Deploy or update everything that runs on the AWS control plane: namespaces,
-# the database Secret, Postgres and the coordinator. Run on the EC2 hub from the
-# repo root, after k3s is installed (runbook steps 0 to 2):
-#
-#   infra/k8s/deploy.sh            build the coordinator image, then apply
-#   infra/k8s/deploy.sh --no-build apply only (image already imported)
-#
-# Safe to run again. It never replaces an existing database password: Postgres
-# only reads it when the data folder is first created, so a new one would lock
-# the coordinator out.
 set -euo pipefail
 
 NS=idlecloud-system
@@ -25,17 +15,28 @@ if grep -q REPLACE_WITH_BUCKET_NAME "$OVERLAY/coordinator-s3.yml"; then
   die "set S3_BUCKET in $OVERLAY/coordinator-s3.yml first"
 fi
 
-# The tag coordinator.yml asks for, so the build and the manifest always agree
-IMAGE=$(grep -oE 'idlecloud/coordinator:[^[:space:]]+' infra/k8s/base/coordinator.yml | head -1)
-[ -n "$IMAGE" ] || die "no idlecloud/coordinator image in infra/k8s/base/coordinator.yml"
+# The tag each manifest asks for, so the build and the manifest always agree
+image_in() {
+  local tag
+  tag=$(grep -oE "idlecloud/$1:[^[:space:]]+" "infra/k8s/base/$2" | head -1)
+  [ -n "$tag" ] || die "no idlecloud/$1 image in infra/k8s/base/$2"
+  echo "$tag"
+}
+COORDINATOR_IMAGE=$(image_in coordinator coordinator.yml)
+WEB_IMAGE=$(image_in web web.yml)
 
-if [ "$BUILD" = 1 ]; then
-  step "Building $IMAGE and loading it into k3s"
-  sudo docker build -f services/coordinator/Dockerfile -t "$IMAGE" .
-  sudo docker save "$IMAGE" | sudo k3s ctr images import -
-fi
-sudo k3s ctr images ls -q | grep -q "docker.io/$IMAGE" ||
-  die "$IMAGE is not in k3s; run without --no-build"
+# name, image tag, Dockerfile
+for spec in "coordinator $COORDINATOR_IMAGE services/coordinator/Dockerfile" \
+            "web $WEB_IMAGE services/web/Dockerfile"; do
+  read -r name image dockerfile <<<"$spec"
+  if [ "$BUILD" = 1 ]; then
+    step "Building $image and loading it into k3s"
+    sudo docker build -f "$dockerfile" -t "$image" .
+    sudo docker save "$image" | sudo k3s ctr images import -
+  fi
+  sudo k3s ctr images ls -q | grep -q "docker.io/$image" ||
+    die "$image ($name) is not in k3s; run without --no-build"
+done
 
 step "Namespaces"
 kubectl apply -f infra/k8s/base/namespaces.yml
@@ -67,14 +68,30 @@ else
     --dry-run=client -o yaml | kubectl apply -f -
 fi
 
+step "Web callback Secret"
+if [ -n "${HMAC_SECRET:-}" ]; then
+  kubectl -n "$NS" create secret generic idlecloud-web \
+    --from-literal=hmac-secret="$HMAC_SECRET" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  echo "idlecloud-web set from HMAC_SECRET"
+elif kubectl -n "$NS" get secret idlecloud-web -o jsonpath='{.data.hmac-secret}' 2>/dev/null | grep -q .; then
+  echo "idlecloud-web already exists; keeping it"
+else
+  kubectl -n "$NS" create secret generic idlecloud-web \
+    --from-literal=hmac-secret="$(openssl rand -hex 32)"
+  echo "generated a callback secret. Give the Lambda the same value:"
+  echo "  export HMAC_SECRET=\$(kubectl -n $NS get secret idlecloud-web -o jsonpath='{.data.hmac-secret}' | base64 -d)"
+fi
+
 step "Applying $OVERLAY"
 kubectl apply -k "$OVERLAY"
 
-step "Waiting for Postgres and the coordinator"
+step "Waiting for Postgres, the coordinator and the web app"
 kubectl -n "$NS" rollout status statefulset/postgres --timeout=180s
 # A rebuilt image under the same tag is not picked up without a restart
-[ "$BUILD" = 1 ] && kubectl -n "$NS" rollout restart deployment/coordinator
+[ "$BUILD" = 1 ] && kubectl -n "$NS" rollout restart deployment/coordinator deployment/web
 kubectl -n "$NS" rollout status deployment/coordinator --timeout=180s
+kubectl -n "$NS" rollout status deployment/web --timeout=180s
 
 # The old separate password Secret is no longer used
 kubectl -n "$NS" delete secret idlecloud-postgres --ignore-not-found
@@ -82,6 +99,9 @@ kubectl -n "$NS" delete secret idlecloud-postgres --ignore-not-found
 step "Health check"
 IP=$(kubectl -n "$NS" get svc coordinator -o jsonpath='{.spec.clusterIP}')
 curl -sf "http://$IP:8001/healthz" || die "coordinator /healthz failed; see kubectl -n $NS logs deploy/coordinator"
+echo
+IP=$(kubectl -n "$NS" get svc web -o jsonpath='{.spec.clusterIP}')
+curl -sf "http://$IP/healthz" || die "web /healthz failed; see kubectl -n $NS logs deploy/web"
 echo
 kubectl -n "$NS" get pods
 echo "Done."

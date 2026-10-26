@@ -1,0 +1,131 @@
+# Web app (services/web) in idlecloud-system, on the AWS control plane next to
+# the coordinator. Apply after namespaces.yml and coordinator.yml.
+#
+#
+# The Service is ClusterIP: nothing outside the cluster can reach the site yet.
+# Put an HTTPS proxy or Ingress in front of it. HTTPS is required anyway: the
+# session cookie is Secure, and the Lambda only calls back to https:// URLs.
+# Don't use a NodePort: it would also open the site on every campus PC.
+#
+# This base uses MinIO, which the page-rendering Lambda can't see, so pages are
+# rendered in the web Pod (LOCAL_RENDER). The AWS overlay switches to real S3
+# and the Lambda (web-s3.yml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: idlecloud-system
+  labels:
+    app.kubernetes.io/name: idlecloud-web
+spec:
+  # Stateless (uploads are tracked in S3), so a second replica keeps the site up
+  # while the other restarts
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: idlecloud-web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: idlecloud-web
+    spec:
+      # Run on the AWS control plane, never on a campus PC that may leave
+      nodeSelector:
+        idlecloud/role: control
+      # The web app never calls the Kubernetes API
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          # Versioned, so a rebuilt image is picked up. Bump it on every rebuild.
+          image: idlecloud/web:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: COORDINATOR_URL
+              value: http://coordinator.idlecloud-system.svc.cluster.local:8001
+            # The site is only served over HTTPS (see above)
+            - name: COOKIE_SECURE
+              value: "true"
+            - name: HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: idlecloud-web
+                  key: hmac-secret
+            # MinIO on the control plane's WireGuard IP, as for the coordinator
+            - name: S3_ENDPOINT_URL
+              value: http://10.10.0.1:9000
+            - name: S3_BUCKET
+              value: csc3104-local
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: idlecloud-minio
+                  key: access-key
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: idlecloud-minio
+                  key: secret-key
+            # MinIO ignores the region, but boto3 needs one to sign
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            # No Lambda sees MinIO, so render pages here (removed by the AWS overlay)
+            - name: LOCAL_RENDER
+              value: "true"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          # An upload (up to 50 MB) is read and checked in memory, so the limit
+          # leaves room for a couple at once without starving Postgres or k3s
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # Large uploads are spooled to /tmp while the form is parsed
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: idlecloud-system
+spec:
+  selector:
+    app.kubernetes.io/name: idlecloud-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
