@@ -4,6 +4,7 @@ metadata:
   name: web
   namespace: idlecloud-system
 spec:
+  ingressClassName: traefik
   rules:
     - http:
         paths:
