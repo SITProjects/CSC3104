@@ -2,5 +2,8 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - ../../base
+  - web-ingress.yml
 patches:
   - path: coordinator-s3.yml
+  - path: web-s3.yml
+  - path: verifier-s3.yml

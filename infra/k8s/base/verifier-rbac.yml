@@ -1,0 +1,32 @@
+# Identity for the verifier Pod (serviceAccountName in verifier.yml). Locally the
+# verifier uses the k3s admin kubeconfig instead, so this only limits it once it
+# runs inside the cluster. Apply after namespaces.yml.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: verifier
+  namespace: idlecloud-system
+---
+# Trust sync: read each node, then set its idlecloud/trust label and add or
+# remove the idlecloud/quarantined taint
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: verifier-nodes
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: verifier-nodes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: verifier-nodes
+subjects:
+  - kind: ServiceAccount
+    name: verifier
+    namespace: idlecloud-system

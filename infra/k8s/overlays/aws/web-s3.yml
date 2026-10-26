@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: idlecloud-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: web
+          env:
+            # The same bucket as the coordinator and the Lambda
+            - name: S3_BUCKET
+              value: csc3104-idle-compute
+            # Must be the bucket's region
+            - name: AWS_DEFAULT_REGION
+              value: ap-southeast-1
+            # Real S3, signed with the control plane's instance role (LabRole)
+            - name: S3_ENDPOINT_URL
+              $patch: delete
+            - name: AWS_ACCESS_KEY_ID
+              $patch: delete
+            - name: AWS_SECRET_ACCESS_KEY
+              $patch: delete
+            # The Lambda renders pages and calls /hooks/pages-ready
+            - name: LOCAL_RENDER
+              $patch: delete

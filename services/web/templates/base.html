@@ -10,10 +10,11 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono&display=swap">
   {# Built from styles/app.css by build-css.sh: Basecoat (shadcn/ui components as
      CSS classes) plus the Tailwind utilities the pages use. #}
-  <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}">
-  <script src="{{ url_for('static', path='vendor/basecoat/basecoat.min.js') }}" defer></script>
-  <script src="{{ url_for('static', path='vendor/basecoat/sidebar.min.js') }}" defer></script>
-  <script src="{{ url_for('static', path='vendor/basecoat/dropdown-menu.min.js') }}" defer></script>
+  <link rel="stylesheet" href="{{ url_for('static', path='app.css').path }}">
+  <script src="{{ url_for('static', path='vendor/basecoat/basecoat.min.js').path }}" defer></script>
+  <script src="{{ url_for('static', path='vendor/basecoat/sidebar.min.js').path }}" defer></script>
+  {# opens the profile menu (Account settings, Log out) #}
+  <script src="{{ url_for('static', path='vendor/basecoat/dropdown-menu.min.js').path }}" defer></script>
 </head>
 <body>
   {% if signed_in %}

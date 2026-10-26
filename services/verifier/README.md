@@ -16,3 +16,13 @@ output. Common normalization helpers belong in root `shared/`.
   of other types, such as the test workload, complete once every task is
   verified. Without this, those jobs stayed RUNNING and counted towards their
   owner's limit of unfinished jobs.
+
+## Deploy
+
+`infra/k8s/base/verifier.yml` runs one verifier in `idlecloud-system` on the AWS
+control plane (`idlecloud/role=control`), built from `services/verifier/Dockerfile`
+as `idlecloud/verifier`. `verifier-rbac.yml` gives its service account only what
+trust sync needs: get and patch nodes. The AWS overlay (`verifier-s3.yml`) switches
+it to real S3 through the instance role. `infra/k8s/deploy.sh` builds the image and
+rolls it out with the coordinator and web app. Locally, `docker-compose.yml` runs
+the same image.

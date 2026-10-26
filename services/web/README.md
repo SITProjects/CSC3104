@@ -37,13 +37,19 @@ see "Local stack" in `infra/README.md`. Open http://localhost:8000 (API docs at
 
 ## Submitting a job and following it
 
-`/upload` takes one PDF (up to 50 MB and 500 pages). The web app checks it, saves it to
-`jobs/{id}/input.pdf` and sends the user to `/jobs/{id}`. Users never choose CPU or
-memory: `settings.py` fixes 1 core / 512 MiB, 10 pages per task, 3 replicas.
+`/jobs/new` lets the user pick a job type (`JOB_TYPES` in `jobs.py`, mirroring the
+types seeded in `shared/migrations`). Each type has a default CPU and memory; only
+types with `custom_resources` (today the test workload) let the user change them,
+within the coordinator's limits (1 to 16 cores, 64 to 4096 MiB). Tasks always run 3
+replicas.
+
+A test job is created at once. An OCR job takes one PDF (up to 50 MB and 500 pages,
+10 pages per task): the web app checks it, saves it to `jobs/{id}/input.pdf` and sends
+the user to `/jobs/{id}`.
 
 ```
-POST /upload -> S3 input.pdf -> Lambda renders pages -> POST /hooks/pages-ready
-             -> (all pages in S3) -> coordinator POST /jobs with the uploader's token
+POST /jobs/new -> S3 input.pdf -> Lambda renders pages -> POST /hooks/pages-ready
+               -> (all pages in S3) -> coordinator POST /jobs with the uploader's token
 ```
 
 * The coordinator's `POST /jobs` needs the uploader's bearer token, so the upload keeps
@@ -55,13 +61,26 @@ POST /upload -> S3 input.pdf -> Lambda renders pages -> POST /hooks/pages-ready
 * **Locally** there is no Lambda: `LOCAL_RENDER=true` (the compose default) renders the
   pages inside the web app. Never set it on AWS.
 
-`/jobs/{id}` is the progress page. It opens `GET /jobs/{id}/stream` (server-sent events,
+`/jobs/{id}` is the progress page. A tracker shows the stages every job moves through
+(submitted, preparing pages, queued, running, checking results, completed) and where it
+stopped if it failed. The page opens `GET /jobs/{id}/stream` (server-sent events,
 polls the coordinator every 2 s and sends only changes) and shows each task, the PCs
 running its copies, restarts after evictions, and the vote. Before the coordinator knows
 the job it shows "preparing" or the reason the PDF was rejected. `GET /jobs/{id}/status`
 returns the same data once as JSON. `/jobs/{id}/result.txt` downloads the text, built from
 the winning replicas' `result.json` (or `output/result.txt` if something wrote it);
 `POST /jobs/{id}/cancel` cancels.
+
+## Deploy
+
+`infra/k8s/base/web.yml` runs the web app in `idlecloud-system` on the AWS control
+plane (2 replicas, `idlecloud/role=control`), behind a ClusterIP Service `web` on
+port 80. The AWS overlay (`infra/k8s/overlays/aws/web-s3.yml`) switches it to real S3
+and the Lambda. `infra/k8s/deploy.sh` builds the image, creates the `idlecloud-web`
+Secret (`hmac-secret`, the Lambda's `HMAC_SECRET`) and rolls it out.
+
+The Service is not reachable from outside the cluster. Put an HTTPS proxy or Ingress in
+front of it: the session cookie is Secure, and the Lambda only calls `https://` URLs.
 
 ## Test
 

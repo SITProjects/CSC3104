@@ -5,3 +5,6 @@ resources:
   - coordinator-rbac.yml
   - postgres.yml
   - coordinator.yml
+  - web.yml
+  - verifier-rbac.yml
+  - verifier.yml
