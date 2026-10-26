@@ -283,12 +283,17 @@ ALLOWED_HOSTS = ("https://fonts.googleapis.com", "https://fonts.gstatic.com")
 def test_pages_load_scripts_and_styles_only_from_this_site(monkeypatch):
     signed_in = _signed_in(monkeypatch)
     pages = [client.get("/login").text, client.get("/signup").text]
-    pages += [signed_in.get(path).text for path in ("/jobs/new", "/account")]
+    pages += [
+        signed_in.get(path).text
+        for path in ("/jobs/new", "/account", f"/jobs/{UUID(int=1)}")
+    ]
     for html in pages:
         for url in re.findall(r'<(?:script|link)[^>]*(?:src|href)="([^"]+)"', html):
-            local = url.startswith(("/", "http://testserver/"))
-            assert local or url.startswith(ALLOWED_HOSTS), url
-        assert 'href="http://testserver/static/app.css"' in html
+            # Relative, so behind an HTTPS proxy (CloudFront) that talks plain
+            # HTTP to the app, the browser still loads them over HTTPS
+            relative = url.startswith("/") and not url.startswith("//")
+            assert relative or url.startswith(ALLOWED_HOSTS), url
+        assert 'href="/static/app.css"' in html
 
 
 def test_built_stylesheet_and_vendored_scripts_are_served():
