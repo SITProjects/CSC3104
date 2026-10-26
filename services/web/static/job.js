@@ -145,7 +145,8 @@
     let text;
     if (job.stage === "preparing") text = "Preparing your pages. This usually takes under a minute.";
     else if (job.stage === "failed") text = "This upload could not be processed.";
-    else if (job.status === "COMPLETED") text = "Done. Your text is ready to download.";
+    else if (job.status === "COMPLETED")
+      text = job.job_type === "ocr" ? "Done. Your text is ready to download." : "Done.";
     else if (job.status === "CANCELLED") text = "This job was cancelled.";
     else if (job.status === "FAILED") text = `${job.progress}% done before the job failed.`;
     else text = `${job.progress}% complete`;
@@ -161,7 +162,8 @@
       $("stat-disputed").textContent = job.tasks_disputed;
       $("task-rows").replaceChildren(...job.tasks.map(renderTask));
     }
-    $("download").hidden = job.status !== "COMPLETED";
+    // only OCR jobs have text to download
+    $("download").hidden = job.status !== "COMPLETED" || job.job_type !== "ocr";
     // Cancel works while preparing too. A failed upload can only be dismissed.
     const dismiss = job.stage === "failed";
     $("cancel-form").hidden = job.terminal && !dismiss;

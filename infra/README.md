@@ -42,6 +42,9 @@ Open http://localhost:8000 (seeded logins: `user@example.com` / `password123`,
 - The worker nodes have their own image store: `scripts/load-worker-images.sh`
   builds `idlecloud/ocr` and loads it into each. A recreated worker volume needs
   it again.
+- A Test workload job (New job page) is the quickest check: its three copies
+  report the same fixed result, so it should reach Completed in under a minute.
+  Its image, `python:3.12-slim`, is pulled from Docker Hub on first use.
 - Inspect the cluster with `docker compose exec k3-server kubectl get nodes`
   (or `get pods -n idlecloud-jobs`).
 - `docker compose down` stops everything; `down -v` also deletes the database,
