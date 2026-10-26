@@ -9,6 +9,7 @@ from shared.db.session import SessionManager
 
 from .controller import verify_next_task
 from .k8s import trust_sync_loop
+from .output import output_loop
 
 log = logging.getLogger("verifier")
 VERIFIER_INTERVAL = 5  # seconds between checks when idle or after an error
@@ -44,7 +45,7 @@ async def verifier_loop(
 
 async def run_verifier() -> None:
     """
-    Connects to PostgreSQL, runs voting, and closes the pool on shutdown.
+    Connects to PostgreSQL, runs voting and output assembly, and closes the pool.
 
     Reads DATABASE_URL using the coordinator's database URL convention. The
     coordinator owns migrations; this service uses the existing tables. SIGTERM
@@ -65,12 +66,16 @@ async def run_verifier() -> None:
         loop.add_signal_handler(signal.SIGTERM, task.cancel)
         try:
             log.info("Verifier started")
-            sync_task = asyncio.create_task(trust_sync_loop(manager.session_factory))
+            background_tasks = [
+                asyncio.create_task(trust_sync_loop(manager.session_factory)),
+                asyncio.create_task(output_loop(manager.session_factory)),
+            ]
             try:
                 await verifier_loop(manager.session_factory)
             finally:
-                sync_task.cancel()
-                await asyncio.gather(sync_task, return_exceptions=True)
+                for background_task in background_tasks:
+                    background_task.cancel()
+                await asyncio.gather(*background_tasks, return_exceptions=True)
         finally:
             loop.remove_signal_handler(signal.SIGTERM)
     finally:
