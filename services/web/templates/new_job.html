@@ -9,6 +9,13 @@
 </header>
 
 <div class="mb-4">{{ error_alert(error, "form-error") }}</div>
+{% if at_limit and not error %}
+<div class="alert mb-4" role="status">
+  {{ icon("circle-alert") }}
+  <h2>Job limit reached</h2>
+  <section>{{ at_limit }} <a class="underline underline-offset-4" href="/jobs">See your jobs</a>.</section>
+</div>
+{% endif %}
 
 <form id="job-form" class="card" method="post" action="/jobs/new" enctype="multipart/form-data"
       data-max-bytes="{{ max_mb * 1024 * 1024 }}" data-max-mb="{{ max_mb }}">
@@ -68,7 +75,7 @@
       <p class="text-sm text-muted-foreground" id="upload-status" aria-live="polite">Uploading…</p>
     </div>
 
-    <button type="submit" class="btn" id="job-submit">Create job</button>
+    <button type="submit" class="btn" id="job-submit"{% if at_limit %} disabled{% endif %}>Create job</button>
     <p class="text-sm text-muted-foreground">You'll be taken to a page that shows live progress.</p>
   </section>
 </form>

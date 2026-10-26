@@ -84,9 +84,17 @@ def client(monkeypatch, s3):
         return USER
 
     monkeypatch.setattr(coordinator, "me", fake_me)
+    set_quota(monkeypatch, active=0)
     c = TestClient(app, follow_redirects=False)
     c.cookies.set(settings.session_cookie, "tok123")
     return c
+
+
+def set_quota(monkeypatch, active: int, limit: int = 3):
+    async def fake_quota(token):
+        return {"active": active, "limit": limit}
+
+    monkeypatch.setattr(coordinator, "job_quota", fake_quota)
 
 
 @pytest.fixture
@@ -205,6 +213,66 @@ def test_upload_saves_pdf_and_redirects_to_job(client, s3):
         "tok123",
         3,
     )
+
+
+# --- running jobs limit ---------------------------------------------------------
+
+
+def test_new_job_page_below_limit_has_no_notice(client):
+    html = client.get("/jobs/new").text
+    assert "Job limit reached" not in html
+    assert 'id="job-submit">' in html  # not disabled
+
+
+def test_new_job_page_at_limit_shows_notice_and_disables_submit(client, monkeypatch):
+    set_quota(monkeypatch, active=3)
+    html = client.get("/jobs/new").text
+    assert "Job limit reached" in html and "3 jobs running" in html
+    assert 'id="job-submit" disabled' in html
+
+
+def test_upload_at_limit_is_refused_before_saving(client, s3, monkeypatch, created):
+    set_quota(monkeypatch, active=3)
+    r = post_pdf(client, make_pdf(1))
+    assert r.status_code == 429 and "3 jobs running" in r.text
+    assert s3.objects == {} and created == []
+
+
+def test_uploads_being_prepared_count_toward_limit(client, s3, monkeypatch):
+    set_quota(monkeypatch, active=2)
+    assert post_pdf(client, make_pdf(1)).status_code == 303  # 2 jobs + 1 upload
+    r = post_pdf(client, make_pdf(1))
+    assert r.status_code == 429
+
+
+def test_failed_uploads_do_not_count_toward_limit(client, s3, monkeypatch):
+    set_quota(monkeypatch, active=2)
+    seed_pending(s3, state="failed")
+    s3.objects[f"pending-index/{USER['id']}/{JOB_ID}"] = b""
+    assert post_pdf(client, make_pdf(1)).status_code == 303
+
+
+def test_test_job_at_limit_is_refused(client, monkeypatch, created):
+    set_quota(monkeypatch, active=3)
+    assert post_test_job(client).status_code == 429 and created == []
+
+
+def test_coordinator_limit_is_shown_on_new_job_page(client, monkeypatch):
+    async def too_many(token, spec):
+        raise status_error(429)
+
+    monkeypatch.setattr(coordinator, "create_job", too_many)
+    r = post_test_job(client)
+    assert r.status_code == 429 and "most jobs allowed" in r.text
+
+
+def test_limit_check_failing_does_not_block_new_jobs(client, monkeypatch, created):
+    async def down(token):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(coordinator, "job_quota", down)
+    assert client.get("/jobs/new").status_code == 200
+    assert post_test_job(client).status_code == 303  # the coordinator still enforces it
 
 
 def test_upload_rejects_non_pdf(client, s3):
@@ -389,6 +457,19 @@ def test_hook_expired_session_fails_upload_and_drops_token(
     assert signed_post(client, ok_event()).status_code == 200
     pending = s3.json(f"jobs/{JOB_ID}/pending.json")
     assert pending["state"] == "failed" and "token" not in pending
+
+
+def test_hook_over_limit_fails_upload_without_retry(client, hook, s3, monkeypatch):
+    async def too_many(token, spec):
+        raise status_error(429)
+
+    monkeypatch.setattr(coordinator, "create_job", too_many)
+    seed_pending(s3)
+    seed_pages(s3, 25)
+    assert signed_post(client, ok_event()).status_code == 200  # no Lambda retry
+    pending = s3.json(f"jobs/{JOB_ID}/pending.json")
+    assert pending["state"] == "failed" and "too many jobs" in pending["error"]
+    assert "token" not in pending
 
 
 def test_hook_failure_is_shown_to_the_user(client, hook, s3, created):

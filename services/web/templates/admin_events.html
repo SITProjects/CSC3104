@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% from "_macros.html" import admin_header, error_alert, pager, status_badge %}
+{% block title %}Event log{% endblock %}
+{% block width %}max-w-6xl{% endblock %}
+{% block content %}
+{{ admin_header("Event log", updated) }}
+<form method="get" action="/admin/events" class="mt-6 flex flex-wrap items-end gap-2">
+  <div class="grid w-full gap-1 sm:w-auto">
+    <label class="label" for="filter-job">Job ID</label>
+    <input class="input w-full font-mono sm:w-80" id="filter-job" name="job" value="{{ filter_job or '' }}" placeholder="Any job"
+           pattern="[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}" title="A full job ID">
+  </div>
+  <div class="grid w-full gap-1 sm:w-auto">
+    <label class="label" for="filter-node">Node</label>
+    <input class="input w-full font-mono sm:w-48" id="filter-node" name="node" value="{{ filter_node or '' }}" placeholder="Any node" maxlength="253">
+  </div>
+  <button type="submit" class="btn" data-size="sm">Filter</button>
+  {% if filter_job or filter_node %}<a class="btn" data-variant="ghost" data-size="sm" href="/admin/events">Clear</a>{% endif %}
+</form>
+<div class="mt-6">
+{% if errors.events %}{{ error_alert(errors.events) }}{% else %}
+<div class="table-container" tabindex="0" role="region" aria-label="Event log">
+  <table class="table">
+    <caption>Evictions, lost and failed replicas, newest first{% if filter_job %}, for job {{ filter_job }}{% endif %}{% if filter_node %}, on node {{ filter_node }}{% endif %}.</caption>
+    <thead><tr>
+      <th scope="col">Time (UTC)</th><th scope="col">Replica event</th><th scope="col">Job / task</th>
+      <th scope="col">Node</th><th scope="col">Details</th>
+    </tr></thead>
+    <tbody>
+    {% for e in events %}
+      <tr>
+        <td class="whitespace-nowrap tabular-nums">{{ e.time }}</td>
+        <td>{{ status_badge(e.kind) }}</td>
+        <td>{% if e.job_id %}<a class="font-mono underline-offset-4 hover:underline" href="/jobs/{{ e.job_id }}">{{ e.job_id|string|truncate(8, True, "") }}</a>{% endif %}
+          {% if e.task_id is not none %}<div class="text-xs text-muted-foreground">task {{ e.task_id }}</div>{% endif %}</td>
+        <td>{% if e.node_name %}<a class="font-mono underline-offset-4 hover:underline" href="/admin/events?node={{ e.node_name|urlencode }}">{{ e.node_name }}</a>{% else %}<span class="text-muted-foreground">–</span>{% endif %}</td>
+        <td>{{ e.message }}{% if e.facts %} <span class="text-xs text-muted-foreground">({{ e.facts|join(", ") }})</span>{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="text-muted-foreground">No events recorded{% if filter_job or filter_node %} for this filter{% endif %}.
+        Only evictions, lost and failed replicas are logged, so a job that hasn't hit one has none.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{{ pager("events", offset, page_size, has_more, {"job": filter_job, "node": filter_node}) }}
+{% endif %}
+</div>
+{% endblock %}

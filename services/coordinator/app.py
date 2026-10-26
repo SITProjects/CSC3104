@@ -16,6 +16,7 @@ from core.settings import (
     COORDINATOR_URL,
     HEARTBEAT_AUDIENCE,
     HEARTBEAT_SERVICE_ACCOUNTS,
+    MAX_ACTIVE_JOBS_PER_USER,
     POD_NAME,
 )
 from services.coordinator.auth import (
@@ -28,6 +29,8 @@ from services.coordinator.auth import (
 from services.coordinator.burst import router as burst_router
 from services.coordinator.crud import (
     cancel_job,
+    count_active_jobs,
+    count_jobs_by_status,
     create_event,
     create_job,
     create_replicas,
@@ -40,8 +43,11 @@ from services.coordinator.crud import (
     get_job,
     get_replica_with_task,
     get_user_by_email,
+    get_user_with_job_count,
+    list_events,
     list_jobs,
     list_nodes,
+    list_users,
     mark_replica_done,
     set_voting,
     update_node_state,
@@ -66,6 +72,7 @@ from services.coordinator.models import (
 )
 from services.coordinator.storage import presign
 from shared.db import (
+    EventView,
     Job,
     JobSummary,
     JobType,
@@ -76,6 +83,7 @@ from shared.db import (
     Task,
     User,
     UserRole,
+    UserSummary,
     UserView,
     session_manager,
 )
@@ -197,9 +205,21 @@ async def submit_job(
     returns:
         CreateJobResponse: The job id, task ids and number of replicas made.
     raises:
-        HTTPException: 422 if the job type doesn't exist.
+        HTTPException: 409 if a job with req.job_id exists, 422 if the job type
+            doesn't exist, 429 if the owner already has MAX_ACTIVE_JOBS_PER_USER
+            unfinished jobs.
     """
     async with session.begin():
+        active = await count_active_jobs(session, owner_id, lock=True)
+        # a repeated create of an existing job is 409, not 429, even at the limit
+        if req.job_id is not None and await session.get(Job, req.job_id):
+            raise HTTPException(409, f"job_id {req.job_id} already exists")
+        if active >= MAX_ACTIVE_JOBS_PER_USER:
+            raise HTTPException(
+                429,
+                f"you already have {active} unfinished jobs; "
+                f"the limit is {MAX_ACTIVE_JOBS_PER_USER}",
+            )
         await ensure_job_type_exists(session, req.job_type)
         job = await create_job(session, req, owner_id)
         tasks = await create_tasks(session, job, req)
@@ -515,6 +535,17 @@ async def create_my_job(
     return await submit_job(session, req, user.id)
 
 
+@app.get("/jobs/quota")
+async def my_job_quota(user: CurrentUser, session: DbSession) -> dict[str, int]:
+    """
+    How many unfinished jobs the signed-in user has, and how many are allowed.
+    Declared before /jobs/{id}, which would otherwise catch "quota".
+    """
+    async with session:
+        active = await count_active_jobs(session, user.id)
+    return {"active": active, "limit": MAX_ACTIVE_JOBS_PER_USER}
+
+
 @app.get("/jobs")
 async def list_my_jobs(
     user: CurrentUser,
@@ -568,14 +599,16 @@ def owner_filter(user: User) -> UUID | None:
 async def list_all_jobs(
     admin: AdminUser,
     session: DbSession,
+    owner_id: UUID | None = None,
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> list[JobSummary]:
     """
-    Lists every user's jobs, newest first. Admins only.
+    Lists every user's jobs, or one user's if owner_id is given, newest first.
+    Admins only.
     """
     async with session:
-        jobs = await list_jobs(session, None, limit, offset)
+        jobs = await list_jobs(session, owner_id, limit, offset)
         return [JobSummary.model_validate(job, from_attributes=True) for job in jobs]
 
 
@@ -587,6 +620,69 @@ async def list_all_nodes(admin: AdminUser, session: DbSession) -> list[NodeView]
     async with session:
         nodes = await list_nodes(session)
         return [NodeView.model_validate(node, from_attributes=True) for node in nodes]
+
+
+@app.get("/admin/job-counts")
+async def job_counts(admin: AdminUser, session: DbSession) -> dict[str, int]:
+    """
+    How many jobs are in each status, e.g. {"RUNNING": 2, "PENDING": 1, ...}.
+    Admins only.
+    """
+    async with session:
+        return await count_jobs_by_status(session)
+
+
+def _user_summary(user: User, job_count: int) -> UserSummary:
+    view = UserView.model_validate(user, from_attributes=True)
+    return UserSummary(**view.model_dump(), job_count=job_count)
+
+
+@app.get("/admin/users")
+async def list_all_users(
+    admin: AdminUser,
+    session: DbSession,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> list[UserSummary]:
+    """
+    Lists every account with its number of jobs, newest first. Admins only.
+    """
+    async with session:
+        rows = await list_users(session, limit, offset)
+        return [_user_summary(user, count) for user, count in rows]
+
+
+@app.get("/admin/users/{id}")
+async def fetch_user(id: UUID, admin: AdminUser, session: DbSession) -> UserSummary:
+    """
+    Returns one account with its number of jobs. Admins only.
+
+    raises:
+        HTTPException: 404 if there is no such user.
+    """
+    async with session:
+        row = await get_user_with_job_count(session, id)
+        if row is None:
+            raise HTTPException(404, f"user {id} not found")
+        return _user_summary(*row)
+
+
+@app.get("/admin/events")
+async def list_all_events(
+    admin: AdminUser,
+    session: DbSession,
+    job_id: UUID | None = None,
+    node_name: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> list[EventView]:
+    """
+    Lists recorded events (evictions, lost and failed replicas), newest first,
+    optionally for one job or one node. Admins only.
+    """
+    async with session:
+        events = await list_events(session, job_id, node_name, limit, offset)
+        return [EventView.model_validate(e, from_attributes=True) for e in events]
 
 
 @app.get("/healthz")

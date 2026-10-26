@@ -48,3 +48,22 @@ async def test_get_job_uses_uuid_in_path():
         return httpx.Response(200, json={"id": str(job_id)})
 
     assert (await make_client(handler).get_job("t", job_id))["id"] == str(job_id)
+
+
+@pytest.mark.asyncio
+async def test_admin_events_sends_only_given_filters():
+    job_id = uuid4()
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/admin/events"
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json=[])
+
+    client = make_client(handler)
+    await client.admin_events("t", limit=51, offset=0)
+    await client.admin_events("t", job_id, "pc 1", 51, 50)
+    assert seen == [
+        {"limit": "51", "offset": "0"},
+        {"limit": "51", "offset": "50", "job_id": str(job_id), "node_name": "pc 1"},
+    ]

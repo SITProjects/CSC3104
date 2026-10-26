@@ -727,6 +727,10 @@ class UserView(BaseModel):
     created_at: datetime
 
 
+class UserSummary(UserView):
+    job_count: int
+
+
 class NodeView(BaseModel):
     name: str
     state: NodeState
@@ -735,6 +739,16 @@ class NodeView(BaseModel):
     last_heartbeat: datetime | None
     total_agree: int
     total_disagree: int
+
+
+class EventView(BaseModel):
+    id: int
+    time: datetime
+    type: str
+    job_id: UUID | None
+    task_id: int | None
+    node_name: str | None
+    detail: dict[str, Any] | None
 
 
 class JobSummary(BaseModel):

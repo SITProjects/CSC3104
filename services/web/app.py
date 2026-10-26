@@ -31,6 +31,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from services.web import admin as admintools
 from services.web import jobs as jobtools
 from services.web import storage, uploads
 from services.web.coordinator import coordinator
@@ -38,15 +39,35 @@ from services.web.settings import settings
 
 BASE_DIR = Path(__file__).parent
 log = logging.getLogger("uvicorn.error")
-BURST_PAGE_SIZE = 20  # rows per page in each admin burst table
+BURST_PAGE_SIZE = 20  # burst workers per page on the admin dashboard
 
-# Main navigation: (label, path).
+# Main navigation. An item with children is a collapsible group; "admin" items
+# are shown to admins only (the pages check the role themselves too).
 NAV_ITEMS = [
-    ("New job", "/jobs/new"),
-    ("My jobs", "/jobs"),
-    ("Account", "/account"),
-    ("Admin: nodes", "/admin/nodes"),
+    {"label": "New job", "path": "/jobs/new", "icon": "plus"},
+    {"label": "My jobs", "path": "/jobs", "icon": "list"},
+    {
+        "label": "Dashboard",
+        "icon": "gauge",
+        "admin": True,
+        "children": [
+            {"label": "Overview", "path": "/admin"},
+            {"label": "Jobs", "path": "/admin/jobs"},
+            {"label": "Burst workers", "path": "/admin/burst"},
+            {"label": "Event log", "path": "/admin/events"},
+            {"label": "Users", "path": "/admin/users"},
+        ],
+    },
 ]
+NAV_PATHS = [
+    entry["path"] for item in NAV_ITEMS for entry in item.get("children", [item])
+]
+
+
+def nav_active(path: str) -> str | None:
+    """The nav link for a page: the longest nav path that is it or contains it."""
+    matches = [p for p in NAV_PATHS if path == p or path.startswith(p + "/")]
+    return max(matches, key=len, default=None)
 
 
 @asynccontextmanager
@@ -60,13 +81,19 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 
 def _template_context(request: Request) -> dict:
-    return {"signed_in": bool(request.cookies.get(settings.session_cookie))}
+    return {
+        "signed_in": bool(request.cookies.get(settings.session_cookie)),
+        # set by current_user; pages that don't look up the user show no email
+        "user": getattr(request.state, "user", None),
+    }
 
 
 templates = Jinja2Templates(
     directory=BASE_DIR / "templates", context_processors=[_template_context]
 )
 templates.env.globals["nav_items"] = NAV_ITEMS
+templates.env.globals["nav_active"] = nav_active
+templates.env.filters["utc_time"] = admintools.utc_time
 
 DEFAULT_AFTER_LOGIN = "/jobs/new"
 MIN_PASSWORD_LENGTH = 8
@@ -159,13 +186,15 @@ async def current_user(request: Request) -> dict:
     if not token:
         raise LoginRequired(target)
     try:
-        return await coordinator.me(token)
+        user = await coordinator.me(token)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 401:
             raise LoginRequired(target) from exc
         raise HTTPException(503, "Sign-in service unavailable") from exc
     except httpx.RequestError as exc:
         raise HTTPException(503, "Sign-in service unavailable") from exc
+    request.state.user = user  # for the profile menu in base.html
+    return user
 
 
 async def admin_user(user: Annotated[dict, Depends(current_user)]) -> dict:
@@ -182,6 +211,7 @@ AdminOnly = Depends(admin_user)
 async def index(request: Request):
     if not request.cookies.get(settings.session_cookie):
         return RedirectResponse("/login", status_code=303)
+    await current_user(request)  # so the sidebar knows whether to show admin links
     return templates.TemplateResponse(request, "index.html")
 
 
@@ -282,8 +312,12 @@ def _new_job_page(
     error: str | None = None,
     status: int = 200,
     form: dict | None = None,
+    at_limit: str | None = None,
 ):
-    """The New job page; form refills what the user entered after an error."""
+    """
+    The New job page; form refills what the user entered after an error, and
+    at_limit, if set, says why no more jobs can be started right now.
+    """
     return templates.TemplateResponse(
         request,
         "new_job.html",
@@ -295,9 +329,44 @@ def _new_job_page(
             "mem_range": (jobtools.MIN_MEM, jobtools.MAX_MEM),
             "max_mb": settings.max_upload_mb,
             "max_pages": settings.max_pages,
+            "at_limit": at_limit,
         },
         status_code=status,
     )
+
+
+# for the coordinator's 429, which came without a count to show
+LIMIT_REACHED = (
+    "You already have the most jobs allowed running at once. "
+    "Wait for one to finish, or cancel one, then try again."
+)
+
+
+def _limit_message(limit: int) -> str:
+    return (
+        f"You already have {limit} jobs running or being prepared, the most "
+        "allowed at once. Wait for one to finish, or cancel one, then try again."
+    )
+
+
+async def _job_limit_reached(token: str, user: dict) -> str | None:
+    """
+    Why the user may not start another job right now, or None if they may.
+
+    Counts the coordinator's unfinished jobs plus uploads still being prepared,
+    which the coordinator doesn't know yet. Best effort: if the count can't be
+    loaded this returns None, and the coordinator still enforces the limit when
+    the job is created.
+    """
+    try:
+        quota = await coordinator.job_quota(token)
+    except httpx.HTTPError as exc:
+        log.warning("couldn't check the job limit: %r", exc)
+        return None
+    preparing = sum(1 for r in await _pending_rows(user) if r["status"] == "PREPARING")
+    if quota["active"] + preparing >= quota["limit"]:
+        return _limit_message(quota["limit"])
+    return None
 
 
 class UploadSizeGuard:
@@ -336,9 +405,10 @@ app.add_middleware(UploadSizeGuard)
 
 
 # Declared before /jobs/{job_id}, which would otherwise catch "new"
-@app.get(NEW_JOB_PATH, response_class=HTMLResponse, dependencies=[SignedIn])
-async def new_job(request: Request):
-    return _new_job_page(request)
+@app.get(NEW_JOB_PATH, response_class=HTMLResponse)
+async def new_job(request: Request, user: Annotated[dict, Depends(current_user)]):
+    token = request.cookies[settings.session_cookie]
+    return _new_job_page(request, at_limit=await _job_limit_reached(token, user))
 
 
 @app.post(NEW_JOB_PATH, response_class=HTMLResponse)
@@ -357,6 +427,9 @@ async def new_job_submit(
         cpu_cores, mem_mib = jobtools.parse_resources(kind, cpu, mem)
     except jobtools.UploadError as exc:
         return _new_job_page(request, str(exc), 422, form)
+    token = request.cookies[settings.session_cookie]
+    if limit := await _job_limit_reached(token, user):
+        return _new_job_page(request, limit, 429, form, at_limit=limit)
     if not kind.needs_pdf:
         return await _create_job_now(request, form, kind.name, cpu_cores, mem_mib)
 
@@ -408,6 +481,8 @@ async def _create_job_now(
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 401:
             raise LoginRequired(NEW_JOB_PATH) from exc
+        if exc.response.status_code == 429:
+            return _new_job_page(request, LIMIT_REACHED, 429, form)
         log.warning("creating %s job failed: %r", job_type, exc)
         return _new_job_page(
             request, "The job couldn't be created. Please try again.", 503, form
@@ -436,6 +511,17 @@ def _duration(start: datetime | None, end: datetime | None) -> str:
     if hours:
         return f"{hours}h {minutes}m"
     return f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
+
+
+def _job_row(job: dict) -> dict:
+    """A coordinator JobSummary as a job list row."""
+    created, finished = _when(job["created_at"]), _when(job["finished_at"])
+    return {
+        **job,
+        "created": created.strftime("%d %b %Y %H:%M UTC") if created else "",
+        "took": _duration(created, finished),
+        "running": finished is None,
+    }
 
 
 async def _pending_rows(user: dict) -> list[dict]:
@@ -490,18 +576,7 @@ async def jobs(
     try:
         listed = await coordinator.list_jobs(token, JOBS_PAGE_SIZE + 1, offset)
         has_more = len(listed) > JOBS_PAGE_SIZE
-        for job in listed[:JOBS_PAGE_SIZE]:
-            created, finished = _when(job["created_at"]), _when(job["finished_at"])
-            rows.append(
-                {
-                    **job,
-                    "created": created.strftime("%d %b %Y %H:%M UTC")
-                    if created
-                    else "",
-                    "took": _duration(created, finished),
-                    "running": finished is None,
-                }
-            )
+        rows = [_job_row(job) for job in listed[:JOBS_PAGE_SIZE]]
     except (httpx.HTTPStatusError, httpx.RequestError):
         error = "Your jobs can't be loaded right now. Please try again shortly."
     if offset == 0 and not error:
@@ -743,46 +818,269 @@ async def pages_ready(
     return {"ok": True}
 
 
-@app.get("/account", response_class=HTMLResponse, dependencies=[SignedIn])
-async def account(request: Request):
-    return templates.TemplateResponse(request, "account.html")
-
-
-@app.get("/admin/nodes", response_class=HTMLResponse, dependencies=[AdminOnly])
-async def admin_nodes(
-    request: Request,
-    machine_offset: int = Query(0, ge=0),
-    job_offset: int = Query(0, ge=0),
-):
-    token = request.cookies.get(settings.session_cookie)
-    context = {
-        "machine_offset": machine_offset,
-        "job_offset": job_offset,
-        "page_size": BURST_PAGE_SIZE,
-    }
-    status = 200
-    # AdminOnly has already checked the session. The coordinator still checks
-    # again, since a session can expire or lose admin between the two calls.
-    try:
-        context["burst"] = await coordinator.burst_overview(
-            token,
-            machine_limit=BURST_PAGE_SIZE,
-            machine_offset=machine_offset,
-            job_limit=BURST_PAGE_SIZE,
-            job_offset=job_offset,
-        )
-    except httpx.HTTPStatusError as error:
-        code = error.response.status_code
-        status = code if code in (401, 403) else 503
-        context["error"] = {
-            401: "Your session has expired. Log in again to view burst costs.",
-            403: "An admin account is required to view burst workers and costs.",
-        }.get(code, "Burst cost data is unavailable. Please try again shortly.")
-    except httpx.RequestError:
-        status = 503
-        context["error"] = "The coordinator is unavailable. Please try again shortly."
+@app.get("/account", response_class=HTMLResponse)
+async def account(request: Request, user: Annotated[dict, Depends(current_user)]):
+    """Account settings, opened from the profile menu."""
+    joined = _when(user.get("created_at"))
     return templates.TemplateResponse(
-        request, "admin_nodes.html", context, status_code=status
+        request,
+        "account.html",
+        {"joined": joined.strftime("%d %b %Y") if joined else ""},
+    )
+
+
+# ---- admin dashboard: Overview, Jobs, Burst workers, Event log, Users ----
+
+ADMIN_JOBS_PAGE_SIZE = 20
+ADMIN_EVENTS_PAGE_SIZE = 50
+ADMIN_USERS_PAGE_SIZE = 50
+# What each coordinator call loads, as error messages name it
+ADMIN_SECTIONS = {
+    "nodes": "worker nodes",
+    "counts": "job counts",
+    "jobs": "jobs",
+    "burst": "burst workers and costs",
+    "events": "events",
+    "users": "users",
+    "user": "user",
+}
+
+
+async def _admin_load(
+    request: Request, calls: dict, not_found: str | None = None
+) -> tuple[dict, dict, int]:
+    """
+    Runs an admin page's coordinator calls together, so one failing call
+    doesn't blank the whole page.
+
+    args:
+        calls: {section name: coroutine}, names from ADMIN_SECTIONS.
+        not_found: The section whose 404 means the page itself doesn't exist
+            (an unknown user). Any other 404 is shown as that section's error.
+    returns:
+        tuple: (results, errors, status). A failed call's result is None and its
+            message is in errors; status is 503 only if every call failed.
+    raises:
+        LoginRequired: If the session has expired.
+        HTTPException: 404 if the not_found section's call answered 404.
+    """
+    done = await asyncio.gather(*calls.values(), return_exceptions=True)
+    results, errors = {}, {}
+    for name, result in zip(calls, done):
+        if isinstance(result, httpx.HTTPStatusError):
+            if result.response.status_code == 401:
+                raise LoginRequired(request.url.path)
+            if result.response.status_code == 404 and name == not_found:
+                raise HTTPException(
+                    404, f"{ADMIN_SECTIONS[name].capitalize()} not found"
+                )
+        if isinstance(result, httpx.HTTPError):
+            log.warning("admin page: loading %s failed: %r", name, result)
+            errors[name] = (
+                f"Loading the {ADMIN_SECTIONS[name]} failed. Try again shortly."
+            )
+            result = None
+        elif isinstance(result, BaseException):
+            raise result
+        results[name] = result
+    return results, errors, 503 if len(errors) == len(calls) else 200
+
+
+def _admin_page(
+    request: Request, template: str, errors: dict, status: int, **context
+) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        template,
+        {
+            "errors": errors,
+            "updated": datetime.now(UTC).strftime("%H:%M:%S UTC"),
+            **context,
+        },
+        status_code=status,
+    )
+
+
+def _token(request: Request) -> str:
+    return request.cookies[settings.session_cookie]
+
+
+@app.get("/admin", response_class=HTMLResponse, dependencies=[AdminOnly])
+async def admin_overview(request: Request):
+    """Node and job counts at a glance, and every worker node."""
+    token = _token(request)
+    results, errors, status = await _admin_load(
+        request,
+        {
+            "nodes": coordinator.admin_nodes(token),
+            "counts": coordinator.admin_job_counts(token),
+        },
+    )
+    now = datetime.now(UTC)
+    nodes = [admintools.node_row(n, now) for n in results["nodes"] or []]
+    return _admin_page(
+        request,
+        "admin_overview.html",
+        errors,
+        status,
+        nodes=nodes,
+        node_counts=admintools.node_counts(nodes),
+        job_counts=results["counts"],
+    )
+
+
+@app.get("/admin/jobs", response_class=HTMLResponse, dependencies=[AdminOnly])
+async def admin_jobs(request: Request, offset: int = Query(0, ge=0)):
+    """Every user's jobs, newest first, with their burst cost."""
+    token = _token(request)
+    results, errors, status = await _admin_load(
+        request,
+        {
+            "jobs": coordinator.admin_jobs(token, ADMIN_JOBS_PAGE_SIZE + 1, offset),
+            # the coordinator orders burst jobs like admin_jobs (newest first,
+            # then id), so the same offset gives the costs of the jobs shown
+            "burst": coordinator.burst_overview(
+                token,
+                machine_limit=1,
+                job_limit=ADMIN_JOBS_PAGE_SIZE,
+                job_offset=offset,
+            ),
+        },
+    )
+    jobs = results["jobs"] or []
+    burst = results["burst"]
+    costs = {c["job_id"]: c for c in burst["jobs"]} if burst else {}
+    return _admin_page(
+        request,
+        "admin_jobs.html",
+        errors,
+        status,
+        jobs=[
+            {**_job_row(j), "cost": costs.get(str(j["id"]))}
+            for j in jobs[:ADMIN_JOBS_PAGE_SIZE]
+        ],
+        offset=offset,
+        page_size=ADMIN_JOBS_PAGE_SIZE,
+        has_more=len(jobs) > ADMIN_JOBS_PAGE_SIZE,
+    )
+
+
+@app.get("/admin/burst", response_class=HTMLResponse, dependencies=[AdminOnly])
+async def admin_burst(request: Request, offset: int = Query(0, ge=0)):
+    """EC2 burst workers, active first, with their estimated cost."""
+    token = _token(request)
+    results, errors, status = await _admin_load(
+        request,
+        {
+            "burst": coordinator.burst_overview(
+                token, machine_limit=BURST_PAGE_SIZE, machine_offset=offset, job_limit=1
+            )
+        },
+    )
+    burst = results["burst"]
+    return _admin_page(
+        request,
+        "admin_burst.html",
+        errors,
+        status,
+        burst=burst,
+        offset=offset,
+        page_size=BURST_PAGE_SIZE,
+        has_more=bool(burst) and offset + BURST_PAGE_SIZE < burst["machine_count"],
+    )
+
+
+@app.get("/admin/events", response_class=HTMLResponse, dependencies=[AdminOnly])
+async def admin_events(
+    request: Request,
+    job: UUID | None = None,
+    node: Annotated[str | None, Query(max_length=253)] = None,
+    offset: int = Query(0, ge=0),
+):
+    """Evictions, lost and failed replicas, optionally for one job or node."""
+    node = (node or "").strip() or None
+    results, errors, status = await _admin_load(
+        request,
+        {
+            "events": coordinator.admin_events(
+                _token(request), job, node, ADMIN_EVENTS_PAGE_SIZE + 1, offset
+            )
+        },
+    )
+    events = results["events"] or []
+    return _admin_page(
+        request,
+        "admin_events.html",
+        errors,
+        status,
+        events=[admintools.event_row(e) for e in events[:ADMIN_EVENTS_PAGE_SIZE]],
+        filter_job=job,
+        filter_node=node,
+        offset=offset,
+        page_size=ADMIN_EVENTS_PAGE_SIZE,
+        has_more=len(events) > ADMIN_EVENTS_PAGE_SIZE,
+    )
+
+
+@app.get("/admin/users", response_class=HTMLResponse, dependencies=[AdminOnly])
+async def admin_users(request: Request, offset: int = Query(0, ge=0)):
+    """Every account, newest first, with how many jobs each has submitted."""
+    results, errors, status = await _admin_load(
+        request,
+        {
+            "users": coordinator.admin_users(
+                _token(request), ADMIN_USERS_PAGE_SIZE + 1, offset
+            )
+        },
+    )
+    users = results["users"] or []
+    return _admin_page(
+        request,
+        "admin_users.html",
+        errors,
+        status,
+        users=[
+            {**u, "joined": admintools.utc_time(u["created_at"])}
+            for u in users[:ADMIN_USERS_PAGE_SIZE]
+        ],
+        offset=offset,
+        page_size=ADMIN_USERS_PAGE_SIZE,
+        has_more=len(users) > ADMIN_USERS_PAGE_SIZE,
+    )
+
+
+@app.get(
+    "/admin/users/{user_id}", response_class=HTMLResponse, dependencies=[AdminOnly]
+)
+async def admin_user_profile(
+    request: Request, user_id: UUID, offset: int = Query(0, ge=0)
+):
+    """One account and its jobs, newest first."""
+    token = _token(request)
+    results, errors, status = await _admin_load(
+        request,
+        {
+            "user": coordinator.admin_user(token, user_id),
+            "jobs": coordinator.admin_jobs(
+                token, ADMIN_JOBS_PAGE_SIZE + 1, offset, user_id
+            ),
+        },
+        not_found="user",
+    )
+    profile = results["user"]
+    jobs = results["jobs"] or []
+    return _admin_page(
+        request,
+        "admin_user.html",
+        errors,
+        status,
+        profile={**profile, "joined": admintools.utc_time(profile["created_at"])}
+        if profile
+        else None,
+        jobs=[_job_row(j) for j in jobs[:ADMIN_JOBS_PAGE_SIZE]],
+        offset=offset,
+        page_size=ADMIN_JOBS_PAGE_SIZE,
+        has_more=len(jobs) > ADMIN_JOBS_PAGE_SIZE,
     )
 
 

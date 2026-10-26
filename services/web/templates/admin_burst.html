@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% from "_macros.html" import admin_header, error_alert, money, pager, status_badge %}
+{% block title %}Burst workers{% endblock %}
+{% block width %}max-w-7xl{% endblock %}
+{% block content %}
+{{ admin_header("Burst workers" ~ (" (%d)"|format(burst.machine_count) if burst else ""), updated) }}
+<p class="mt-2 text-sm text-muted-foreground">EC2 machines added when too few campus PCs are idle, with estimated cost in USD.
+  Costs use the saved instance and disk rate, allocated by requested CPU and run time; Spot uses the On-Demand rate as an upper estimate.
+  Boot and idle time stay unattributed.</p>
+<div class="mt-6">
+{% if errors.burst %}{{ error_alert(errors.burst) }}{% else %}
+<div class="table-container" tabindex="0" role="region" aria-label="Burst workers">
+  <table class="table">
+    <caption>Recorded active workers first, then recent history. Costs as of {{ burst.observed_at|utc_time }}.</caption>
+    <thead><tr>
+      <th scope="col">Worker / instance</th><th scope="col">Type / market</th>
+      <th scope="col">State / trust</th><th scope="col">Lifetime</th>
+      <th scope="col">Rate / hour</th><th scope="col">Total</th>
+      <th scope="col">Jobs</th><th scope="col">Unattributed</th>
+    </tr></thead>
+    <tbody>
+    {% for m in burst.machines %}
+      <tr>
+        <td>{% if m.node_name %}<a class="font-mono underline-offset-4 hover:underline" href="/admin/events?node={{ m.node_name|urlencode }}">{{ m.node_name }}</a>{% else %}<span class="text-muted-foreground">No node</span>{% endif %}
+          <div class="text-xs text-muted-foreground">{{ m.instance_id }} · slot {{ m.slot }}</div></td>
+        <td>{{ m.machine }}<div class="text-xs text-muted-foreground">{{ m.market or "Unknown market" }}</div></td>
+        <td>{{ "Active" if m.running else "Ended" }}
+          {% if m.state %}<div>{{ status_badge(m.state) }}</div>{% endif %}
+          {% if m.trust_score is not none %}<div class="text-xs text-muted-foreground">Trust {{ "%.3f"|format(m.trust_score|float) }}{% if m.cpu_percent is not none %} · CPU {{ "%.0f"|format(m.cpu_percent) }}%{% endif %}</div>{% endif %}
+        </td>
+        <td class="whitespace-nowrap text-xs text-muted-foreground">{{ m.launched_at|utc_time }}<br>to {{ m.ended_at|utc_time or "ongoing" }}</td>
+        <td class="tabular-nums">{{ money(m.usd_per_hour) }}</td>
+        <td class="tabular-nums">{{ money(m.total_usd) }}</td>
+        <td class="tabular-nums">{{ money(m.attributed_usd) }}
+          {% if m.has_estimated_runs %}<div class="text-xs text-muted-foreground">Open run estimate</div>{% endif %}
+          {% if m.has_unknown_price %}<div class="text-xs text-muted-foreground">Incomplete pricing</div>{% endif %}</td>
+        <td class="tabular-nums">{{ money(m.unattributed_usd) }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8" class="text-muted-foreground">No burst workers{% if offset %} on this page{% else %} recorded yet{% endif %}.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{{ pager("workers", offset, page_size, has_more) }}
+<p class="mt-4 text-xs text-muted-foreground">Active means no end time has been recorded yet. Unattributed cost can be negative when the estimated records disagree.</p>
+{% endif %}
+</div>
+{% endblock %}

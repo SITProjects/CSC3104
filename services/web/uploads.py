@@ -205,6 +205,16 @@ async def create_job_if_ready(job_id: UUID) -> bool:
                 "Your session ended before the pages were ready. Upload again.",
             )
             return False
+        if code == 429:
+            # a retry won't help until another job ends, so don't let the
+            # Lambda retry; the user starts it again later
+            await _fail(
+                job_id,
+                pending,
+                "You had too many jobs running when the pages were ready. "
+                "Upload again once one finishes.",
+            )
+            return False
         if code != 409:  # 409: another callback got there first
             raise
     await discard_pending(job_id, pending)

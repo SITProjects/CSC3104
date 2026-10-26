@@ -1,6 +1,8 @@
-from .events import create_event
+from .events import create_event, list_events
 from .jobs import (
     cancel_job,
+    count_active_jobs,
+    count_jobs_by_status,
     create_job,
     ensure_job_type_exists,
     get_job,
@@ -30,10 +32,14 @@ from .users import (
     delete_session,
     get_session_user,
     get_user_by_email,
+    get_user_with_job_count,
+    list_users,
 )
 
 __all__ = [
     "cancel_job",
+    "count_active_jobs",
+    "count_jobs_by_status",
     "create_event",
     "create_job",
     "create_replicas",
@@ -51,9 +57,12 @@ __all__ = [
     "get_replica_with_task",
     "get_session_user",
     "get_user_by_email",
+    "get_user_with_job_count",
     "handle_replica_completed",
+    "list_events",
     "list_jobs",
     "list_nodes",
+    "list_users",
     "lock_stale_replica_job",
     "mark_job_running",
     "mark_lost",

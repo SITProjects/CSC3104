@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% from "_macros.html" import admin_header, error_alert, money, pager, status_badge %}
+{% block title %}Jobs{% endblock %}
+{% block width %}max-w-6xl{% endblock %}
+{% block content %}
+{{ admin_header("Jobs", updated) }}
+{% if errors.burst and not errors.jobs %}<div class="mt-6">{{ error_alert(errors.burst) }}</div>{% endif %}
+<div class="mt-6">
+{% if errors.jobs %}{{ error_alert(errors.jobs) }}{% else %}
+<div class="table-container" tabindex="0" role="region" aria-label="All jobs">
+  <table class="table">
+    <caption>Every user's jobs, newest first. Burst cost is zero when no burst run was seen.</caption>
+    <thead><tr>
+      <th scope="col">Job</th><th scope="col">Owner</th><th scope="col">Status</th><th scope="col">Tasks</th>
+      <th scope="col">Submitted</th><th scope="col">Time taken</th><th scope="col">Burst cost (USD)</th><th scope="col"><span class="sr-only">Logs</span></th>
+    </tr></thead>
+    <tbody>
+    {% for j in jobs %}
+      <tr>
+        <td><a class="font-mono font-medium underline-offset-4 hover:underline" href="/jobs/{{ j.id }}">{{ j.id|string|truncate(8, True, "") }}</a>
+          <div class="text-xs text-muted-foreground">{{ j.job_type }}</div></td>
+        <td><a class="font-mono text-xs underline-offset-4 hover:underline" href="/admin/users/{{ j.owner_id }}" title="View this user">{{ j.owner_id|string|truncate(8, True, "") }}</a></td>
+        <td>{{ status_badge(j.status) }}</td>
+        <td class="tabular-nums">{{ j.task_count }}</td>
+        <td>{{ j.created }}</td>
+        <td>{{ j.took }}{% if j.running %} <span class="text-xs text-muted-foreground">so far</span>{% endif %}</td>
+        <td class="tabular-nums">{% if j.cost %}{{ money(j.cost.usd) }}
+          {% if j.cost.has_unknown_price %}<div class="text-xs text-muted-foreground">Incomplete pricing</div>{% endif %}
+          {% if j.cost.has_estimated_runs %}<div class="text-xs text-muted-foreground">Includes unfinished runs</div>{% endif %}
+          {% else %}<span class="text-muted-foreground">–</span>{% endif %}</td>
+        <td><a class="btn" data-variant="link" data-size="sm" href="/admin/events?job={{ j.id }}">Logs</a></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8" class="text-muted-foreground">No jobs{% if offset %} on this page{% endif %}.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{{ pager("jobs", offset, page_size, has_more) }}
+{% endif %}
+</div>
+{% endblock %}
