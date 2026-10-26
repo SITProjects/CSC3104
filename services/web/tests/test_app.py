@@ -315,6 +315,8 @@ def test_profile_menu_replaces_account_link(monkeypatch):
     assert USER["email"] in menu
     assert 'role="menuitem" href="/account"' in menu
     assert 'action="/logout"' in menu
+    # without its script the menu never opens, so Log out can't be reached
+    assert 'src="/static/vendor/basecoat/dropdown-menu.min.js"' in html
 
 
 def test_account_page_shows_the_user(monkeypatch):

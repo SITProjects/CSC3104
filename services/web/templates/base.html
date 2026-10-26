@@ -13,6 +13,8 @@
   <link rel="stylesheet" href="{{ url_for('static', path='app.css').path }}">
   <script src="{{ url_for('static', path='vendor/basecoat/basecoat.min.js').path }}" defer></script>
   <script src="{{ url_for('static', path='vendor/basecoat/sidebar.min.js').path }}" defer></script>
+  {# opens the profile menu (Account settings, Log out) #}
+  <script src="{{ url_for('static', path='vendor/basecoat/dropdown-menu.min.js').path }}" defer></script>
 </head>
 <body>
   {% if signed_in %}
