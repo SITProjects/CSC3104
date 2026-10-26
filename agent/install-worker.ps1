@@ -176,7 +176,7 @@ Start-ScheduledTask -TaskPath $TaskPath -TaskName 'Sensor'
 Write-Host @"
 
 Done. $NodeName should show as Ready in 'kubectl get nodes' within a minute.
-The node is not protected from task pods until the node agent runs. On an
+The node gets no tasks until the node agent runs and sees the PC is idle. On an
 admin machine, run agent/node-agent/make-kubeconfig.sh $NodeName and copy its
 two files to /etc/idlecloud/ (see agent/README.md). The node agent then starts
 by itself within 10 seconds, and at every boot after that.

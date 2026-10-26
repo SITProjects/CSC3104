@@ -75,8 +75,9 @@ kubectl get nodes
 
 ### 2. Give the node agent its credentials (admin machine)
 
-The node is not protected from task pods until the node agent runs, and the
-agent needs its own Kubernetes identity. On a machine with admin kubectl:
+The node joins with the `idlecloud/owner-active` taint, so it gets no tasks
+until the node agent runs and sees the PC is idle. The agent needs its own
+Kubernetes identity. On a machine with admin kubectl:
 
 ```bash
 agent/node-agent/make-kubeconfig.sh pc1
