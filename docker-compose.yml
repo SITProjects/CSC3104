@@ -17,25 +17,30 @@ services:
       - "8001:8001"
     environment:
       DATABASE_URL: postgresql://admin:password123@postgres:5432/csc3104
-      # These are handed to worker Pods, so on a real cluster they must be addresses the
-      # worker nodes can reach (e.g. the coordinator host's WireGuard IP). Locally, k3s runs
-      # with --disable-agent, so no Pods start.
-      COORDINATOR_URL: ${COORDINATOR_URL:-http://localhost:8001}
+      # Handed to worker Pods, so it must be an address the worker nodes can reach:
+      # locally the coordinator's fixed IP on the cluster network (on AWS, the hub's
+      # WireGuard IP). Pods can't resolve compose service names.
+      COORDINATOR_URL: ${COORDINATOR_URL:-http://172.29.0.10:8001}
       KUBECONFIG: /tmp/kubeconfig
       S3_ENDPOINT_URL: http://minio:9000
-      # presigned URLs are signed for this host, so it must be the one workers use;
-      # localhost:9000 lets `docker run` workers and curl on this machine reach MinIO
-      S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+      # presigned URLs are signed for this host, so it must be the one workers use:
+      # MinIO's fixed IP on the cluster network. Set http://localhost:9000 instead to
+      # test a worker with `docker run --network host`.
+      S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://172.29.0.11:9000}
       S3_BUCKET: csc3104-local
       AWS_ACCESS_KEY_ID: csc3104-local
       AWS_SECRET_ACCESS_KEY: csc3104-local-secret
       AWS_DEFAULT_REGION: ap-southeast-1
       AWS_EC2_METADATA_DISABLED: "true"
+    networks:
+      default:
+      cluster:
+        ipv4_address: 172.29.0.10
     depends_on:
       postgres:
         condition: service_healthy
-      k3-server:
-        condition: service_healthy
+      k3s-init:
+        condition: service_completed_successfully
       minio:
         condition: service_started
   web:
@@ -48,8 +53,19 @@ services:
       - "8000:8000"
     environment:
       COORDINATOR_URL: http://coordinator:8001
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: csc3104-local
+      AWS_ACCESS_KEY_ID: csc3104-local
+      AWS_SECRET_ACCESS_KEY: csc3104-local-secret
+      AWS_DEFAULT_REGION: ap-southeast-1
+      AWS_EC2_METADATA_DISABLED: "true"
+      # No Lambda sees MinIO, so the web app turns PDF pages into images itself
+      LOCAL_RENDER: "true"
     depends_on:
-      - coordinator
+      coordinator:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
   postgres:
     image: postgres:16-bookworm
     environment:
@@ -72,7 +88,7 @@ services:
       - --disable=servicelb # disable bundled load balancer component
       - --disable=traefik # disables bunded HTTP controller
       # control plane only: the server never runs pods, it holds Jobs in Pending until a
-      # worker node (lab PC or burst EC2) joins as an agent and the scheduler places them
+      # worker node joins as an agent (lab PCs and burst EC2s; locally k3-worker-1..3)
       - --disable-agent
       - --egress-selector-mode=cluster
     restart: unless-stopped
@@ -85,6 +101,9 @@ services:
     volumes:
       - k3s-data:/var/lib/rancher/k3s
       - k3s-config:/output
+    networks:
+      default:
+      cluster:
     healthcheck:
       test:
         - CMD
@@ -96,6 +115,92 @@ services:
       timeout: 5s
       retries: 30
       start_period: 30s
+  # Creates the namespaces the coordinator uses (its leader Lease and the worker Jobs)
+  k3s-init:
+    image: rancher/k3s:v1.34.1-k3s1
+    entrypoint: ["kubectl", "--kubeconfig=/k3s-config/config", "--server=https://k3-server:6443"]
+    command: ["apply", "-f", "/manifests/namespaces.yml"]
+    volumes:
+      - k3s-config:/k3s-config:ro
+      - ./infra/k8s/base/namespaces.yml:/manifests/namespaces.yml:ro
+    depends_on:
+      k3-server:
+        condition: service_healthy
+
+  # Three worker nodes on this machine, standing in for lab PCs. A task's three
+  # copies must run on different nodes, so voting needs all three. Worker images
+  # are not pulled from a registry: load them with scripts/load-worker-images.sh.
+  k3-worker-1: &k3-worker
+    image: rancher/k3s:v1.34.1-k3s1
+    privileged: true
+    command: ["agent", "--node-name=local-pc-1", "--node-label=idlecloud/role=worker"]
+    restart: unless-stopped
+    tmpfs:
+      - /run
+      - /var/run
+    environment:
+      K3S_URL: https://k3-server:6443
+      # the server's own join token, so existing k3s-data keeps working (not
+      # node-token: that is a symlink to the server's absolute path)
+      K3S_TOKEN_FILE: /k3s-server/server/token
+    volumes:
+      - k3s-data:/k3s-server:ro
+      - k3s-worker-1:/var/lib/rancher/k3s
+      - k3s-worker-1-node:/etc/rancher/node
+    networks:
+      cluster:
+    depends_on:
+      k3-server:
+        condition: service_healthy
+  k3-worker-2:
+    <<: *k3-worker
+    command: ["agent", "--node-name=local-pc-2", "--node-label=idlecloud/role=worker"]
+    volumes:
+      - k3s-data:/k3s-server:ro
+      - k3s-worker-2:/var/lib/rancher/k3s
+      - k3s-worker-2-node:/etc/rancher/node
+  k3-worker-3:
+    <<: *k3-worker
+    command: ["agent", "--node-name=local-pc-3", "--node-label=idlecloud/role=worker"]
+    volumes:
+      - k3s-data:/k3s-server:ro
+      - k3s-worker-3:/var/lib/rancher/k3s
+      - k3s-worker-3-node:/etc/rancher/node
+
+  # Votes on finished copies, updates trust and assembles each job's text
+  verifier:
+    build:
+      context: .
+      dockerfile: services/coordinator/Dockerfile
+    volumes:
+      - ./services/verifier:/app/services/verifier
+      - ./shared:/app/shared
+      - ./core:/app/core
+      - k3s-config:/k3s-config:ro
+    command: >-
+      sh -c "sed 's#https://127.0.0.1:6443#https://k3-server:6443#' /k3s-config/config > /tmp/kubeconfig
+      && exec python -m services.verifier.runner"
+    # The image's health check calls the coordinator's /healthz; the verifier
+    # serves no HTTP, so it would always be "unhealthy"
+    healthcheck:
+      disable: true
+    environment:
+      DATABASE_URL: postgresql://admin:password123@postgres:5432/csc3104
+      KUBECONFIG: /tmp/kubeconfig
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: csc3104-local
+      AWS_ACCESS_KEY_ID: csc3104-local
+      AWS_SECRET_ACCESS_KEY: csc3104-local-secret
+      AWS_DEFAULT_REGION: ap-southeast-1
+      AWS_EC2_METADATA_DISABLED: "true"
+    restart: unless-stopped
+    depends_on:
+      # the coordinator creates the tables the verifier reads
+      coordinator:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
   minio:
     image: docker.io/alpine/minio:RELEASE.2025-10-15T17-29-55Z
     command: server /data --console-address ":9001"
@@ -107,6 +212,10 @@ services:
       - "9001:9001"
     volumes:
       - minio-data:/data
+    networks:
+      default:
+      cluster:
+        ipv4_address: 172.29.0.11
     user: "0:0"
 
   minio-init:
@@ -136,3 +245,17 @@ volumes:
   minio-data:
   k3s-data:
   k3s-config:
+  k3s-worker-1:
+  k3s-worker-1-node:
+  k3s-worker-2:
+  k3s-worker-2-node:
+  k3s-worker-3:
+  k3s-worker-3-node:
+
+networks:
+  # The k3s nodes, plus the coordinator and MinIO at fixed IPs that worker Pods use
+  # (Pods can't resolve compose service names)
+  cluster:
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
