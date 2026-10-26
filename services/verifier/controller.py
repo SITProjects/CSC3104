@@ -77,7 +77,8 @@ async def process_vote(session: AsyncSession, task: Task) -> None:
         if replica.status == ReplicaStatus.DONE and replica.exit_code == 0
     ]
     winner = winning_hash(
-        [replica.result_hash for replica in successful], replica_count
+        [replica.result_hash for replica in successful if replica.result_hash],
+        replica_count,
     )
 
     if winner:

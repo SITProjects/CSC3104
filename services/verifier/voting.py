@@ -49,8 +49,7 @@ def dispute_exclusions(previous_nodes: list[str | None]) -> list[str]:
     raises:
         ValueError: If there are no assignments or any PC name is missing.
     """
-    if not previous_nodes or any(
-        not isinstance(node, str) or not node.strip() for node in previous_nodes
-    ):
+    names = [node for node in previous_nodes if isinstance(node, str) and node.strip()]
+    if not names or len(names) != len(previous_nodes):
         raise ValueError("Every previous replica must have a known PC assignment")
-    return sorted(set(previous_nodes))
+    return sorted(set(names))

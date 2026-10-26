@@ -26,7 +26,7 @@ from .voting import MAX_REPLICAS, winning_hash
 log = logging.getLogger("verifier")
 
 
-def candidate_tasks() -> Select[tuple[Task, int]]:
+def candidate_tasks() -> Select[Task, int]:
     """
     Selects running or disputed tasks with a supported actual replica count.
 
@@ -138,7 +138,10 @@ async def find_early_agreement(
         )
     ).all()
     trusted = [by_node[name] for name in trusted_names]
-    winner = winning_hash([replica.result_hash for replica in trusted], len(replicas))
+    winner = winning_hash(
+        [replica.result_hash for replica in trusted if replica.result_hash],
+        len(replicas),
+    )
     if winner is None:
         return None
     return winner, [replica for replica in trusted if replica.result_hash == winner]

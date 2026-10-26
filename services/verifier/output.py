@@ -19,7 +19,7 @@ from shared.normalized_text import result_hash
 log = logging.getLogger("verifier")
 
 
-def ready_jobs() -> Select[tuple[Job]]:
+def ready_jobs() -> Select[Job]:
     """
     Selects active OCR jobs with every expected task verified.
 
