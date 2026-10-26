@@ -64,6 +64,8 @@ async def run_verifier() -> None:
     manager = SessionManager()
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
+    if task is None:
+        raise RuntimeError("Verifier must be run in an asyncio task")
     try:
         manager.init_db(database_url)
         loop.add_signal_handler(signal.SIGTERM, task.cancel)
