@@ -1,0 +1,86 @@
+# Verifier in idlecloud-system, on the AWS control plane. It votes on finished
+# copies, updates node trust, assembles OCR output and ends finished or failed
+# jobs. Without it no job is ever verified. Apply after verifier-rbac.yml.
+#
+# Before applying, create in idlecloud-system (deploy.sh does the first):
+#   Secret idlecloud-db     key DATABASE_URL  (shared with the coordinator)
+#   Secret idlecloud-minio  as for the coordinator (base only; the AWS overlay
+#                           uses real S3 through the instance role instead)
+#
+# It serves no HTTP, so there is no Service and no probes. Several replicas would
+# be safe (tasks and jobs are locked with SKIP LOCKED), but one is enough.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: verifier
+  namespace: idlecloud-system
+  labels:
+    app.kubernetes.io/name: idlecloud-verifier
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: idlecloud-verifier
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: idlecloud-verifier
+    spec:
+      # Its token is mounted for load_incluster_config(); see verifier-rbac.yml
+      serviceAccountName: verifier
+      # Run on the AWS control plane, never on a campus PC that may leave
+      nodeSelector:
+        idlecloud/role: control
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: verifier
+          # Versioned, so a rebuilt image is picked up. Bump it on every rebuild.
+          image: idlecloud/verifier:0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: idlecloud-db
+                  key: DATABASE_URL
+            # MinIO on the control plane's WireGuard IP, as for the coordinator.
+            # Set explicitly: unset, it defaults to localhost:9000.
+            - name: S3_ENDPOINT_URL
+              value: http://10.10.0.1:9000
+            - name: S3_BUCKET
+              value: csc3104-local
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: idlecloud-minio
+                  key: access-key
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: idlecloud-minio
+                  key: secret-key
+            # MinIO ignores the region, but boto3 needs one to sign
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

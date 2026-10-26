@@ -24,10 +24,12 @@ image_in() {
 }
 COORDINATOR_IMAGE=$(image_in coordinator coordinator.yml)
 WEB_IMAGE=$(image_in web web.yml)
+VERIFIER_IMAGE=$(image_in verifier verifier.yml)
 
 # name, image tag, Dockerfile
 for spec in "coordinator $COORDINATOR_IMAGE services/coordinator/Dockerfile" \
-            "web $WEB_IMAGE services/web/Dockerfile"; do
+            "web $WEB_IMAGE services/web/Dockerfile" \
+            "verifier $VERIFIER_IMAGE services/verifier/Dockerfile"; do
   read -r name image dockerfile <<<"$spec"
   if [ "$BUILD" = 1 ]; then
     step "Building $image and loading it into k3s"
@@ -86,12 +88,14 @@ fi
 step "Applying $OVERLAY"
 kubectl apply -k "$OVERLAY"
 
-step "Waiting for Postgres, the coordinator and the web app"
+step "Waiting for Postgres, the coordinator, the web app and the verifier"
 kubectl -n "$NS" rollout status statefulset/postgres --timeout=180s
 # A rebuilt image under the same tag is not picked up without a restart
-[ "$BUILD" = 1 ] && kubectl -n "$NS" rollout restart deployment/coordinator deployment/web
+[ "$BUILD" = 1 ] && kubectl -n "$NS" rollout restart deployment/coordinator deployment/web deployment/verifier
 kubectl -n "$NS" rollout status deployment/coordinator --timeout=180s
 kubectl -n "$NS" rollout status deployment/web --timeout=180s
+# It serves no HTTP, so a finished rollout (container running) is its health check
+kubectl -n "$NS" rollout status deployment/verifier --timeout=180s
 
 # The old separate password Secret is no longer used
 kubectl -n "$NS" delete secret idlecloud-postgres --ignore-not-found

@@ -6,3 +6,4 @@ resources:
 patches:
   - path: coordinator-s3.yml
   - path: web-s3.yml
+  - path: verifier-s3.yml
