@@ -31,7 +31,9 @@ services/web/build-css.sh          # or --watch while editing
 uv run uvicorn services.web.app:app --reload --port 8000
 ```
 
-Or `docker compose up web`. Open http://localhost:8000 (API docs at `/docs`).
+Or run the whole system, with local worker nodes that run jobs end to end:
+see "Local stack" in `infra/README.md`. Open http://localhost:8000 (API docs at
+`/docs`).
 
 ## Submitting a job and following it
 
