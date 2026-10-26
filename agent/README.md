@@ -99,6 +99,23 @@ in place, and at every boot after that.
 - `kubectl describe node pc1` shows the `idlecloud/owner-active` taint while
   the PC is BUSY, and not while it is IDLE.
 
+### If something is wrong
+
+In Ubuntu, `journalctl -u idlecloud-node-agent -n 30` and
+`curl localhost:9100/state` show what the agent is doing.
+
+- **`403 Forbidden` in the log:** `NODE_NAME` in `/etc/idlecloud/node-agent.env`
+  is not the name given to `make-kubeconfig.sh`. The credentials only work for
+  that one node. Fix it and `sudo systemctl restart idlecloud-node-agent`.
+- **Stays BUSY with no input:** check `reason` and `cpu_percent` in
+  `/state`. The PC is only lent while host CPU is under 20%, which a busy
+  laptop may never reach. Add `NODE_AGENT_IDLE_CPU_PERCENT=40` to
+  `node-agent.env` and restart.
+- **No admin kubectl at hand:** the agent's own credentials can read its node:
+  `sudo k3s kubectl --kubeconfig /etc/idlecloud/node-agent.kubeconfig get node <name> -o jsonpath='{.spec.taints}'`.
+  `node.kubernetes.io/unreachable` taints there mean the K3s agent, not the
+  node agent, has lost the server; check `systemctl status k3s-agent wg-quick@wg0`.
+
 ## If WSL2 does not work
 
 `install-worker.ps1` only supports WSL2. The plan's fallback, Ubuntu in
