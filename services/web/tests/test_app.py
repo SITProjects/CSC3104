@@ -52,7 +52,7 @@ def test_login_success_sets_httponly_cookie(monkeypatch, no_redirects):
     monkeypatch.setattr(coordinator, "login", fake_login)
     r = no_redirects.post("/login", data={"email": "a@b.com", "password": "secret123"})
     assert r.status_code == 303
-    assert r.headers["location"] == "/jobs/new"
+    assert r.headers["location"] == "/"
     cookie = r.headers["set-cookie"]
     assert f"{settings.session_cookie}=tok123" in cookie
     assert "HttpOnly" in cookie and "SameSite=lax" in cookie
@@ -81,7 +81,7 @@ def test_login_ignores_offsite_next(monkeypatch, no_redirects, next_url):
     r = no_redirects.post(
         "/login", data={"email": "a@b.com", "password": "secret123", "next": next_url}
     )
-    assert r.headers["location"] == "/jobs/new"
+    assert r.headers["location"] == "/"
 
 
 def test_login_follows_local_next(monkeypatch, no_redirects):
@@ -119,7 +119,7 @@ def test_signup_success(monkeypatch, no_redirects):
         },
     )
     assert r.status_code == 303
-    assert r.headers["location"] == "/jobs/new"
+    assert r.headers["location"] == "/"
     assert "HttpOnly" in r.headers["set-cookie"]
 
 

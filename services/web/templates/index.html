@@ -1,6 +1,85 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon, error_alert, job_table, status_badge %}
+{% block title %}Dashboard{% endblock %}
+{% block width %}max-w-6xl{% endblock %}
 {% block content %}
-<h1 class="text-2xl font-semibold tracking-tight">Campus OCR</h1>
-<p class="mt-2 text-muted-foreground">Upload a scanned PDF and we will run OCR on idle campus PCs.</p>
-<a class="btn mt-6" href="/jobs/new">New job</a>
+<div class="flex flex-wrap items-center justify-between gap-2">
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight">Dashboard</h1>
+    <p class="mt-1 text-sm text-muted-foreground">Your jobs on idle campus PCs.</p>
+  </div>
+  <a class="btn" href="/jobs/new">{{ icon("plus") }} New job</a>
+</div>
+
+{% if error %}
+<div class="mt-6">{{ error_alert(error) }}</div>
+{% else %}
+{# The counts cover the jobs loaded for this page, at most the newest `scan`. #}
+<div class="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+  <div class="card px-4 py-3">
+    <p class="text-sm text-muted-foreground">Active</p>
+    <p class="text-3xl font-semibold tabular-nums">{{ running_jobs|length }}</p>
+    <p class="text-xs text-muted-foreground">running, queued or preparing</p>
+  </div>
+  <div class="card px-4 py-3">
+    <p class="text-sm text-muted-foreground">Completed</p>
+    <p class="text-3xl font-semibold tabular-nums">{{ counts.COMPLETED }}</p>
+  </div>
+  <div class="card px-4 py-3">
+    <p class="text-sm text-muted-foreground">Failed</p>
+    <p class="text-3xl font-semibold tabular-nums">{{ counts.FAILED }}</p>
+  </div>
+  <div class="card px-4 py-3">
+    <p class="text-sm text-muted-foreground">Free job slots</p>
+    <p class="text-3xl font-semibold tabular-nums">{{ [quota.limit - quota.active, 0]|max if quota else "–" }}</p>
+    {% if quota %}<p class="text-xs text-muted-foreground">of {{ quota.limit }} allowed at once</p>{% endif %}
+  </div>
+</div>
+{% if capped %}<p class="mt-2 text-xs text-muted-foreground">Counts cover your newest {{ scan }} jobs.</p>{% endif %}
+
+<section class="mt-8 grid gap-3" aria-labelledby="active-heading">
+  <h2 id="active-heading" class="text-lg font-semibold">Running now</h2>
+  {% for job in running_jobs %}
+  <a class="card px-4 py-3 hover:bg-muted" href="/jobs/{{ job.id }}">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div class="min-w-0">
+        <span class="font-mono font-medium">{{ job.id|string|truncate(8, True, "") }}</span>
+        <span class="ml-2 text-sm text-muted-foreground">{{ job.filename or job.job_type }}</span>
+      </div>
+      {{ status_badge(job.status) }}
+    </div>
+    {% if job.progress is defined %}
+    <div class="mt-3 flex items-center gap-3">
+      <div class="h-2 flex-1 rounded-full bg-muted" role="progressbar" aria-label="Progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ job.progress }}">
+        <div class="h-2 rounded-full bg-primary" style="width: {{ job.progress }}%"></div>
+      </div>
+      <span class="text-sm tabular-nums">{{ job.progress }}%</span>
+    </div>
+    <p class="mt-1 text-xs text-muted-foreground">{{ job.tasks_verified }} of {{ job.tasks_total }} tasks verified · started {{ job.created }} · {{ job.took }} so far</p>
+    {% else %}
+    <p class="mt-1 text-xs text-muted-foreground">Started {{ job.created }} · {{ job.took }} so far</p>
+    {% endif %}
+  </a>
+  {% else %}
+  <p class="text-sm text-muted-foreground">Nothing is running right now. <a class="text-foreground underline underline-offset-4" href="/jobs/new">Start a job</a>.</p>
+  {% endfor %}
+</section>
+
+<section class="mt-8 grid gap-3" aria-labelledby="recent-heading">
+  <div class="flex items-center justify-between gap-2">
+    <h2 id="recent-heading" class="text-lg font-semibold">Recent jobs</h2>
+    {% if has_more %}<a class="btn" data-variant="outline" data-size="sm" href="/jobs">View all</a>{% endif %}
+  </div>
+  {% if recent %}
+  {{ job_table(recent, "Recent jobs", "Newest first. Select a job to follow its progress.") }}
+  {% else %}
+  <p class="text-sm text-muted-foreground">You haven't submitted anything yet. <a class="text-foreground underline underline-offset-4" href="/jobs/new">Create a job</a> to get started.</p>
+  {% endif %}
+</section>
+
+{% if running_jobs %}
+{# keep the running jobs' progress fresh, unless the tab is hidden #}
+<script>setInterval(() => { if (!document.hidden) location.reload(); }, 10000);</script>
+{% endif %}
+{% endif %}
 {% endblock %}

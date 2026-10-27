@@ -31,26 +31,14 @@
       </header>
       <section class="scrollbar-sm">
         <div role="group" aria-labelledby="nav-heading">
-          <h3 id="nav-heading">Campus OCR</h3>
+          <h3 id="nav-heading">{{ "Admin dashboard" if is_admin else "Campus OCR" }}</h3>
           <ul>
-            {% for item in nav_items if is_admin or not item.admin %}
+            {% for item in nav_items if item.admin is not defined or item.admin == is_admin %}
             <li>
-              {% if item.children %}
-              {# collapsible group, open while one of its pages is shown #}
-              <details {% if active in item.children|map(attribute="path") %}open{% endif %}>
-                <summary>{{ icon(item.icon) }}<span>{{ item.label }}</span></summary>
-                <ul>
-                  {% for child in item.children %}
-                  <li><a href="{{ child.path }}"{% if child.path == active %} aria-current="page"{% endif %}><span>{{ child.label }}</span></a></li>
-                  {% endfor %}
-                </ul>
-              </details>
-              {% else %}
               <a href="{{ item.path }}"{% if item.path == active %} aria-current="page"{% endif %}>
                 {{ icon(item.icon) }}
                 <span>{{ item.label }}</span>
               </a>
-              {% endif %}
             </li>
             {% endfor %}
           </ul>

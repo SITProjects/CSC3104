@@ -1,6 +1,7 @@
 """Upload, page-ready callback, progress status/stream, download and cancel."""
 
 import json
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -812,7 +813,7 @@ def test_job_list_shows_uploads_still_preparing(client, monkeypatch, s3):
     assert r.status_code == 200
     assert "Preparing" in r.text and "thesis.pdf" in r.text
     assert f"/jobs/{JOB_ID}" in r.text
-    assert "location.reload" in r.text  # keeps checking until the job exists
+    assert "location.reload" not in r.text  # My jobs never refreshes itself
 
 
 def test_job_list_shows_failed_uploads_with_reason(client, monkeypatch, s3):
@@ -998,3 +999,89 @@ def test_filename_is_cleaned_and_capped(client, s3):
     stored = s3.json(f"jobs/{job_id}/pending.json")["filename"]
     assert len(stored) <= settings.max_filename_chars
     assert "/" not in stored and "\x00" not in stored and "etc" not in stored
+
+
+# --- home page dashboard -------------------------------------------------------
+
+
+def summary(i: int, status: str) -> dict:
+    """A coordinator JobSummary, as GET /jobs lists it."""
+    finished = status not in ("PENDING", "RUNNING")
+    return {
+        "id": str(UUID(int=i)),
+        "owner_id": USER["id"],
+        "job_type": "ocr",
+        "status": status,
+        "task_count": 2,
+        "created_at": "2026-10-24T10:00:00+00:00",
+        "finished_at": "2026-10-24T10:02:05+00:00" if finished else None,
+    }
+
+
+def test_home_shows_running_jobs_counts_and_recent(client, monkeypatch, s3):
+    statuses = ["RUNNING", "COMPLETED", "COMPLETED", "FAILED"] + ["COMPLETED"] * 8
+    # ids from 11, since the upload marked below is job 7
+    stub_list(monkeypatch, [summary(i, s) for i, s in enumerate(statuses, 11)])
+    loaded = []
+
+    async def fake_get(token, job_id):
+        loaded.append(str(job_id))
+        return sample_job("RUNNING")
+
+    monkeypatch.setattr(coordinator, "get_job", fake_get)
+    set_quota(monkeypatch, active=1, limit=3)
+    mark_pending(s3)  # an upload still being prepared is active too
+    r = client.get("/")
+    assert r.status_code == 200
+    # progress is loaded only for the coordinator's running job
+    assert loaded == [str(UUID(int=11))]
+    running = r.text.split('id="active-heading"')[1].split('id="recent-heading"')[0]
+    assert "thesis.pdf" in running and "Preparing" in running
+    assert 'aria-valuenow="62"' in running and "1 of 2 tasks verified" in running
+    assert str(UUID(int=12)) not in running  # completed jobs aren't "running now"
+    counts = [int(n) for n in re.findall(r"text-3xl[^>]*>(\d+)<", r.text)]
+    assert counts == [2, 10, 1, 2]  # active, completed, failed, free slots
+    recent = r.text.split('id="recent-heading"')[1]
+    assert recent.count('href="/jobs/0') == 10  # the upload and 9 of 12 jobs
+    assert 'href="/jobs">View all' in recent  # 13 jobs, only 10 shown
+    assert "location.reload" in r.text  # refreshes while something is running
+
+
+def test_home_empty_state(client, monkeypatch, s3):
+    stub_list(monkeypatch, [])
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "Nothing is running right now" in r.text and "Create a job" in r.text
+    assert "View all" not in r.text and "location.reload" not in r.text
+
+
+def test_home_survives_progress_and_quota_failures(client, monkeypatch, s3):
+    stub_list(monkeypatch, [summary(1, "RUNNING")])
+
+    async def down(*args):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(coordinator, "get_job", down)
+    monkeypatch.setattr(coordinator, "job_quota", down)
+    r = client.get("/")
+    assert r.status_code == 200
+    assert str(UUID(int=1))[:8] in r.text and "so far" in r.text
+    assert 'role="progressbar"' not in r.text
+    assert "allowed at once" not in r.text  # the slots card shows a dash
+
+
+def test_home_when_jobs_cannot_be_loaded(client, monkeypatch):
+    async def down(token, limit=20, offset=0):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(coordinator, "list_jobs", down)
+    r = client.get("/")
+    assert r.status_code == 503 and "be loaded right now" in r.text
+
+
+def test_home_notes_when_counts_are_capped(client, monkeypatch, s3):
+    stub_list(monkeypatch, [summary(i, "COMPLETED") for i in range(11, 111)])
+    assert "Counts cover your newest 100 jobs" in client.get("/").text
+    stub_list(monkeypatch, [summary(i, "COMPLETED") for i in range(11, 110)])
+    mark_pending(s3)  # 99 jobs plus an upload: every job was counted
+    assert "Counts cover" not in client.get("/").text

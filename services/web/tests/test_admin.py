@@ -99,15 +99,40 @@ def test_utc_time():
     assert admin.utc_time("2026-10-25T11:05:00") == "25 Oct 2026 11:05 UTC"
 
 
-@pytest.mark.parametrize("path", ["/jobs", "/jobs/new", "/account", "/"])
-def test_dashboard_link_only_for_admins(monkeypatch, path):
-    def sidebar(user):
-        r = _signed_in(monkeypatch, user).get(path)
-        assert r.status_code == 200, path
-        return r.text.split('id="profile-menu"')[0]
+def _sidebar(monkeypatch, user, path="/account"):
+    r = _signed_in(monkeypatch, user).get(path)
+    assert r.status_code == 200, path
+    return r.text.split('id="profile-menu"')[0]
 
-    assert 'href="/admin"' not in sidebar(USER)
-    assert 'href="/admin"' in sidebar(ADMIN) and "Dashboard" in sidebar(ADMIN)
+
+@pytest.mark.parametrize("path", ["/jobs", "/jobs/new", "/account"])
+def test_users_get_their_dashboard_and_jobs_links(monkeypatch, path):
+    sidebar = _sidebar(monkeypatch, USER, path)
+    assert 'href="/admin"' not in sidebar
+    # the logo links to / too
+    assert sidebar.count('href="/"') == 2
+    assert 'href="/jobs/new"' in sidebar and 'href="/jobs"' in sidebar
+
+
+def test_admins_get_only_the_admin_links(monkeypatch):
+    sidebar = _sidebar(monkeypatch, ADMIN)
+    assert 'href="/admin"' in sidebar and "Admin dashboard" in sidebar
+    assert sidebar.count('href="/"') == 1  # just the logo
+    assert 'href="/jobs/new"' not in sidebar and 'href="/jobs"' not in sidebar
+
+
+@pytest.mark.parametrize(
+    "method, path", [("get", "/jobs/new"), ("post", "/jobs/new"), ("get", "/jobs")]
+)
+def test_admins_cannot_submit_or_list_jobs(monkeypatch, method, path):
+    r = getattr(_signed_in(monkeypatch, ADMIN), method)(path)
+    assert r.status_code == 403
+
+
+def test_home_sends_admins_to_the_admin_dashboard(monkeypatch):
+    r = _signed_in(monkeypatch, ADMIN).get("/")
+    assert r.status_code == 303 and r.headers["location"] == "/admin"
+    assert _signed_in(monkeypatch, USER).get("/").status_code == 200
 
 
 def test_node_row_and_counts():
@@ -296,10 +321,10 @@ def test_nav_active_picks_the_most_specific_link():
     assert nav_active("/account") is None
 
 
-def test_dashboard_menu_lists_its_pages(monkeypatch, fake_admin_api):
+def test_admin_pages_are_plain_sidebar_links(monkeypatch, fake_admin_api):
     c = _signed_in(monkeypatch, ADMIN)
-    jobs_page = c.get("/jobs").text
-    assert "<details >" in jobs_page  # collapsed elsewhere
+    sidebar = c.get("/account").text.split('id="profile-menu"')[0]
+    assert "<details" not in sidebar and "Admin dashboard" in sidebar
     for path in (
         "/admin",
         "/admin/jobs",
@@ -307,9 +332,8 @@ def test_dashboard_menu_lists_its_pages(monkeypatch, fake_admin_api):
         "/admin/events",
         "/admin/users",
     ):
-        assert f'href="{path}"' in jobs_page
+        assert f'href="{path}"' in sidebar
     events_page = c.get("/admin/events").text
-    assert "<details open>" in events_page
     assert 'href="/admin/events" aria-current="page"' in events_page
     assert 'href="/admin" aria-current' not in events_page
 
@@ -332,3 +356,9 @@ def test_user_profile_shows_account_and_jobs(monkeypatch, fake_admin_api):
 def test_unknown_user_is_404(monkeypatch, fake_admin_api):
     r = _signed_in(monkeypatch, ADMIN).get(f"/admin/users/{UUID(int=99)}")
     assert r.status_code == 404
+
+
+@pytest.mark.parametrize("path", ADMIN_PAGES)
+def test_admin_pages_do_not_refresh_themselves(monkeypatch, fake_admin_api, path):
+    html = _signed_in(monkeypatch, ADMIN).get(path).text
+    assert "location.reload" not in html

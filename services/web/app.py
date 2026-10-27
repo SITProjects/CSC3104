@@ -41,27 +41,20 @@ BASE_DIR = Path(__file__).parent
 log = logging.getLogger("uvicorn.error")
 BURST_PAGE_SIZE = 20  # burst workers per page on the admin dashboard
 
-# Main navigation. An item with children is a collapsible group; "admin" items
-# are shown to admins only (the pages check the role themselves too).
+# Main navigation. "admin": True items are shown to admins only, "admin": False
+# items to everyone but admins, and the rest to everyone (the pages check the
+# role themselves too).
 NAV_ITEMS = [
-    {"label": "New job", "path": "/jobs/new", "icon": "plus"},
-    {"label": "My jobs", "path": "/jobs", "icon": "list"},
-    {
-        "label": "Dashboard",
-        "icon": "gauge",
-        "admin": True,
-        "children": [
-            {"label": "Overview", "path": "/admin"},
-            {"label": "Jobs", "path": "/admin/jobs"},
-            {"label": "Burst workers", "path": "/admin/burst"},
-            {"label": "Event log", "path": "/admin/events"},
-            {"label": "Users", "path": "/admin/users"},
-        ],
-    },
+    {"label": "Dashboard", "path": "/", "icon": "house", "admin": False},
+    {"label": "New job", "path": "/jobs/new", "icon": "plus", "admin": False},
+    {"label": "My jobs", "path": "/jobs", "icon": "list", "admin": False},
+    {"label": "Overview", "path": "/admin", "icon": "gauge", "admin": True},
+    {"label": "Jobs", "path": "/admin/jobs", "icon": "list", "admin": True},
+    {"label": "Burst workers", "path": "/admin/burst", "icon": "server", "admin": True},
+    {"label": "Event log", "path": "/admin/events", "icon": "activity", "admin": True},
+    {"label": "Users", "path": "/admin/users", "icon": "users", "admin": True},
 ]
-NAV_PATHS = [
-    entry["path"] for item in NAV_ITEMS for entry in item.get("children", [item])
-]
+NAV_PATHS = [item["path"] for item in NAV_ITEMS]
 
 
 def nav_active(path: str) -> str | None:
@@ -95,7 +88,7 @@ templates.env.globals["nav_items"] = NAV_ITEMS
 templates.env.globals["nav_active"] = nav_active
 templates.env.filters["utc_time"] = admintools.utc_time
 
-DEFAULT_AFTER_LOGIN = "/jobs/new"
+DEFAULT_AFTER_LOGIN = "/"
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 128
 
@@ -203,16 +196,15 @@ async def admin_user(user: Annotated[dict, Depends(current_user)]) -> dict:
     return user
 
 
+async def regular_user(user: Annotated[dict, Depends(current_user)]) -> dict:
+    """For pages about the user's own jobs, which admins don't have."""
+    if user.get("role") == "ADMIN":
+        raise HTTPException(403, "Not available to admins")
+    return user
+
+
 SignedIn = Depends(current_user)
 AdminOnly = Depends(admin_user)
-
-
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    if not request.cookies.get(settings.session_cookie):
-        return RedirectResponse("/login", status_code=303)
-    await current_user(request)  # so the sidebar knows whether to show admin links
-    return templates.TemplateResponse(request, "index.html")
 
 
 async def _has_valid_session(request: Request) -> bool:
@@ -406,7 +398,7 @@ app.add_middleware(UploadSizeGuard)
 
 # Declared before /jobs/{job_id}, which would otherwise catch "new"
 @app.get(NEW_JOB_PATH, response_class=HTMLResponse)
-async def new_job(request: Request, user: Annotated[dict, Depends(current_user)]):
+async def new_job(request: Request, user: Annotated[dict, Depends(regular_user)]):
     token = request.cookies[settings.session_cookie]
     return _new_job_page(request, at_limit=await _job_limit_reached(token, user))
 
@@ -415,7 +407,7 @@ async def new_job(request: Request, user: Annotated[dict, Depends(current_user)]
 async def new_job_submit(
     request: Request,
     background: BackgroundTasks,
-    user: Annotated[dict, Depends(current_user)],
+    user: Annotated[dict, Depends(regular_user)],
     job_type: Annotated[str | None, Form()] = None,
     cpu: Annotated[str | None, Form()] = None,
     mem: Annotated[str | None, Form()] = None,
@@ -563,10 +555,82 @@ async def _pending_rows(user: dict) -> list[dict]:
     return rows
 
 
+# ---- home: the user's dashboard ----
+
+DASHBOARD_RECENT = 10  # jobs in the "Recent jobs" table
+# The newest jobs searched for running ones and counted for the stat cards; 100
+# is the most the coordinator's GET /jobs returns at once.
+DASHBOARD_SCAN = 100
+ACTIVE_STATUSES = frozenset({"PREPARING", "PENDING", "RUNNING"})
+
+
+async def _with_progress(token: str, row: dict) -> dict:
+    """
+    Adds live progress to an active job's row. Best effort: an upload still being
+    prepared, or a job that can't be loaded, keeps its row without progress.
+    """
+    if row.get("pending"):
+        return row
+    try:
+        view = jobtools.progress_view(await coordinator.get_job(token, row["id"]))
+    except httpx.HTTPError:
+        return row
+    return {
+        **row,
+        "progress": view["progress"],
+        "tasks_verified": view["tasks_verified"],
+        "tasks_total": view["tasks_total"],
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    """The signed-in user's homepage: running jobs, counts and recent jobs."""
+    if not request.cookies.get(settings.session_cookie):
+        return RedirectResponse("/login", status_code=303)
+    user = await current_user(request)
+    if user.get("role") == "ADMIN":
+        return RedirectResponse("/admin", status_code=303)  # admins have their own
+    token = _token(request)
+    error = None
+    listed: list[dict] = []
+    try:
+        listed = await coordinator.list_jobs(token, DASHBOARD_SCAN, 0)
+    except httpx.HTTPError:
+        error = "Your jobs can't be loaded right now. Please try again shortly."
+    rows = [_job_row(job) for job in listed]
+    try:
+        quota = await coordinator.job_quota(token)
+    except httpx.HTTPError:
+        quota = None  # the slots card shows a dash
+    if not error:
+        known = {str(row["id"]) for row in rows}
+        rows = [r for r in await _pending_rows(user) if r["id"] not in known] + rows
+    running_jobs = await asyncio.gather(
+        *(_with_progress(token, r) for r in rows if r["status"] in ACTIVE_STATUSES)
+    )
+    statuses = [r["status"] for r in rows]
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "error": error,
+            "running_jobs": running_jobs,
+            "recent": rows[:DASHBOARD_RECENT],
+            "has_more": len(rows) > DASHBOARD_RECENT,
+            "counts": {s: statuses.count(s) for s in ("COMPLETED", "FAILED")},
+            "capped": len(listed) >= DASHBOARD_SCAN,
+            "scan": DASHBOARD_SCAN,
+            "quota": quota,
+        },
+        status_code=503 if error else 200,
+    )
+
+
 @app.get("/jobs", response_class=HTMLResponse)
 async def jobs(
     request: Request,
-    user: Annotated[dict, Depends(current_user)],
+    user: Annotated[dict, Depends(regular_user)],
     offset: int = Query(0, ge=0),
 ):
     token = request.cookies[settings.session_cookie]
