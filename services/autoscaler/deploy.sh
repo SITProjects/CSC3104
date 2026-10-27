@@ -6,13 +6,17 @@
 #   bash services/autoscaler/deploy.sh --no-build  # reuse the image in Docker and k3s
 #
 # Safe to run again. It checks member 1's Secrets first, then refreshes the EC2
-# launch template, loads the image into k3s and applies both manifests.
-# AWS calls use the hub's own role (LabRole), so no keys are needed here.
+# launch template, loads the image into k3s and applies both manifests. Last, a
+# one-off Job points OCR at the newest image published from main, so workers
+# can download it. AWS calls use the hub's own role (LabRole), so no keys are
+# needed here.
 set -euo pipefail
 
 NS=idlecloud-system
 MANIFEST=services/autoscaler/k8s/autoscaler.yml
 SPOTWATCH=services/autoscaler/spotwatch
+OCR_JOB_DIR=services/autoscaler/ocrimage
+OCR_JOB=select-ocr-image
 BUILD=1
 [ "${1:-}" = "--no-build" ] && BUILD=0
 
@@ -29,8 +33,11 @@ env_in_manifest() {
 IMAGE=$(grep -oE "idlecloud/autoscaler:[^[:space:]]+" "$MANIFEST" | head -1)
 REGION=$(env_in_manifest AWS_REGION)
 K3S_VERSION=$(env_in_manifest K3S_VERSION)
+# The OCR Job reuses member 1's coordinator image
+COORDINATOR_IMAGE=$(grep -oE "idlecloud/coordinator:[^[:space:]]+" infra/k8s/base/coordinator.yml | head -1)
 [ -n "$IMAGE" ] && [ -n "$REGION" ] && [ -n "$K3S_VERSION" ] ||
   die "could not read the image, AWS_REGION or K3S_VERSION from $MANIFEST"
+[ -n "$COORDINATOR_IMAGE" ] || die "could not read the coordinator image from infra/k8s/base/coordinator.yml"
 
 step "Checking what member 1 sets up"
 secret_key() {
@@ -59,6 +66,8 @@ fi
 # pipefail that SIGPIPE would fail the check even when the image is there.
 sudo k3s ctr images ls -q | grep -Fx "docker.io/$IMAGE" >/dev/null ||
   die "$IMAGE is not in k3s; run without --no-build"
+sudo k3s ctr images ls -q | grep -Fx "docker.io/$COORDINATOR_IMAGE" >/dev/null ||
+  die "$COORDINATOR_IMAGE is not in k3s; run infra/k8s/deploy.sh first"
 sudo docker image inspect "$IMAGE" >/dev/null 2>&1 ||
   die "$IMAGE is not in Docker; run without --no-build to rebuild it for the launch-template step"
 
@@ -77,6 +86,20 @@ kubectl apply -k "$SPOTWATCH"
 [ "$BUILD" = 1 ] && kubectl -n "$NS" rollout restart deployment/idlecloud-autoscaler
 kubectl -n "$NS" rollout status deployment/idlecloud-autoscaler --timeout=180s ||
   die "the autoscaler did not start; see kubectl -n $NS logs deploy/idlecloud-autoscaler"
+
+step "Selecting the newest published OCR image"
+# A Job cannot be changed once created, so remove the last run first
+kubectl -n "$NS" delete job "$OCR_JOB" --ignore-not-found >/dev/null
+kubectl kustomize "$OCR_JOB_DIR" | sed "s#COORDINATOR_IMAGE#$COORDINATOR_IMAGE#" | kubectl apply -f -
+result=""
+for _ in $(seq 75); do  # the Job gives up after 120 s
+  result=$(kubectl -n "$NS" get job "$OCR_JOB" -o jsonpath='{.status.succeeded}/{.status.failed}')
+  [ "$result" != "/" ] && break
+  sleep 2
+done
+kubectl -n "$NS" logs "job/$OCR_JOB" 2>/dev/null || true
+[ "$result" = "1/" ] ||
+  die "the OCR image was not selected (see the message above). The autoscaler itself is installed. Fix it and run this script again."
 
 step "Done"
 echo "The autoscaler now launches EC2 workers when campus PCs cannot fit pending tasks."

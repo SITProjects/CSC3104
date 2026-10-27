@@ -1,0 +1,59 @@
+# One-off Job that points the OCR job type at the newest published OCR image.
+# deploy.sh deletes the last run, fills in COORDINATOR_IMAGE and applies this.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: select-ocr-image
+  namespace: idlecloud-system
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: select-ocr-image
+    spec:
+      restartPolicy: Never
+      # It only talks to GHCR and Postgres, never the Kubernetes API
+      automountServiceAccountToken: false
+      # The coordinator image is loaded into k3s on the control node only
+      nodeSelector:
+        idlecloud/role: control
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: select
+          # Reused for its Python, psycopg and database access
+          image: COORDINATOR_IMAGE
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/job/select_image.py"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: idlecloud-db
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: code
+              mountPath: /job
+              readOnly: true
+      volumes:
+        - name: code
+          configMap:
+            name: select-ocr-image-code
