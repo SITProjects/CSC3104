@@ -1,9 +1,11 @@
 """Deploy the page pipeline: build the image, push it to ECR, create or update
 both Lambdas, and make uploads of jobs/{job_id}/input.pdf start the splitter.
 
-Run from the repo root, with Docker running:
+Run from the repo root, with Docker running. Point the callback at the web
+app's public HTTPS address, such as its CloudFront domain:
 
-    python -m serverless.deploy --bucket csc3104-idle-compute
+    python -m serverless.deploy --bucket csc3104-idle-compute \
+        --web-url https://<web app domain>
 
 Safe to run again after a code change. It updates what already exists and
 keeps the current callback settings unless new ones are given.
@@ -14,11 +16,13 @@ boto3's normal lookup is used. The bucket must already exist (member 1 owns it).
 Its region decides where the Lambdas go, because S3 only triggers a Lambda in
 its own region.
 
-The callback goes to WEBHOOK_URL, signed with HMAC_SECRET, both read from the
-environment. Set them to change the callback. The URL must be https:// unless
---allow-http-webhook is given (HMAC signs the body but does not encrypt it). Without WEBHOOK_URL each function
-keeps the callback settings it already has, and a new function only logs its
-callbacks.
+The callback goes to <web-url>/hooks/pages-ready, signed with HMAC_SECRET. Without
+HMAC_SECRET in the environment, the secret is read from the cluster's
+idlecloud-web Secret with kubectl, the one member 1's deploy.sh gives the web app,
+so the two always match. The URL must be https:// unless --allow-http-webhook is
+given (HMAC signs the body but does not encrypt it). Without --web-url each
+function keeps the callback settings it already has, and a new function only
+logs its callbacks.
 """
 
 import argparse
@@ -28,6 +32,8 @@ import json
 import os
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import boto3
@@ -41,12 +47,15 @@ SPLIT_FN = "idlecloud-split"
 RENDER_FN = "idlecloud-render"
 TRIGGER_ID = "idlecloud-split-on-upload"
 OWN_ROLE = "idlecloud-lambda-role"
-# Lambda settings this script owns only when WEBHOOK_URL is given
+# Lambda settings this script writes only when --web-url is given
 CALLBACK_KEYS = ("WEBHOOK_URL", "HMAC_SECRET", "ALLOW_NO_WEBHOOK")
 LOG_ONLY = {"ALLOW_NO_WEBHOOK": "1"}
 # create_function fails with this while a new IAM role is still spreading
 ROLE_NOT_READY = "cannot be assumed"
 ROLE_RETRY_DELAYS_S = (5, 10, 15, 20, 25)
+# The web app's callback route, and where member 1's deploy.sh keeps its secret
+HOOK_PATH = "/hooks/pages-ready"
+WEB_SECRET = ("idlecloud-system", "idlecloud-web", "hmac-secret")
 
 # name: (handler, memory MB, timeout s, /tmp MB). More memory also means more
 # CPU, which speeds up rendering. The splitter only counts pages and fans out.
@@ -289,21 +298,57 @@ def connect_trigger(lam, s3, bucket: str, account: str, split_arn: str) -> None:
     print(f"Uploads to s3://{bucket}/jobs/<job_id>/input.pdf now start {SPLIT_FN}")
 
 
-def callback_env(allow_http: bool = False) -> dict:
+def cluster_secret() -> str:
+    """The web app's callback secret, read from the cluster with kubectl."""
+    namespace, name, key = WEB_SECRET
+    try:
+        found = subprocess.run(
+            ["kubectl", "-n", namespace, "get", "secret", name,
+             "-o", f"jsonpath={{.data.{key}}}"],
+            capture_output=True, text=True, check=True, timeout=20,
+        ).stdout.strip()  # fmt: skip
+    except (OSError, subprocess.SubprocessError) as error:
+        raise SystemExit(
+            f"Could not read the {name} Secret with kubectl ({error}). Run this on "
+            "the control plane, or set HMAC_SECRET to the web app's value."
+        ) from error
+    if not found:
+        raise SystemExit(
+            f"The {name} Secret has no {key}. Run infra/k8s/deploy.sh first."
+        )
+    return base64.b64decode(found).decode()
+
+
+def callback_env(web_url: str | None, allow_http: bool = False) -> dict:
     """The callback settings to write, or {} to keep each function's own."""
-    url = os.environ.get("WEBHOOK_URL", "")
-    secret = os.environ.get("HMAC_SECRET", "")
-    if not url:
-        print("WEBHOOK_URL not set: keeping the current callback settings")
+    if not web_url:
+        print("--web-url not given: keeping the current callback settings")
         return {}
-    if not secret:
-        raise SystemExit("Set HMAC_SECRET too when WEBHOOK_URL is set")
+    url = web_url.rstrip("/")
+    if not url.endswith(HOOK_PATH):
+        url += HOOK_PATH
     if not url.startswith("https://") and not allow_http:
         raise SystemExit(
-            "WEBHOOK_URL must start with https://. Page details would travel "
+            "--web-url must start with https://. Page details would travel "
             "unencrypted. Add --allow-http-webhook only for a test endpoint."
         )
+    secret = os.environ.get("HMAC_SECRET") or cluster_secret()
     return {"WEBHOOK_URL": url, "HMAC_SECRET": secret, "ALLOW_NO_WEBHOOK": "0"}
+
+
+def warn_if_unreachable(webhook_url: str) -> None:
+    """A quick look at the web app's /healthz from here. Only a warning: this
+    machine and AWS Lambda may see the network differently."""
+    health = webhook_url.removesuffix(HOOK_PATH) + "/healthz"
+    try:
+        with urllib.request.urlopen(health, timeout=5) as response:
+            print(f"Web app answers at {health} ({response.status})")
+    except (urllib.error.URLError, OSError) as error:
+        print(
+            f"WARNING: {health} did not answer ({error}). The Lambda must reach "
+            "this address from the internet: check the ingress and that the "
+            "security group allows the port."
+        )
 
 
 def main() -> None:
@@ -316,12 +361,19 @@ def main() -> None:
         "--bucket", required=True, help="existing bucket the web app uploads PDFs to"
     )
     parser.add_argument(
+        "--web-url",
+        help="the web app's public address, e.g. https://<cloudfront domain>. "
+        "Omit to keep the current callback settings",
+    )
+    parser.add_argument(
         "--allow-http-webhook",
         action="store_true",
-        help="accept an http:// WEBHOOK_URL (test endpoints only)",
+        help="accept an http:// --web-url (test endpoints only)",
     )
     args = parser.parse_args()
-    env = callback_env(args.allow_http_webhook)
+    env = callback_env(args.web_url, args.allow_http_webhook)
+    if env:
+        warn_if_unreachable(env["WEBHOOK_URL"])
 
     s3 = aws_session().client("s3")
     region = bucket_region(s3, args.bucket)
