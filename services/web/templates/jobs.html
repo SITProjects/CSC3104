@@ -1,19 +1,57 @@
 {% extends "base.html" %}
-{% from "_macros.html" import error_alert, job_table %}
+{% from "_macros.html" import icon, error_alert, job_table %}
 {% block title %}My jobs{% endblock %}
 {% block width %}max-w-6xl{% endblock %}
 {% block content %}
 <h1 class="mb-6 text-2xl font-semibold tracking-tight">My jobs</h1>
 
+{% if rows or filtered or offset > 0 %}
+{# Two filter boxes in one form, so each keeps the other's values. Dates apply
+   with Apply (or Enter), since a half-typed date would otherwise reload the
+   page; they are UTC days, like the Submitted column. Picking a status adds it
+   as a chip at once, a chip's x removes it, and hidden inputs keep the
+   statuses already chosen. #}
+<form method="get" action="/jobs" class="mb-4 flex flex-wrap items-center gap-2" aria-label="Filter jobs">
+  {% set box = "flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2" %}
+  <div class="{{ box }}" role="group" aria-label="Submitted between">
+    <label class="label gap-2 text-sm text-muted-foreground">From
+      <input type="date" class="input h-8 w-auto text-foreground" name="from" value="{{ start }}"{% if end %} max="{{ end }}"{% endif %}>
+    </label>
+    <label class="label gap-2 text-sm text-muted-foreground">To
+      <input type="date" class="input h-8 w-auto text-foreground" name="to" value="{{ end }}"{% if start %} min="{{ start }}"{% endif %}>
+    </label>
+    <button type="submit" class="btn" data-variant="outline" data-size="sm">Apply</button>
+  </div>
+  <div class="{{ box }} min-h-12 flex-1" role="group" aria-label="Status">
+    {% for value in selected %}<input type="hidden" name="status" value="{{ value }}">{% endfor %}
+    {% for chip in chips %}
+    <a class="badge gap-1" data-variant="secondary" href="{{ chip.href }}" aria-label="Remove the {{ chip.label }} filter">
+      {{ chip.label }}{{ icon("x", "size-3") }}
+    </a>
+    {% endfor %}
+    {% if options %}
+    <select class="select h-8 border-0 bg-transparent text-sm text-muted-foreground shadow-none" name="status" aria-label="Add a status filter" onchange="this.form.submit()">
+      <option value="" selected disabled>{{ "Add status" if selected else "Filter by status" }}</option>
+      {% for value, label in options.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+    </select>
+    {% endif %}
+  </div>
+  {% if filtered %}<a class="text-sm text-muted-foreground underline underline-offset-4" href="/jobs">Clear all</a>{% endif %}
+</form>
+{% endif %}
+
+{% set page_query = filter_query ~ "&" if filter_query else "" %}
 {% if error %}
 {{ error_alert(error) }}
+{% elif not rows and offset == 0 and filtered %}
+<p class="text-muted-foreground">No jobs match this filter. <a class="text-foreground underline underline-offset-4" href="/jobs">Show all jobs</a>.</p>
 {% elif not rows and offset == 0 %}
 <p class="text-muted-foreground">You haven't submitted anything yet. <a class="text-foreground underline underline-offset-4" href="/jobs/new">Create a job</a> to get started.</p>
 {% else %}
 {{ job_table(rows, "My jobs", "Newest first. Select a job to follow its progress.") }}
 <nav class="mt-4 flex gap-2" aria-label="Job pages">
-  {% if offset > 0 %}<a class="btn" data-variant="outline" data-size="sm" href="?offset={{ [0, offset - page_size]|max }}">Newer jobs</a>{% endif %}
-  {% if has_more %}<a class="btn" data-variant="outline" data-size="sm" href="?offset={{ offset + page_size }}">Older jobs</a>{% endif %}
+  {% if offset > 0 %}<a class="btn" data-variant="outline" data-size="sm" href="?{{ page_query }}offset={{ [0, offset - page_size]|max }}">Newer jobs</a>{% endif %}
+  {% if has_more %}<a class="btn" data-variant="outline" data-size="sm" href="?{{ page_query }}offset={{ offset + page_size }}">Older jobs</a>{% endif %}
 </nav>
 {% endif %}
 {% endblock %}

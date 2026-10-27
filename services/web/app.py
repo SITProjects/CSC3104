@@ -2,10 +2,10 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -86,6 +86,14 @@ templates = Jinja2Templates(
 )
 templates.env.globals["nav_items"] = NAV_ITEMS
 templates.env.globals["nav_active"] = nav_active
+
+
+def static_version(name: str) -> int:
+    """When a static file last changed, to put in its URL so caches refetch it."""
+    return int((BASE_DIR / "static" / name).stat().st_mtime)
+
+
+templates.env.globals["static_version"] = static_version
 templates.env.filters["utc_time"] = admintools.utc_time
 
 DEFAULT_AFTER_LOGIN = "/"
@@ -547,6 +555,7 @@ async def _pending_rows(user: dict) -> list[dict]:
                     "running": not failed,
                     "error": pending.get("error") if failed else None,
                     "filename": pending.get("filename"),
+                    "created_at": pending.get("created_at"),
                     "pending": True,
                 }
             )
@@ -627,25 +636,87 @@ async def index(request: Request):
     )
 
 
+# The My jobs status filter: {status: label}. PREPARING is an upload the
+# coordinator doesn't know yet; the rest are the coordinator's job statuses.
+JOB_FILTERS = {
+    "PREPARING": "Preparing",
+    "PENDING": "Queued",
+    "RUNNING": "Running",
+    "COMPLETED": "Completed",
+    "FAILED": "Failed",
+    "CANCELLED": "Cancelled",
+}
+
+
+def _parse_day(value: str | None) -> date | None:
+    """A YYYY-MM-DD from a date input, or None if it is blank or not a date."""
+    try:
+        return date.fromisoformat(value) if value else None
+    except ValueError:
+        return None
+
+
+def _filter_query(statuses: list[str], start: date | None, end: date | None) -> str:
+    """The My jobs filter as a query string, without the page offset."""
+    pairs = [("status", s) for s in statuses]
+    pairs += [
+        (name, day.isoformat()) for name, day in (("from", start), ("to", end)) if day
+    ]
+    return urlencode(pairs)
+
+
+def _created_between(row: dict, start: date | None, end: date | None) -> bool:
+    """Whether a job list row was submitted on a UTC day in [start, end]."""
+    if start is None and end is None:
+        return True
+    created = _when(row.get("created_at"))
+    if created is None:
+        return False
+    day = created.astimezone(UTC).date()
+    return (start is None or day >= start) and (end is None or day <= end)
+
+
 @app.get("/jobs", response_class=HTMLResponse)
 async def jobs(
     request: Request,
     user: Annotated[dict, Depends(regular_user)],
     offset: int = Query(0, ge=0),
+    status: Annotated[list[str] | None, Query()] = None,
+    date_from: Annotated[str | None, Query(alias="from")] = None,
+    date_to: Annotated[str | None, Query(alias="to")] = None,
 ):
     token = request.cookies[settings.session_cookie]
+    # unknown values are ignored; nothing chosen means every status
+    selected = [s for s in JOB_FILTERS if s in (status or [])]
+    wanted = [s for s in selected if s != "PREPARING"]
+    start, end = _parse_day(date_from), _parse_day(date_to)
     error = None
     rows: list[dict] = []
     has_more = False
     try:
-        listed = await coordinator.list_jobs(token, JOBS_PAGE_SIZE + 1, offset)
-        has_more = len(listed) > JOBS_PAGE_SIZE
-        rows = [_job_row(job) for job in listed[:JOBS_PAGE_SIZE]]
+        # only "Preparing" chosen: the coordinator has none of those jobs
+        if wanted or not selected:
+            listed = await coordinator.list_jobs(
+                token, JOBS_PAGE_SIZE + 1, offset, wanted, start, end
+            )
+            has_more = len(listed) > JOBS_PAGE_SIZE
+            rows = [_job_row(job) for job in listed[:JOBS_PAGE_SIZE]]
     except (httpx.HTTPStatusError, httpx.RequestError):
         error = "Your jobs can't be loaded right now. Please try again shortly."
     if offset == 0 and not error:
         known = {row["id"] for row in rows}
-        rows = [r for r in await _pending_rows(user) if r["id"] not in known] + rows
+        rows = [
+            r
+            for r in await _pending_rows(user)
+            if r["id"] not in known
+            and (not selected or r["status"] in selected)
+            and _created_between(r, start, end)
+        ] + rows
+
+    def url(statuses: list[str]) -> str:
+        query = _filter_query(statuses, start, end)
+        return f"/jobs?{query}" if query else "/jobs"
+
     return templates.TemplateResponse(
         request,
         "jobs.html",
@@ -655,6 +726,21 @@ async def jobs(
             "offset": offset,
             "page_size": JOBS_PAGE_SIZE,
             "has_more": has_more,
+            "selected": selected,
+            "filtered": bool(selected or start or end),
+            "start": start.isoformat() if start else "",
+            "end": end.isoformat() if end else "",
+            # statuses that can still be added to the filter
+            "options": {
+                s: label for s, label in JOB_FILTERS.items() if s not in selected
+            },
+            # one removable chip per chosen status, linking to the filter without it
+            "chips": [
+                {"label": JOB_FILTERS[s], "href": url([o for o in selected if o != s])}
+                for s in selected
+            ],
+            # keeps the filter on the Newer/Older links
+            "filter_query": _filter_query(selected, start, end),
         },
         status_code=503 if error else 200,
     )

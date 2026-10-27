@@ -10,7 +10,8 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono&display=swap">
   {# Built from styles/app.css by build-css.sh: Basecoat (shadcn/ui components as
      CSS classes) plus the Tailwind utilities the pages use. #}
-  <link rel="stylesheet" href="{{ url_for('static', path='app.css').path }}">
+  {# ?v= changes whenever the file is rebuilt, so browsers never keep an old copy #}
+  <link rel="stylesheet" href="{{ url_for('static', path='app.css').path }}?v={{ static_version('app.css') }}">
   <script src="{{ url_for('static', path='vendor/basecoat/basecoat.min.js').path }}" defer></script>
   <script src="{{ url_for('static', path='vendor/basecoat/sidebar.min.js').path }}" defer></script>
   {# opens the profile menu (Account settings, Log out) #}

@@ -1,3 +1,4 @@
+from datetime import date
 from uuid import uuid4
 
 import httpx
@@ -67,3 +68,33 @@ async def test_admin_events_sends_only_given_filters():
         {"limit": "51", "offset": "0"},
         {"limit": "51", "offset": "50", "job_id": str(job_id), "node_name": "pc 1"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_list_jobs_repeats_status_and_omits_it_when_empty():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.params.get_list("status"))
+        return httpx.Response(200, json=[])
+
+    client = make_client(handler)
+    await client.list_jobs("t", 21, 0, ["RUNNING", "FAILED"])
+    await client.list_jobs("t", 21, 0)
+    assert seen == [["RUNNING", "FAILED"], []]
+
+
+@pytest.mark.asyncio
+async def test_list_jobs_sends_dates_only_when_given():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json=[])
+
+    client = make_client(handler)
+    await client.list_jobs("t", 21, 0, [], date(2026, 10, 20), date(2026, 10, 25))
+    await client.list_jobs("t", 21, 0)
+    assert seen[0]["created_from"] == "2026-10-20"
+    assert seen[0]["created_to"] == "2026-10-25"
+    assert "created_from" not in seen[1] and "created_to" not in seen[1]

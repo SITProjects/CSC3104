@@ -197,7 +197,9 @@ def _signed_in(monkeypatch, user=USER):
         assert token == "tok123"
         return user
 
-    async def fake_list_jobs(token, limit=20, offset=0):
+    async def fake_list_jobs(
+        token, limit=20, offset=0, statuses=(), created_from=None, created_to=None
+    ):
         return []
 
     async def fake_quota(token):
@@ -293,7 +295,7 @@ def test_pages_load_scripts_and_styles_only_from_this_site(monkeypatch):
             # HTTP to the app, the browser still loads them over HTTPS
             relative = url.startswith("/") and not url.startswith("//")
             assert relative or url.startswith(ALLOWED_HOSTS), url
-        assert 'href="/static/app.css"' in html
+        assert re.search(r'href="/static/app\.css\?v=\d+"', html)
 
 
 def test_built_stylesheet_and_vendored_scripts_are_served():
