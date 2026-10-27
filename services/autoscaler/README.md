@@ -57,6 +57,7 @@ controller in `controller/`, which calls the same functions on its own.
 | `controller/usage.py` | Saves burst machines and the task pods that ran on them, for cost |
 | `controller/__main__.py` | The loop: observe, decide, act, every 30 seconds |
 | `Dockerfile`, `k8s/autoscaler.yml` | Image and Deployment with its permissions |
+| `deploy.sh` | One command that installs the autoscaler and Spot watcher on the hub |
 
 ## Needed from member 1
 
@@ -181,15 +182,32 @@ creates the `burst_slots` table itself if the coordinator has not run yet.
 Timings, sizes and the budget can be changed with the variables in
 `controller/settings.py`, for example `BURST_BUDGET_USD_PER_HOUR=0.30`.
 
-In the cluster, build the image from the repo root and apply the manifest:
+### Deploying on the hub
+
+On the control plane, from the repo root, after `infra/k8s/deploy.sh`:
 
 ```sh
-docker build -f services/autoscaler/Dockerfile -t idlecloud/autoscaler:0.1.0 .
-kubectl apply -f services/autoscaler/k8s/autoscaler.yml
+bash services/autoscaler/deploy.sh             # build, then deploy
+bash services/autoscaler/deploy.sh --no-build  # reuse the image in Docker and k3s
 ```
 
-The manifest lists the Secrets it needs. It runs on the control-plane node and
-uses that instance's AWS role, so no AWS keys are stored in the cluster.
+It runs these steps, and is safe to run again:
+
+1. Checks member 1's setup: the `burst-wg-slots` and `k3s-agent-token`
+   Secrets, a node labelled `idlecloud/role=control`, and that `K3S_VERSION` in
+   `k8s/autoscaler.yml` matches the server. A wrong version stops it here,
+   because burst workers would fail to join.
+2. Builds the image and imports it into k3s. K3s has its own image store, so a
+   plain `docker build` is not enough.
+3. Creates or updates the EC2 launch template, in the `AWS_REGION` from the
+   manifest. It runs inside the autoscaler image with the hub's role, so the
+   hub needs no Python packages or AWS keys.
+4. Applies the autoscaler and the Spot watcher, then waits for the autoscaler.
+
+`AWS_REGION` and `K3S_VERSION` live only in `k8s/autoscaler.yml`, so the
+template and the running autoscaler always use the same values. The pod reaches
+the hub's role through instance metadata, which needs hop limit 2 on the hub.
+If its logs show missing credentials, ask member 1 to check that setting.
 
 ## Spot reclaim handling (Step 4)
 
@@ -301,11 +319,8 @@ token (Kubernetes 1.32+). On that node it may only add the exact taint
 `idlecloud/owner-active=true:NoExecute` and set the three `idlecloud/reclaim-*`
 annotations. Everything else on the node must stay exactly as it was.
 
-Apply with kustomize, which builds the ConfigMap from `watcher.py`:
-
-```sh
-kubectl apply -k services/autoscaler/spotwatch
-```
+`deploy.sh` applies it with kustomize, which builds the ConfigMap from
+`watcher.py`. To apply only the watcher: `kubectl apply -k services/autoscaler/spotwatch`.
 
 ### Graceful shutdown on burst workers
 
