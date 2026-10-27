@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     max_upload_mb: int = 50
     max_pages: int = 500  # the Lambda splitter refuses more than this too
     pages_per_task: int = 10
+    min_pages_per_task: int = 2
+    render_batch_pages: int = 20
     replicas_per_task: int = 3
     # Only for uploads saved before users chose CPU and memory themselves
     task_cpu: int = 1
