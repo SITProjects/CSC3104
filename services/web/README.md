@@ -49,7 +49,7 @@ the web app checks it, saves it to `jobs/{id}/input.pdf` and sends the user to
 more copies beat bigger ones.
 
 ```
-POST /jobs/new -> S3 input.pdf -> Lambda renders 10-page batches -> POST /hooks/pages-ready
+POST /jobs/new -> S3 input.pdf -> Lambda renders 20-page batches -> POST /hooks/pages-ready
    first ready batch  -> coordinator POST /jobs (final task_count, tasks so far)
    each later batch   -> coordinator POST /jobs/{id}/tasks (its tasks)
 ```
