@@ -291,6 +291,10 @@ def test_events_page_filters(monkeypatch, fake_admin_api):
     )  # "Newer events" keeps filters
     assert "Clear" in r.text
     assert c.get("/admin/events?job=nope").status_code == 422
+    # submitting the form with both boxes empty means no filter
+    r = c.get("/admin/events?job=&node=")
+    assert r.status_code == 200 and fake_admin_api["events"] == (None, None, 51, 0)
+    assert "Clear" not in r.text
 
 
 def test_failing_page_is_503_with_a_message(monkeypatch, fake_admin_api):

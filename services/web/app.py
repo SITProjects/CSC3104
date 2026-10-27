@@ -1169,17 +1169,23 @@ async def admin_burst(request: Request, offset: int = Query(0, ge=0)):
 @app.get("/admin/events", response_class=HTMLResponse, dependencies=[AdminOnly])
 async def admin_events(
     request: Request,
-    job: UUID | None = None,
+    job: Annotated[str | None, Query(max_length=45)] = None,
     node: Annotated[str | None, Query(max_length=253)] = None,
     offset: int = Query(0, ge=0),
 ):
     """Evictions, lost and failed replicas, optionally for one job or node."""
+    # a blank box in the filter form means any job, like a blank node
+    job_text = (job or "").strip()
+    try:
+        job_id = UUID(job_text) if job_text else None
+    except ValueError:
+        raise HTTPException(422, "Enter a full job ID") from None
     node = (node or "").strip() or None
     results, errors, status = await _admin_load(
         request,
         {
             "events": coordinator.admin_events(
-                _token(request), job, node, ADMIN_EVENTS_PAGE_SIZE + 1, offset
+                _token(request), job_id, node, ADMIN_EVENTS_PAGE_SIZE + 1, offset
             )
         },
     )
@@ -1190,7 +1196,7 @@ async def admin_events(
         errors,
         status,
         events=[admintools.event_row(e) for e in events[:ADMIN_EVENTS_PAGE_SIZE]],
-        filter_job=job,
+        filter_job=job_id,
         filter_node=node,
         offset=offset,
         page_size=ADMIN_EVENTS_PAGE_SIZE,
