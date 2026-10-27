@@ -80,17 +80,20 @@ that adds tasks to an existing job.
 and adds the S3 trigger. Run it from the repo root with Docker running:
 
 ```sh
-python -m serverless.deploy --bucket csc3104-idle-compute
+python -m serverless.deploy --bucket csc3104-idle-compute \
+    --web-url https://<web app domain>
 ```
 
-To set or change the callback, give the URL and the secret first. `read -rs`
-asks for the secret without showing it, so it stays out of shell history:
-
-```sh
-export WEBHOOK_URL=https://<site>/hooks/pages-ready
-read -rs HMAC_SECRET && export HMAC_SECRET
-python -m serverless.deploy --bucket csc3104-idle-compute
-```
+`--web-url` is the web app's public HTTPS address, for example the CloudFront
+domain in front of the hub. The script adds `/hooks/pages-ready`. The URL is
+saved in the Lambda settings, so later runs can leave the flag out. CloudFront
+must allow POST, not cache `/hooks/*`, and forward the `X-Idlecloud-Timestamp`
+and `X-Idlecloud-Signature` headers, or every callback is rejected. Run it
+on the hub after `infra/k8s/deploy.sh`: it then reads the callback secret from
+the cluster's `idlecloud-web` Secret with kubectl, so the Lambda and the web app
+always share the same one. Elsewhere, set `HMAC_SECRET` to that value first
+(`read -rs HMAC_SECRET && export HMAC_SECRET` keeps it out of shell history).
+Before deploying, the script checks that the web app answers on `/healthz`.
 
 - **Credentials**: `runtime/aws-credentials`, the same file the autoscaler's
   launch command uses. Paste the AWS Academy "AWS CLI" block there. It expires
@@ -106,14 +109,14 @@ python -m serverless.deploy --bucket csc3104-idle-compute
   reach Lambda, so creating a function is retried for about a minute.
 - **Trigger**: uploads matching `jobs/*/input.pdf` start `idlecloud-split`. The
   bucket's other notification settings are kept.
-- **Callbacks**: without `WEBHOOK_URL`, each function keeps the callback
+- **Callbacks**: without `--web-url`, each function keeps the callback
   settings it already has. A new function only logs what it would send
   (`ALLOW_NO_WEBHOOK=1`) until a run sets the URL and secret. Lambda replaces
   all of a function's variables on update, which is why the script copies
   these over itself. Other variables are owned by the script and reset each run.
-- **HTTPS**: `WEBHOOK_URL` must start with `https://`. The HMAC proves who sent
-  a callback but does not hide its contents. `--allow-http-webhook` lifts this
-  for a test endpoint only.
+- **HTTPS**: `--web-url` must start with `https://`. The HMAC proves who sent a
+  callback and stops replays, but does not hide its contents (job ids and page
+  counts). `--allow-http-webhook` accepts plain HTTP for a test endpoint only.
 - **Where the secret lives**: `HMAC_SECRET` is a Lambda environment variable.
   Lambda encrypts it at rest, but anyone allowed to read the function's
   configuration can see it. That is enough for this project. AWS Secrets
