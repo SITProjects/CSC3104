@@ -134,7 +134,7 @@ async def finish_jobs(session_factory: async_sessionmaker[AsyncSession]) -> None
 
 
 async def finish_loop(
-    session_factory: async_sessionmaker[AsyncSession], interval: float = 5
+    session_factory: async_sessionmaker[AsyncSession], interval: float = 2
 ) -> None:
     """
     Runs finish_jobs every interval seconds, retrying database failures.

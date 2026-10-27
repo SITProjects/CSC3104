@@ -216,7 +216,7 @@ async def complete_job(
 
 
 async def output_loop(
-    session_factory: async_sessionmaker[AsyncSession], interval: float = 5
+    session_factory: async_sessionmaker[AsyncSession], interval: float = 1
 ) -> None:
     """
     Publishes ready OCR jobs while retrying storage and database failures.

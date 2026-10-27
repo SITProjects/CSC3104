@@ -217,7 +217,7 @@ async def cancel_redundant_replicas(
 
 
 async def adaptive_loop(
-    session_factory: async_sessionmaker[AsyncSession], interval: float = 5
+    session_factory: async_sessionmaker[AsyncSession], interval: float = 2
 ) -> None:
     """
     Checks early-stop candidates and deletes cancelled replica Jobs after commit.
