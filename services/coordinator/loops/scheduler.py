@@ -14,6 +14,7 @@ from services.coordinator.crud import (
     recover_replicas,
     schedule_replica,
     set_voting,
+    sibling_nodes,
 )
 from services.coordinator.k8s import build_replica_job_manifest, create_job
 from shared.db.models import ReplicaStatus
@@ -39,7 +40,12 @@ async def launch_batch(
             # the pod gets the plain token; only its hash is stored
             token = secrets.token_urlsafe(32)
             job_manifest = build_replica_job_manifest(
-                replica, task, job_type, token, coordinator_url
+                replica,
+                task,
+                job_type,
+                token,
+                coordinator_url,
+                avoid_nodes=await sibling_nodes(session, replica),
             )
             try:
                 # BatchV1Api is blocking, so keep it off the event loop

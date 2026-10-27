@@ -447,6 +447,7 @@ async def new_job_submit(
         return _new_job_page(request, str(exc), 422, form)
 
     job_id = uuid4()
+    per_task = await _pages_per_task(token, pages, cpu_cores, mem_mib)
     try:
         await uploads.save_upload(
             job_id,
@@ -457,6 +458,7 @@ async def new_job_submit(
             pages,
             cpu_cores,
             mem_mib,
+            per_task,
         )
     except (BotoCoreError, ClientError):
         log.exception("saving upload %s to S3 failed", job_id)
@@ -700,6 +702,19 @@ async def job_stream(
     )
 
 
+async def _pages_per_task(token: str, pages: int, cpu: int, mem: int) -> int:
+    """
+    Pages per task for a new PDF, from how many copies the workers can take now
+    (jobs.pages_per_task_for). Unknown capacity keeps the largest task size.
+    """
+    try:
+        free = (await coordinator.capacity(token, cpu, mem))["slots"]
+    except (httpx.HTTPError, KeyError, TypeError) as exc:
+        log.warning("couldn't read free capacity, using full-size tasks: %r", exc)
+        free = None
+    return jobtools.pages_per_task_for(pages, free, settings.replicas_per_task)
+
+
 @app.post("/jobs/{job_id}/cancel")
 async def job_cancel(
     request: Request, job_id: UUID, user: Annotated[dict, Depends(current_user)]
@@ -720,7 +735,20 @@ async def job_cancel(
             raise _unavailable(request, exc) from exc
     except httpx.RequestError as exc:
         raise _unavailable(request, exc) from exc
+    # pages may still be rendering: forget the upload, so later batches don't
+    # try to add tasks to the cancelled job (they would be refused anyway)
+    await _forget_pending(job_id, user)
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
+async def _forget_pending(job_id: UUID, user: dict) -> None:
+    """Deletes the upload record of one of the user's jobs, if it still has one."""
+    try:
+        pending = await asyncio.to_thread(storage.get_json, storage.pending_key(job_id))
+        if pending is not None and pending.get("owner_id") == str(user["id"]):
+            await uploads.discard_pending(job_id, pending)
+    except (BotoCoreError, ClientError):
+        log.warning("couldn't forget the upload of cancelled job %s", job_id)
 
 
 async def _discard_pending_upload(request: Request, job_id: UUID, user: dict):

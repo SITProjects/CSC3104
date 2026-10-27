@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Collection
 from typing import cast
 
 from kubernetes.client import (
@@ -54,9 +55,44 @@ async def list_replica_pods(core_api: CoreV1Api) -> list[V1Pod]:
     return pods.items or []
 
 
+def _avoid(nodes: Collection[str]) -> dict:
+    """
+    A hard node rule keeping a Pod off these nodes (by name), or nothing.
+
+    A node-name field selector takes one value per NotIn, so each node gets its
+    own requirement; requirements in one term must all hold.
+    """
+    if not nodes:
+        return {}
+    return {
+        "requiredDuringSchedulingIgnoredDuringExecution": {
+            "nodeSelectorTerms": [
+                {
+                    "matchFields": [
+                        {"key": "metadata.name", "operator": "NotIn", "values": [name]}
+                        for name in sorted(nodes)
+                    ]
+                }
+            ]
+        }
+    }
+
+
 def build_replica_job_manifest(
-    replica: Replica, task: Task, job_type: JobType, token: str, coordinator_url: str
+    replica: Replica,
+    task: Task,
+    job_type: JobType,
+    token: str,
+    coordinator_url: str,
+    avoid_nodes: Collection[str] = (),
 ):
+    """
+    The Kubernetes Job for one replica attempt.
+
+    args:
+        avoid_nodes: Nodes this copy must not use: where its task's other copies
+            ran or run (crud.sibling_nodes), so the vote compares different PCs.
+    """
     labels = {
         "app.kubernetes.io/managed-by": "idlecloud-coordinator",
         "idlecloud/job-id": str(task.job_id),
@@ -139,6 +175,7 @@ def build_replica_job_manifest(
                             ]
                         },
                         "nodeAffinity": {
+                            **_avoid(avoid_nodes),
                             "preferredDuringSchedulingIgnoredDuringExecution": [
                                 {
                                     "weight": 100,
@@ -152,7 +189,7 @@ def build_replica_job_manifest(
                                         ]
                                     },
                                 }
-                            ]
+                            ],
                         },
                     },
                     "securityContext": {

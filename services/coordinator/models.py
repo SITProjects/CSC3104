@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 JobStatus = Literal["PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
 TaskStatus = Literal["PENDING", "RUNNING", "VOTING", "VERIFIED", "DISPUTED", "FAILED"]
@@ -15,12 +15,17 @@ NodeState = Literal["IDLE", "BUSY", "OFFLINE"]
 
 # caps the presigned URLs in one manifest
 MAX_FILES_PER_TASK = 50
+# A 500-page PDF split into single pages, with room to spare
+MAX_TASKS_PER_JOB = 1000
 
 
 class TaskIn(BaseModel):
     input: dict[str, Any] = Field(
         examples=[{"files": ["pages/0001.png", "pages/0002.png"], "lang": "eng"}]
     )
+    # Its place in the job (0 to task_count - 1). Needed when the job's tasks
+    # arrive in several requests; without it tasks are numbered in list order.
+    index: int | None = Field(default=None, ge=0, examples=[0])
 
     @field_validator("input")
     @classmethod
@@ -67,9 +72,76 @@ class JobSpec(BaseModel):
     job_type: str = Field(examples=["ocr"])
     params: dict[str, Any] = Field(examples=[{"param1": "value1", "param2": "value2"}])
     tasks: list[TaskIn] = Field(min_length=1)
+    # How many tasks the job will have in all. Set it when only the first tasks
+    # are sent now and the rest follow with POST /jobs/{id}/tasks, for example
+    # OCR pages that are still being rendered. Defaults to len(tasks).
+    task_count: int | None = Field(
+        default=None, ge=1, le=MAX_TASKS_PER_JOB, examples=[8]
+    )
     replicas_per_task: int = Field(ge=1, le=5, examples=[3])
     cpu_request: int = Field(ge=1, le=16, examples=[2])  # in cores
     mem_request: int = Field(ge=64, le=4096, examples=[256])  # in MiB
+
+    @model_validator(mode="after")
+    def check_task_indices(self) -> "JobSpec":
+        """
+        Checks the tasks fit task_count, and that their indices, if any, are all
+        given, distinct and in range.
+
+        raises:
+            ValueError: If there are more tasks than task_count, only some tasks
+                have an index, an index repeats, or one is task_count or more.
+        """
+        total = self.task_count or len(self.tasks)
+        if len(self.tasks) > total:
+            raise ValueError("more tasks than task_count")
+        check_indices(self.tasks, total, required=self.task_count is not None)
+        return self
+
+
+def check_indices(tasks: list[TaskIn], total: int, required: bool) -> None:
+    """
+    Checks task indices are all given or all absent, distinct, and below total.
+
+    args:
+        tasks: The tasks in one request.
+        total: The job's task_count.
+        required: Whether every task must have an index.
+    raises:
+        ValueError: If the indices break any of these rules.
+    """
+    given = [task.index for task in tasks if task.index is not None]
+    if (required or given) and len(given) != len(tasks):
+        raise ValueError("give every task an index, or none")
+    if len(set(given)) != len(given):
+        raise ValueError("task indices must be distinct")
+    if any(index >= total for index in given):
+        raise ValueError(f"task indices must be below task_count ({total})")
+
+
+class AddTasksIn(BaseModel):
+    """More tasks for a job created with a larger task_count."""
+
+    tasks: list[TaskIn] = Field(min_length=1, max_length=MAX_TASKS_PER_JOB)
+
+    @model_validator(mode="after")
+    def check_indexed(self) -> "AddTasksIn":
+        """Every task needs its index; the range is checked against the job."""
+        check_indices(self.tasks, MAX_TASKS_PER_JOB, required=True)
+        return self
+
+
+class AddTasksResponse(BaseModel):
+    job_id: UUID
+    added_task_ids: list[int]  # only the tasks that were new
+    replica_count: int
+
+
+class CapacityOut(BaseModel):
+    """Free room on usable worker nodes, in task copies of the asked size."""
+
+    slots: int
+    nodes: int
 
 
 class CreateJobResponse(BaseModel):

@@ -61,6 +61,18 @@ class CoordinatorClient:
     async def create_job(self, token: str, spec: dict) -> dict:
         return await self._send("POST", "/jobs", token, json=spec)
 
+    async def add_tasks(self, token: str, job_id: UUID, tasks: list[dict]) -> dict:
+        """More tasks for a job created with a larger task_count; repeats are skipped."""
+        return await self._send(
+            "POST", f"/jobs/{job_id}/tasks", token, json={"tasks": tasks}
+        )
+
+    async def capacity(self, token: str, cpu: int, mem: int) -> dict:
+        """{"slots": copies of this size that fit now, "nodes": usable workers}"""
+        return await self._send(
+            "GET", "/capacity", token, params={"cpu": cpu, "mem": mem}
+        )
+
     async def cancel_job(self, token: str, job_id: UUID) -> None:
         await self._send("POST", f"/jobs/{job_id}/cancel", token)
 

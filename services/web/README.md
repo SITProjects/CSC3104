@@ -43,19 +43,32 @@ types with `custom_resources` (today the test workload) let the user change them
 within the coordinator's limits (1 to 16 cores, 64 to 4096 MiB). Tasks always run 3
 replicas.
 
-A test job is created at once. An OCR job takes one PDF (up to 50 MB and 500 pages,
-10 pages per task): the web app checks it, saves it to `jobs/{id}/input.pdf` and sends
-the user to `/jobs/{id}`.
+A test job is created at once. An OCR job takes one PDF (up to 50 MB and 500 pages):
+the web app checks it, saves it to `jobs/{id}/input.pdf` and sends the user to
+`/jobs/{id}`. Each OCR copy gets 1 core and 256 MiB: Tesseract runs one thread, so
+more copies beat bigger ones.
 
 ```
-POST /jobs/new -> S3 input.pdf -> Lambda renders pages -> POST /hooks/pages-ready
-               -> (all pages in S3) -> coordinator POST /jobs with the uploader's token
+POST /jobs/new -> S3 input.pdf -> Lambda renders 10-page batches -> POST /hooks/pages-ready
+   first ready batch  -> coordinator POST /jobs (final task_count, tasks so far)
+   each later batch   -> coordinator POST /jobs/{id}/tasks (its tasks)
 ```
 
-* The coordinator's `POST /jobs` needs the uploader's bearer token, so the upload keeps
-  it in `jobs/{id}/pending.json` until the job exists, then deletes it. There is no
-  in-memory state, so several web replicas work. "Are all pages ready?" is answered by
-  listing S3, which also makes repeated callbacks harmless.
+* **Task size follows free capacity.** At upload the web app asks the coordinator's
+  `GET /capacity` how many one-core copies the workers can take now, and splits the
+  PDF so it can all run at once: `free slots ÷ 3` tasks side by side, between 2 and 10
+  pages each (`jobs.pages_per_task_for`). With few free slots tasks stay at 10 pages.
+  The size is saved with the upload, so every callback plans the same tasks.
+* **OCR starts per batch.** Tasks never span two render batches (`plan_tasks`), so a
+  batch's tasks start as soon as its pages exist, while later pages still render.
+  `render_batch_pages` must equal the Lambda's `PAGES_PER_RENDER`.
+* The coordinator calls need the uploader's bearer token, so the upload keeps it in
+  `jobs/{id}/pending.json` until every task has been sent, then deletes it. There is
+  no in-memory state, so several web replicas work. Which pages exist is answered by
+  listing S3, and the coordinator skips task indices it already has, so repeated
+  callbacks are harmless.
+* If a batch fails or the upload expires after the first batches started the job, the
+  job is cancelled, so it never waits for tasks that will not come.
 * `/hooks/pages-ready` checks the HMAC signature (`HMAC_SECRET`, same as the Lambda's)
   and answers 5xx if the coordinator is down, so the Lambda retries.
 * **Locally** there is no Lambda: `LOCAL_RENDER=true` (the compose default) renders the

@@ -4,6 +4,7 @@ final text. Nothing here talks to the network, so it is easy to test.
 """
 
 import json
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -48,9 +49,12 @@ JOB_TYPES = {
             "OCR",
             "Reads the text from every page of a scanned PDF.",
             needs_pdf=True,
+            # Tesseract runs one thread per copy (OMP_THREAD_LIMIT=1), and a
+            # second core made a 10-page task only 6% faster, so more copies
+            # beat bigger ones. A copy peaks under 100 MiB on dense 300 DPI
+            # pages; 256 MiB leaves headroom, and lets a t3.micro fit two.
             default_cpu=1,
-            default_mem=512,
-            # ten pages of Tesseract per task: a steady load these defaults fit
+            default_mem=256,
             custom_resources=False,
         ),
         JobType(
@@ -154,31 +158,88 @@ def check_pdf(data: bytes) -> int:
     return pages
 
 
+def pages_per_task_for(page_count: int, free_slots: int | None, replicas: int) -> int:
+    """
+    How many pages each task of a PDF gets, so the whole PDF can run at once.
+
+    Each task runs `replicas` copies on one core each, so free_slots // replicas
+    tasks fit side by side. Splitting into that many tasks finishes soonest. A
+    copy has a few seconds of fixed overhead, so a task never drops below
+    settings.min_pages_per_task pages, and never exceeds settings.pages_per_task.
+
+    args:
+        page_count: Pages in the PDF.
+        free_slots: Free one-core copy slots (GET /capacity), or None if unknown.
+        replicas: Copies per task.
+    returns:
+        int: Pages per task.
+    """
+    largest = settings.pages_per_task
+    if not free_slots:
+        return largest
+    side_by_side = max(1, free_slots // replicas)
+    wanted = math.ceil(page_count / side_by_side)
+    return max(settings.min_pages_per_task, min(largest, wanted))
+
+
+def plan_tasks(
+    page_count: int, per_task: int | None = None, batch: int | None = None
+) -> list[dict[str, Any]]:
+    """
+    Splits pages 1..page_count into tasks of up to per_task pages, never across a
+    render batch, so a batch's tasks can start as soon as that batch is rendered.
+
+    args:
+        page_count: Pages in the PDF.
+        per_task: Pages per task (default settings.pages_per_task).
+        batch: Pages per Lambda renderer (default settings.render_batch_pages).
+    returns:
+        list: One {"index", "first", "last", "input"} per task, in page order.
+            "input" holds the page image names, relative to jobs/{id}/.
+    """
+    per_task = per_task or settings.pages_per_task
+    batch = batch or settings.render_batch_pages
+    tasks = []
+    for batch_start in range(1, page_count + 1, batch):
+        batch_end = min(batch_start + batch - 1, page_count)
+        for first in range(batch_start, batch_end + 1, per_task):
+            last = min(first + per_task - 1, batch_end)
+            files = [f"pages/{page:04d}.png" for page in range(first, last + 1)]
+            tasks.append(
+                {
+                    "index": len(tasks),
+                    "first": first,
+                    "last": last,
+                    "input": {"files": files, "lang": "eng"},
+                }
+            )
+    return tasks
+
+
+def task_payload(task: dict[str, Any]) -> dict[str, Any]:
+    """A planned task as the coordinator takes it: its index and input."""
+    return {"index": task["index"], "input": task["input"]}
+
+
 def build_tasks(page_count: int) -> list[dict[str, Any]]:
     """
-    Splits pages 1..page_count into tasks of settings.pages_per_task pages.
+    All of a PDF's tasks at the largest size, in the form POST /jobs takes.
 
     returns:
-        list: One {"input": {"files": [...], "lang": "eng"}} per task, ready for
-            the coordinator's POST /jobs. File names are relative to jobs/{id}/.
+        list: One {"input": {"files": [...], "lang": "eng"}} per task.
     """
-    size = settings.pages_per_task
-    return [
-        {
-            "input": {
-                "files": [
-                    f"pages/{page:04d}.png"
-                    for page in range(start, min(start + size, page_count + 1))
-                ],
-                "lang": "eng",
-            }
-        }
-        for start in range(1, page_count + 1, size)
-    ]
+    return [{"input": task["input"]} for task in plan_tasks(page_count)]
 
 
 def job_spec(
-    job_id: str, job_type: str, cpu: int, mem: int, page_count: int = 0
+    job_id: str,
+    job_type: str,
+    cpu: int,
+    mem: int,
+    page_count: int = 0,
+    tasks: list[dict[str, Any]] | None = None,
+    task_count: int | None = None,
+    params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     The body for the coordinator's POST /jobs.
@@ -188,20 +249,29 @@ def job_spec(
             one task with no input.
         cpu: Cores for each copy of a task.
         mem: MiB for each copy of a task.
+        tasks: The tasks to send now (OCR), instead of all of them.
+        task_count: How many tasks the job will have in all, when the rest follow
+            later with POST /jobs/{id}/tasks.
+        params: Extra job parameters to record, such as when it was uploaded.
     """
     if job_type == "ocr":
-        params, tasks = {"page_count": page_count}, build_tasks(page_count)
+        job_params = {"page_count": page_count}
+        if tasks is None:
+            tasks = build_tasks(page_count)
     else:
-        params, tasks = {}, [{"input": {}}]
-    return {
+        job_params, tasks = {}, [{"input": {}}]
+    spec = {
         "job_id": job_id,
         "job_type": job_type,
-        "params": params,
+        "params": {**job_params, **(params or {})},
         "tasks": tasks,
         "replicas_per_task": settings.replicas_per_task,
         "cpu_request": cpu,
         "mem_request": mem,
     }
+    if task_count is not None:
+        spec["task_count"] = task_count
+    return spec
 
 
 def _restarts(replica: dict[str, Any]) -> int:
@@ -263,14 +333,23 @@ def progress_view(job: dict[str, Any]) -> dict[str, Any]:
             }
         )
     done = sum(1 for t in tasks if t["status"] == "VERIFIED")
+    # task_count also counts tasks not created yet (pages still rendering), so
+    # progress only reaches 100% once every task exists and is done
+    total = job.get("task_count") or len(tasks)
+    if job["status"] == "COMPLETED":
+        progress = 100
+    elif "task_count" in job:
+        progress = round(sum(t["progress"] for t in tasks) / total)
+    else:
+        progress = int(job["progress"])
     return {
         "stage": "active",
         "id": str(job["id"]),
         "job_type": job["job_type"],
         "status": job["status"],
         "terminal": job["status"] in TERMINAL_STATUSES,
-        "progress": 100 if job["status"] == "COMPLETED" else int(job["progress"]),
-        "tasks_total": len(tasks),
+        "progress": progress,
+        "tasks_total": total,
         "tasks_verified": done,
         "tasks_disputed": sum(1 for t in tasks if t["status"] == "DISPUTED"),
         "restarts": sum(t["restarts"] for t in tasks),

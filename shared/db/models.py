@@ -766,4 +766,6 @@ class JobView(BaseModel):
     job_type: str
     status: JobStatus
     progress: int = 0  # 0-100, average over tasks
+    # All the tasks the job will have; tasks can be fewer while more are added
+    task_count: int
     tasks: list[TaskView]
