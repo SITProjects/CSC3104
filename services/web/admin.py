@@ -2,8 +2,11 @@
 events for the page. Nothing here talks to the network, so it is easy to test.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
+
+# The site shows every time in Singapore time, which has no daylight saving.
+SGT = timezone(timedelta(hours=8), "SGT")
 
 NODE_STATES = ("IDLE", "BUSY", "OFFLINE")
 
@@ -15,14 +18,17 @@ EVENT_DETAILS = (
 )
 
 
-def utc_time(when: str | None) -> str:
-    """'25 Oct 2026 11:00 UTC' for an ISO timestamp (naive means UTC); '' if None."""
+def sg_time(when: str | datetime | None, fmt: str = "%d %b %Y %H:%M SGT") -> str:
+    """
+    A time or ISO timestamp in Singapore time, by default '25 Oct 2026 19:00 SGT'.
+    A naive time is taken as UTC. '' if there is none.
+    """
     if not when:
         return ""
-    then = datetime.fromisoformat(when)
+    then = datetime.fromisoformat(when) if isinstance(when, str) else when
     if then.tzinfo is None:
         then = then.replace(tzinfo=UTC)
-    return then.astimezone(UTC).strftime("%d %b %Y %H:%M UTC")
+    return then.astimezone(SGT).strftime(fmt)
 
 
 def ago(when: str | None, now: datetime) -> str:
@@ -62,7 +68,7 @@ def event_row(event: dict[str, Any]) -> dict[str, Any]:
     detail = event["detail"] or {}
     return {
         **event,
-        "time": datetime.fromisoformat(event["time"]).strftime("%d %b %H:%M:%S"),
+        "time": sg_time(event["time"], "%d %b %H:%M:%S"),
         # "replica_evicted" -> "evicted", shown as a status badge
         "kind": event["type"].removeprefix("replica_").replace("_", " "),
         "message": detail.get("message") or "",

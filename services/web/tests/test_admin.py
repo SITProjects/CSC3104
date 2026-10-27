@@ -93,21 +93,54 @@ def test_ago():
     assert admin.ago("2026-10-25T12:00:05+00:00", NOW) == "0s ago"  # clock skew
 
 
-def test_utc_time():
-    assert admin.utc_time(None) == ""
-    assert admin.utc_time("2026-10-25T19:05:00+08:00") == "25 Oct 2026 11:05 UTC"
-    assert admin.utc_time("2026-10-25T11:05:00") == "25 Oct 2026 11:05 UTC"
+def test_sg_time():
+    assert admin.sg_time(None) == ""
+    assert admin.sg_time("2026-10-25T11:05:00+00:00") == "25 Oct 2026 19:05 SGT"
+    assert (
+        admin.sg_time("2026-10-25T11:05:00") == "25 Oct 2026 19:05 SGT"
+    )  # naive is UTC
+    # the evening in UTC is already the next day in Singapore
+    assert (
+        admin.sg_time(datetime(2026, 10, 25, 20, 0, tzinfo=UTC))
+        == "26 Oct 2026 04:00 SGT"
+    )
+    assert admin.sg_time("2026-10-25T11:05:00Z", "%d %b %Y") == "25 Oct 2026"
 
 
-@pytest.mark.parametrize("path", ["/jobs", "/jobs/new", "/account", "/"])
-def test_dashboard_link_only_for_admins(monkeypatch, path):
-    def sidebar(user):
-        r = _signed_in(monkeypatch, user).get(path)
-        assert r.status_code == 200, path
-        return r.text.split('id="profile-menu"')[0]
+def _sidebar(monkeypatch, user, path="/account"):
+    r = _signed_in(monkeypatch, user).get(path)
+    assert r.status_code == 200, path
+    return r.text.split('id="profile-menu"')[0]
 
-    assert 'href="/admin"' not in sidebar(USER)
-    assert 'href="/admin"' in sidebar(ADMIN) and "Dashboard" in sidebar(ADMIN)
+
+@pytest.mark.parametrize("path", ["/jobs", "/jobs/new", "/account"])
+def test_users_get_their_dashboard_and_jobs_links(monkeypatch, path):
+    sidebar = _sidebar(monkeypatch, USER, path)
+    assert 'href="/admin"' not in sidebar
+    # the logo links to / too
+    assert sidebar.count('href="/"') == 2
+    assert 'href="/jobs/new"' in sidebar and 'href="/jobs"' in sidebar
+
+
+def test_admins_get_only_the_admin_links(monkeypatch):
+    sidebar = _sidebar(monkeypatch, ADMIN)
+    assert 'href="/admin"' in sidebar and "Admin dashboard" in sidebar
+    assert sidebar.count('href="/"') == 1  # just the logo
+    assert 'href="/jobs/new"' not in sidebar and 'href="/jobs"' not in sidebar
+
+
+@pytest.mark.parametrize(
+    "method, path", [("get", "/jobs/new"), ("post", "/jobs/new"), ("get", "/jobs")]
+)
+def test_admins_cannot_submit_or_list_jobs(monkeypatch, method, path):
+    r = getattr(_signed_in(monkeypatch, ADMIN), method)(path)
+    assert r.status_code == 403
+
+
+def test_home_sends_admins_to_the_admin_dashboard(monkeypatch):
+    r = _signed_in(monkeypatch, ADMIN).get("/")
+    assert r.status_code == 303 and r.headers["location"] == "/admin"
+    assert _signed_in(monkeypatch, USER).get("/").status_code == 200
 
 
 def test_node_row_and_counts():
@@ -129,7 +162,7 @@ def test_event_row():
     assert row["kind"] == "evicted"
     assert row["message"] == "owner came back"
     assert row["facts"] == ["replica 31", "attempt 2"]
-    assert row["time"] == "25 Oct 11:30:00"
+    assert row["time"] == "25 Oct 19:30:00"  # in Singapore time
     assert admin.event_row({**EVENT, "detail": None})["facts"] == []
 
 
@@ -250,7 +283,7 @@ def test_burst_page_lists_workers(monkeypatch, fake_admin_api):
     html = _signed_in(monkeypatch, ADMIN).get("/admin/burst?offset=20").text
     assert "Burst workers (1)" in html
     assert "burst-200" in html and "i-0abc" in html and "$0.023600" in html
-    assert "25 Oct 2026 11:00 UTC" in html and "to ongoing" in html
+    assert "25 Oct 2026 19:00 SGT" in html and "to ongoing" in html
     assert "2026-10-25T" not in html  # no raw ISO timestamps
     assert fake_admin_api["burst"]["machine_offset"] == 20
 
@@ -266,6 +299,10 @@ def test_events_page_filters(monkeypatch, fake_admin_api):
     )  # "Newer events" keeps filters
     assert "Clear" in r.text
     assert c.get("/admin/events?job=nope").status_code == 422
+    # submitting the form with both boxes empty means no filter
+    r = c.get("/admin/events?job=&node=")
+    assert r.status_code == 200 and fake_admin_api["events"] == (None, None, 51, 0)
+    assert "Clear" not in r.text
 
 
 def test_failing_page_is_503_with_a_message(monkeypatch, fake_admin_api):
@@ -296,10 +333,10 @@ def test_nav_active_picks_the_most_specific_link():
     assert nav_active("/account") is None
 
 
-def test_dashboard_menu_lists_its_pages(monkeypatch, fake_admin_api):
+def test_admin_pages_are_plain_sidebar_links(monkeypatch, fake_admin_api):
     c = _signed_in(monkeypatch, ADMIN)
-    jobs_page = c.get("/jobs").text
-    assert "<details >" in jobs_page  # collapsed elsewhere
+    sidebar = c.get("/account").text.split('id="profile-menu"')[0]
+    assert "<details" not in sidebar and "Admin dashboard" in sidebar
     for path in (
         "/admin",
         "/admin/jobs",
@@ -307,9 +344,8 @@ def test_dashboard_menu_lists_its_pages(monkeypatch, fake_admin_api):
         "/admin/events",
         "/admin/users",
     ):
-        assert f'href="{path}"' in jobs_page
+        assert f'href="{path}"' in sidebar
     events_page = c.get("/admin/events").text
-    assert "<details open>" in events_page
     assert 'href="/admin/events" aria-current="page"' in events_page
     assert 'href="/admin" aria-current' not in events_page
 
@@ -318,7 +354,7 @@ def test_users_page_lists_accounts(monkeypatch, fake_admin_api):
     html = _signed_in(monkeypatch, ADMIN).get("/admin/users").text
     assert "student@sit.edu.sg" in html
     assert f'href="/admin/users/{PROFILE["id"]}"' in html
-    assert "01 Oct 2026 02:00 UTC" in html
+    assert "01 Oct 2026 10:00 SGT" in html
     assert fake_admin_api["users"] == (51, 0)
 
 
@@ -332,3 +368,9 @@ def test_user_profile_shows_account_and_jobs(monkeypatch, fake_admin_api):
 def test_unknown_user_is_404(monkeypatch, fake_admin_api):
     r = _signed_in(monkeypatch, ADMIN).get(f"/admin/users/{UUID(int=99)}")
     assert r.status_code == 404
+
+
+@pytest.mark.parametrize("path", ADMIN_PAGES)
+def test_admin_pages_do_not_refresh_themselves(monkeypatch, fake_admin_api, path):
+    html = _signed_in(monkeypatch, ADMIN).get(path).text
+    assert "location.reload" not in html

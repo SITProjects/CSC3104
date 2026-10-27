@@ -10,7 +10,8 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono&display=swap">
   {# Built from styles/app.css by build-css.sh: Basecoat (shadcn/ui components as
      CSS classes) plus the Tailwind utilities the pages use. #}
-  <link rel="stylesheet" href="{{ url_for('static', path='app.css').path }}">
+  {# ?v= changes whenever the file is rebuilt, so browsers never keep an old copy #}
+  <link rel="stylesheet" href="{{ url_for('static', path='app.css').path }}?v={{ static_version('app.css') }}">
   <script src="{{ url_for('static', path='vendor/basecoat/basecoat.min.js').path }}" defer></script>
   <script src="{{ url_for('static', path='vendor/basecoat/sidebar.min.js').path }}" defer></script>
   {# opens the profile menu (Account settings, Log out) #}
@@ -31,26 +32,14 @@
       </header>
       <section class="scrollbar-sm">
         <div role="group" aria-labelledby="nav-heading">
-          <h3 id="nav-heading">Campus OCR</h3>
+          <h3 id="nav-heading">{{ "Admin dashboard" if is_admin else "Campus OCR" }}</h3>
           <ul>
-            {% for item in nav_items if is_admin or not item.admin %}
+            {% for item in nav_items if item.admin is not defined or item.admin == is_admin %}
             <li>
-              {% if item.children %}
-              {# collapsible group, open while one of its pages is shown #}
-              <details {% if active in item.children|map(attribute="path") %}open{% endif %}>
-                <summary>{{ icon(item.icon) }}<span>{{ item.label }}</span></summary>
-                <ul>
-                  {% for child in item.children %}
-                  <li><a href="{{ child.path }}"{% if child.path == active %} aria-current="page"{% endif %}><span>{{ child.label }}</span></a></li>
-                  {% endfor %}
-                </ul>
-              </details>
-              {% else %}
               <a href="{{ item.path }}"{% if item.path == active %} aria-current="page"{% endif %}>
                 {{ icon(item.icon) }}
                 <span>{{ item.label }}</span>
               </a>
-              {% endif %}
             </li>
             {% endfor %}
           </ul>

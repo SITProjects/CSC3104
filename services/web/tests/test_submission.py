@@ -1,6 +1,7 @@
 """Upload, page-ready callback, progress status/stream, download and cancel."""
 
 import json
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -10,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from services.web import storage, uploads
+from services.web.admin import SGT
 from services.web.app import app
 from services.web.coordinator import coordinator
 from services.web.settings import settings
@@ -738,31 +740,201 @@ def test_job_list_shows_rows_and_paging(client, monkeypatch):
         for i in range(1, 22)
     ]
 
-    async def fake_list(token, limit=20, offset=0):
+    async def fake_list(
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
+    ):
         assert limit == 21
         return rows
 
     monkeypatch.setattr(coordinator, "list_jobs", fake_list)
     r = client.get("/jobs")
     assert r.status_code == 200
-    assert "2m 5s" in r.text and "24 Oct 2026 10:00 UTC" in r.text
+    assert "2m 5s" in r.text and "24 Oct 2026 18:00 SGT" in r.text
     assert "Older jobs" in r.text and "Newer jobs" not in r.text
     assert r.text.count("/jobs/00000000-") == 20  # the 21st row only signals "more"
 
 
 def test_job_list_empty_and_error_states(client, monkeypatch):
-    async def empty(token, limit=20, offset=0):
+    async def empty(
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
+    ):
         return []
 
     monkeypatch.setattr(coordinator, "list_jobs", empty)
     assert "Create a job" in client.get("/jobs").text
 
-    async def down(token, limit=20, offset=0):
+    async def down(
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
+    ):
         raise httpx.ConnectError("down")
 
     monkeypatch.setattr(coordinator, "list_jobs", down)
     r = client.get("/jobs")
     assert r.status_code == 503 and "be loaded right now" in r.text
+
+
+# --- My jobs status filter -----------------------------------------------------
+
+
+def test_job_list_filters_by_status_and_keeps_it_when_paging(client, monkeypatch, s3):
+    calls = []
+
+    async def fake_list(
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
+    ):
+        calls.append(list(statuses))
+        return [
+            {
+                "id": str(UUID(int=i)),
+                "owner_id": USER["id"],
+                "job_type": "ocr",
+                "status": "FAILED",
+                "task_count": 1,
+                "created_at": "2026-10-24T10:00:00+00:00",
+                "finished_at": "2026-10-24T10:01:00+00:00",
+            }
+            for i in range(11, 32)
+        ]
+
+    monkeypatch.setattr(coordinator, "list_jobs", fake_list)
+    mark_pending(s3)  # preparing, so hidden by this filter
+    r = client.get("/jobs?status=FAILED&status=PENDING&status=bogus")
+    assert r.status_code == 200
+    assert calls == [["PENDING", "FAILED"]]  # unknown values are dropped
+    # a chip per status, each linking to the filter without it
+    assert 'href="/jobs?status=FAILED" aria-label="Remove the Queued filter"' in r.text
+    assert 'href="/jobs?status=PENDING" aria-label="Remove the Failed filter"' in r.text
+    # only statuses not yet chosen can be added
+    assert (
+        '<option value="RUNNING">' in r.text and '<option value="FAILED">' not in r.text
+    )
+    assert "thesis.pdf" not in r.text
+    assert "?status=PENDING&amp;status=FAILED&amp;offset=20" in r.text
+    assert 'href="/jobs">Clear all' in r.text
+
+
+def test_job_list_preparing_filter_skips_the_coordinator(client, monkeypatch, s3):
+    async def must_not_call(*args, **kwargs):
+        raise AssertionError("the coordinator has no preparing jobs")
+
+    monkeypatch.setattr(coordinator, "list_jobs", must_not_call)
+    mark_pending(s3)
+    r = client.get("/jobs?status=PREPARING")
+    assert r.status_code == 200 and "thesis.pdf" in r.text
+
+
+def test_job_list_says_when_nothing_matches(client, monkeypatch, s3):
+    async def fake_list(
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
+    ):
+        # the user has a job, just none that is cancelled
+        return [] if statuses else [summary(11, "COMPLETED")]
+
+    monkeypatch.setattr(coordinator, "list_jobs", fake_list)
+    r = client.get("/jobs?status=CANCELLED")
+    assert "No jobs match this filter" in r.text and "Create a job" not in r.text
+    assert 'href="/jobs" aria-label="Remove the Cancelled filter"' in r.text
+
+
+def test_job_list_filters_by_date_and_keeps_it_everywhere(client, monkeypatch, s3):
+    calls = []
+
+    async def fake_list(
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
+    ):
+        calls.append((list(statuses), created_after, created_before))
+        return [
+            {
+                "id": str(UUID(int=i)),
+                "owner_id": USER["id"],
+                "job_type": "ocr",
+                "status": "COMPLETED",
+                "task_count": 1,
+                "created_at": "2026-10-24T10:00:00+00:00",
+                "finished_at": "2026-10-24T10:01:00+00:00",
+            }
+            for i in range(11, 32)
+        ]
+
+    monkeypatch.setattr(coordinator, "list_jobs", fake_list)
+    r = client.get("/jobs?status=COMPLETED&from=2026-10-20&to=2026-10-25")
+    assert r.status_code == 200
+    # Singapore days: from the start of the 20th to the start of the 26th
+    assert calls == [
+        (
+            ["COMPLETED"],
+            datetime(2026, 10, 20, tzinfo=SGT),
+            datetime(2026, 10, 26, tzinfo=SGT),
+        )
+    ]
+    assert 'name="from" value="2026-10-20" max="2026-10-25"' in r.text
+    assert 'name="to" value="2026-10-25" min="2026-10-20"' in r.text
+    # removing the status chip keeps the dates, and so does paging
+    assert (
+        'href="/jobs?from=2026-10-20&amp;to=2026-10-25" aria-label="Remove the Completed filter"'
+        in r.text
+    )
+    assert (
+        "?status=COMPLETED&amp;from=2026-10-20&amp;to=2026-10-25&amp;offset=20"
+        in r.text
+    )
+
+
+def test_job_list_does_not_allow_future_dates(client, monkeypatch, s3):
+    calls = []
+
+    async def fake_list(
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
+    ):
+        calls.append((created_after, created_before))
+        return [summary(11, "COMPLETED")]  # so the filter boxes are shown
+
+    monkeypatch.setattr(coordinator, "list_jobs", fake_list)
+    today = datetime.now(SGT).date()
+    tomorrow = (today + timedelta(days=1)).isoformat()
+    r = client.get(f"/jobs?from={tomorrow}&to=9999-12-31")
+    assert r.status_code == 200 and calls == [(None, None)]  # both ignored
+    # the pickers stop at today too
+    assert f'name="from" value="" max="{today}"' in r.text
+    assert f'name="to" value="" max="{today}"' in r.text
+    r = client.get(f"/jobs?to={today}")
+    # today itself is allowed: up to the start of tomorrow
+    tomorrow = today + timedelta(days=1)
+    assert calls[-1] == (None, datetime(*tomorrow.timetuple()[:3], tzinfo=SGT))
+
+
+def test_job_list_has_no_filters_when_the_user_has_no_jobs(client, monkeypatch, s3):
+    stub_list(monkeypatch, [])
+    for path in ("/jobs", "/jobs?status=CANCELLED&from=2026-10-20"):
+        r = client.get(path)
+        assert 'aria-label="Filter jobs"' not in r.text, path
+        assert "Create a job" in r.text and "No jobs match" not in r.text
+
+
+def test_job_list_ignores_a_bad_date(client, monkeypatch, s3):
+    calls = []
+
+    async def fake_list(
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
+    ):
+        calls.append((created_after, created_before))
+        return []
+
+    monkeypatch.setattr(coordinator, "list_jobs", fake_list)
+    r = client.get("/jobs?from=not-a-date&to=")
+    assert r.status_code == 200 and calls == [(None, None)]
+    assert "Create a job" in r.text  # not filtered, so the usual empty state
+
+
+def test_job_list_date_filter_applies_to_uploads_being_prepared(
+    client, monkeypatch, s3
+):
+    stub_list(monkeypatch, [])
+    # 23:30 UTC on the 24th is 07:30 on the 25th in Singapore
+    mark_pending(s3, created_at="2026-10-24T23:30:00+00:00")
+    assert "thesis.pdf" in client.get("/jobs?from=2026-10-25&to=2026-10-25").text
+    assert "thesis.pdf" not in client.get("/jobs?from=2026-10-26").text
+    assert "thesis.pdf" not in client.get("/jobs?to=2026-10-24").text
 
 
 # --- local rendering fallback ------------------------------------------------
@@ -799,7 +971,9 @@ def mark_pending(s3, job_id=JOB_ID, owner=USER["id"], **fields):
 
 
 def stub_list(monkeypatch, rows):
-    async def fake_list(token, limit=20, offset=0):
+    async def fake_list(
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
+    ):
         return rows
 
     monkeypatch.setattr(coordinator, "list_jobs", fake_list)
@@ -812,7 +986,7 @@ def test_job_list_shows_uploads_still_preparing(client, monkeypatch, s3):
     assert r.status_code == 200
     assert "Preparing" in r.text and "thesis.pdf" in r.text
     assert f"/jobs/{JOB_ID}" in r.text
-    assert "location.reload" in r.text  # keeps checking until the job exists
+    assert "location.reload" not in r.text  # My jobs never refreshes itself
 
 
 def test_job_list_shows_failed_uploads_with_reason(client, monkeypatch, s3):
@@ -998,3 +1172,89 @@ def test_filename_is_cleaned_and_capped(client, s3):
     stored = s3.json(f"jobs/{job_id}/pending.json")["filename"]
     assert len(stored) <= settings.max_filename_chars
     assert "/" not in stored and "\x00" not in stored and "etc" not in stored
+
+
+# --- home page dashboard -------------------------------------------------------
+
+
+def summary(i: int, status: str) -> dict:
+    """A coordinator JobSummary, as GET /jobs lists it."""
+    finished = status not in ("PENDING", "RUNNING")
+    return {
+        "id": str(UUID(int=i)),
+        "owner_id": USER["id"],
+        "job_type": "ocr",
+        "status": status,
+        "task_count": 2,
+        "created_at": "2026-10-24T10:00:00+00:00",
+        "finished_at": "2026-10-24T10:02:05+00:00" if finished else None,
+    }
+
+
+def test_home_shows_running_jobs_counts_and_recent(client, monkeypatch, s3):
+    statuses = ["RUNNING", "COMPLETED", "COMPLETED", "FAILED"] + ["COMPLETED"] * 8
+    # ids from 11, since the upload marked below is job 7
+    stub_list(monkeypatch, [summary(i, s) for i, s in enumerate(statuses, 11)])
+    loaded = []
+
+    async def fake_get(token, job_id):
+        loaded.append(str(job_id))
+        return sample_job("RUNNING")
+
+    monkeypatch.setattr(coordinator, "get_job", fake_get)
+    set_quota(monkeypatch, active=1, limit=3)
+    mark_pending(s3)  # an upload still being prepared is active too
+    r = client.get("/")
+    assert r.status_code == 200
+    # progress is loaded only for the coordinator's running job
+    assert loaded == [str(UUID(int=11))]
+    running = r.text.split('id="active-heading"')[1].split('id="recent-heading"')[0]
+    assert "thesis.pdf" in running and "Preparing" in running
+    assert 'aria-valuenow="62"' in running and "1 of 2 tasks verified" in running
+    assert str(UUID(int=12)) not in running  # completed jobs aren't "running now"
+    counts = [int(n) for n in re.findall(r"text-3xl[^>]*>(\d+)<", r.text)]
+    assert counts == [2, 10, 1, 2]  # active, completed, failed, free slots
+    recent = r.text.split('id="recent-heading"')[1]
+    assert recent.count('href="/jobs/0') == 10  # the upload and 9 of 12 jobs
+    assert 'href="/jobs">View all' in recent  # 13 jobs, only 10 shown
+    assert "location.reload" in r.text  # refreshes while something is running
+
+
+def test_home_empty_state(client, monkeypatch, s3):
+    stub_list(monkeypatch, [])
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "Nothing is running right now" in r.text and "Create a job" in r.text
+    assert "View all" not in r.text and "location.reload" not in r.text
+
+
+def test_home_survives_progress_and_quota_failures(client, monkeypatch, s3):
+    stub_list(monkeypatch, [summary(1, "RUNNING")])
+
+    async def down(*args):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(coordinator, "get_job", down)
+    monkeypatch.setattr(coordinator, "job_quota", down)
+    r = client.get("/")
+    assert r.status_code == 200
+    assert str(UUID(int=1))[:8] in r.text and "so far" in r.text
+    assert 'role="progressbar"' not in r.text
+    assert "allowed at once" not in r.text  # the slots card shows a dash
+
+
+def test_home_when_jobs_cannot_be_loaded(client, monkeypatch):
+    async def down(token, limit=20, offset=0):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(coordinator, "list_jobs", down)
+    r = client.get("/")
+    assert r.status_code == 503 and "be loaded right now" in r.text
+
+
+def test_home_notes_when_counts_are_capped(client, monkeypatch, s3):
+    stub_list(monkeypatch, [summary(i, "COMPLETED") for i in range(11, 111)])
+    assert "Counts cover your newest 100 jobs" in client.get("/").text
+    stub_list(monkeypatch, [summary(i, "COMPLETED") for i in range(11, 110)])
+    mark_pending(s3)  # 99 jobs plus an upload: every job was counted
+    assert "Counts cover" not in client.get("/").text

@@ -75,7 +75,13 @@ async def get_job(
 
 
 async def list_jobs(
-    session: AsyncSession, owner_id: uuid.UUID | None, limit: int, offset: int
+    session: AsyncSession,
+    owner_id: uuid.UUID | None,
+    limit: int,
+    offset: int,
+    statuses: list[JobStatus] | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
 ) -> list[Job]:
     """
     Returns jobs, newest first.
@@ -85,12 +91,21 @@ async def list_jobs(
         owner_id: The user whose jobs to list, or None for everyone's.
         limit: The most jobs to return.
         offset: How many of the newest jobs to skip.
+        statuses: Only jobs in one of these states, or None (or empty) for all.
+        created_after: Only jobs created at or after this time, if given.
+        created_before: Only jobs created before this time, if given.
     returns:
         list[Job]: The jobs, without their tasks.
     """
     stmt = select(Job).order_by(Job.created_at.desc(), Job.id)
     if owner_id is not None:
         stmt = stmt.where(Job.owner_id == owner_id)
+    if statuses:
+        stmt = stmt.where(Job.status.in_(statuses))
+    if created_after is not None:
+        stmt = stmt.where(Job.created_at >= created_after)
+    if created_before is not None:
+        stmt = stmt.where(Job.created_at < created_before)
     return list((await session.scalars(stmt.limit(limit).offset(offset))).all())
 
 

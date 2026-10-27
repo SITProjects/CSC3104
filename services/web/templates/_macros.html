@@ -5,6 +5,9 @@
 {%- set paths = {
   "check": '<path d="M20 6 9 17l-5-5"/>',
   "x": '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  "house": '<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  "activity": '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
+  "users": '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/>',
   "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
   "upload": '<path d="M12 3v12"/><path d="m17 8-5-5-5 5"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>',
   "download": '<path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/>',
@@ -48,21 +51,13 @@
   {% if value is none %}Unknown{% else %}${{ "%.6f"|format(value|float) }}{% endif %}
 {%- endmacro %}
 
-{# Admin page title with a Refresh button. With refresh=True the page reloads
-   every 15 seconds, unless the admin is typing in a field. #}
-{% macro admin_header(title, updated, refresh=True) -%}
+{# Admin page title with a Refresh button. The page never reloads by itself. #}
+{% macro admin_header(title, updated) -%}
 <div class="flex flex-wrap items-center justify-between gap-2">
   <h1 class="text-2xl font-semibold tracking-tight">{{ title }}</h1>
   <a class="btn" data-variant="outline" data-size="sm" href="">{{ icon("refresh") }} Refresh</a>
 </div>
-<p class="mt-2 text-sm text-muted-foreground">Updated {{ updated }}.{% if refresh %} Refreshes every 15 seconds.{% endif %}</p>
-{% if refresh %}
-<script>
-  setInterval(() => {
-    if (!document.hidden && !document.activeElement?.matches("input")) location.reload();
-  }, 15000);
-</script>
-{% endif %}
+<p class="mt-2 text-sm text-muted-foreground">Updated {{ updated }}.</p>
 {%- endmacro %}
 
 {# Newer/older links for a list paged by ?offset=, keeping params (e.g. filters). #}
@@ -71,4 +66,34 @@
   {% if offset > 0 %}<a class="btn" data-variant="outline" data-size="sm" href="?{{ dict(params, offset=[0, offset - page_size]|max)|dictsort|selectattr(1)|list|urlencode }}">Newer {{ what }}</a>{% endif %}
   {% if has_more %}<a class="btn" data-variant="outline" data-size="sm" href="?{{ dict(params, offset=offset + page_size)|dictsort|selectattr(1)|list|urlencode }}">Older {{ what }}</a>{% endif %}
 </nav>
+{%- endmacro %}
+
+{# A user's jobs as a table, used by My jobs and the home page. Rows come from
+   _job_row or _pending_rows in app.py. #}
+{% macro job_table(rows, label, caption) -%}
+<div class="table-container" tabindex="0" role="region" aria-label="{{ label }}">
+  <table class="table">
+    <caption>{{ caption }}</caption>
+    <thead><tr>
+      <th scope="col">Job</th><th scope="col">Status</th><th scope="col">Tasks</th>
+      <th scope="col">Submitted</th><th scope="col">Time taken</th>
+    </tr></thead>
+    <tbody>
+    {% for job in rows %}
+      <tr>
+        <td><a class="font-mono font-medium underline-offset-4 hover:underline" href="/jobs/{{ job.id }}">{{ job.id|string|truncate(8, True, "") }}</a>
+          <div class="text-xs text-muted-foreground">{{ job.filename or job.job_type }}</div></td>
+        <td>{{ status_badge(job.status) }}
+          {% if job.error %}<div class="text-xs text-muted-foreground">{{ job.error }}</div>{% endif %}
+          {% if job.pending %}<form class="inline" method="post" action="/jobs/{{ job.id }}/cancel"><button type="submit" class="btn text-destructive" data-variant="link" data-size="xs">{{ "Dismiss" if job.status == "FAILED" else "Cancel" }}</button></form>{% endif %}</td>
+        <td class="tabular-nums">{{ job.task_count if job.task_count is not none else "–" }}</td>
+        <td>{{ job.created }}</td>
+        <td>{{ job.took }}{% if job.running %} <span class="text-xs text-muted-foreground">so far</span>{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="text-muted-foreground">No more jobs.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
 {%- endmacro %}

@@ -2,10 +2,10 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -41,27 +41,20 @@ BASE_DIR = Path(__file__).parent
 log = logging.getLogger("uvicorn.error")
 BURST_PAGE_SIZE = 20  # burst workers per page on the admin dashboard
 
-# Main navigation. An item with children is a collapsible group; "admin" items
-# are shown to admins only (the pages check the role themselves too).
+# Main navigation. "admin": True items are shown to admins only, "admin": False
+# items to everyone but admins, and the rest to everyone (the pages check the
+# role themselves too).
 NAV_ITEMS = [
-    {"label": "New job", "path": "/jobs/new", "icon": "plus"},
-    {"label": "My jobs", "path": "/jobs", "icon": "list"},
-    {
-        "label": "Dashboard",
-        "icon": "gauge",
-        "admin": True,
-        "children": [
-            {"label": "Overview", "path": "/admin"},
-            {"label": "Jobs", "path": "/admin/jobs"},
-            {"label": "Burst workers", "path": "/admin/burst"},
-            {"label": "Event log", "path": "/admin/events"},
-            {"label": "Users", "path": "/admin/users"},
-        ],
-    },
+    {"label": "Dashboard", "path": "/", "icon": "house", "admin": False},
+    {"label": "New job", "path": "/jobs/new", "icon": "plus", "admin": False},
+    {"label": "My jobs", "path": "/jobs", "icon": "list", "admin": False},
+    {"label": "Overview", "path": "/admin", "icon": "gauge", "admin": True},
+    {"label": "Jobs", "path": "/admin/jobs", "icon": "list", "admin": True},
+    {"label": "Burst workers", "path": "/admin/burst", "icon": "server", "admin": True},
+    {"label": "Event log", "path": "/admin/events", "icon": "activity", "admin": True},
+    {"label": "Users", "path": "/admin/users", "icon": "users", "admin": True},
 ]
-NAV_PATHS = [
-    entry["path"] for item in NAV_ITEMS for entry in item.get("children", [item])
-]
+NAV_PATHS = [item["path"] for item in NAV_ITEMS]
 
 
 def nav_active(path: str) -> str | None:
@@ -93,9 +86,17 @@ templates = Jinja2Templates(
 )
 templates.env.globals["nav_items"] = NAV_ITEMS
 templates.env.globals["nav_active"] = nav_active
-templates.env.filters["utc_time"] = admintools.utc_time
 
-DEFAULT_AFTER_LOGIN = "/jobs/new"
+
+def static_version(name: str) -> int:
+    """When a static file last changed, to put in its URL so caches refetch it."""
+    return int((BASE_DIR / "static" / name).stat().st_mtime)
+
+
+templates.env.globals["static_version"] = static_version
+templates.env.filters["sg_time"] = admintools.sg_time
+
+DEFAULT_AFTER_LOGIN = "/"
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 128
 
@@ -203,16 +204,15 @@ async def admin_user(user: Annotated[dict, Depends(current_user)]) -> dict:
     return user
 
 
+async def regular_user(user: Annotated[dict, Depends(current_user)]) -> dict:
+    """For pages about the user's own jobs, which admins don't have."""
+    if user.get("role") == "ADMIN":
+        raise HTTPException(403, "Not available to admins")
+    return user
+
+
 SignedIn = Depends(current_user)
 AdminOnly = Depends(admin_user)
-
-
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    if not request.cookies.get(settings.session_cookie):
-        return RedirectResponse("/login", status_code=303)
-    await current_user(request)  # so the sidebar knows whether to show admin links
-    return templates.TemplateResponse(request, "index.html")
 
 
 async def _has_valid_session(request: Request) -> bool:
@@ -406,7 +406,7 @@ app.add_middleware(UploadSizeGuard)
 
 # Declared before /jobs/{job_id}, which would otherwise catch "new"
 @app.get(NEW_JOB_PATH, response_class=HTMLResponse)
-async def new_job(request: Request, user: Annotated[dict, Depends(current_user)]):
+async def new_job(request: Request, user: Annotated[dict, Depends(regular_user)]):
     token = request.cookies[settings.session_cookie]
     return _new_job_page(request, at_limit=await _job_limit_reached(token, user))
 
@@ -415,7 +415,7 @@ async def new_job(request: Request, user: Annotated[dict, Depends(current_user)]
 async def new_job_submit(
     request: Request,
     background: BackgroundTasks,
-    user: Annotated[dict, Depends(current_user)],
+    user: Annotated[dict, Depends(regular_user)],
     job_type: Annotated[str | None, Form()] = None,
     cpu: Annotated[str | None, Form()] = None,
     mem: Annotated[str | None, Form()] = None,
@@ -520,7 +520,7 @@ def _job_row(job: dict) -> dict:
     created, finished = _when(job["created_at"]), _when(job["finished_at"])
     return {
         **job,
-        "created": created.strftime("%d %b %Y %H:%M UTC") if created else "",
+        "created": admintools.sg_time(created),
         "took": _duration(created, finished),
         "running": finished is None,
     }
@@ -550,13 +550,12 @@ async def _pending_rows(user: dict) -> list[dict]:
                     "job_type": "ocr",
                     "status": "FAILED" if failed else "PREPARING",
                     "task_count": None,
-                    "created": created.strftime("%d %b %Y %H:%M UTC")
-                    if created
-                    else "",
+                    "created": admintools.sg_time(created),
                     "took": "" if failed else _duration(created, None),
                     "running": not failed,
                     "error": pending.get("error") if failed else None,
                     "filename": pending.get("filename"),
+                    "created_at": pending.get("created_at"),
                     "pending": True,
                 }
             )
@@ -565,25 +564,194 @@ async def _pending_rows(user: dict) -> list[dict]:
     return rows
 
 
+# ---- home: the user's dashboard ----
+
+DASHBOARD_RECENT = 10  # jobs in the "Recent jobs" table
+# The newest jobs searched for running ones and counted for the stat cards; 100
+# is the most the coordinator's GET /jobs returns at once.
+DASHBOARD_SCAN = 100
+ACTIVE_STATUSES = frozenset({"PREPARING", "PENDING", "RUNNING"})
+
+
+async def _with_progress(token: str, row: dict) -> dict:
+    """
+    Adds live progress to an active job's row. Best effort: an upload still being
+    prepared, or a job that can't be loaded, keeps its row without progress.
+    """
+    if row.get("pending"):
+        return row
+    try:
+        view = jobtools.progress_view(await coordinator.get_job(token, row["id"]))
+    except httpx.HTTPError:
+        return row
+    return {
+        **row,
+        "progress": view["progress"],
+        "tasks_verified": view["tasks_verified"],
+        "tasks_total": view["tasks_total"],
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    """The signed-in user's homepage: running jobs, counts and recent jobs."""
+    if not request.cookies.get(settings.session_cookie):
+        return RedirectResponse("/login", status_code=303)
+    user = await current_user(request)
+    if user.get("role") == "ADMIN":
+        return RedirectResponse("/admin", status_code=303)  # admins have their own
+    token = _token(request)
+    error = None
+    listed: list[dict] = []
+    try:
+        listed = await coordinator.list_jobs(token, DASHBOARD_SCAN, 0)
+    except httpx.HTTPError:
+        error = "Your jobs can't be loaded right now. Please try again shortly."
+    rows = [_job_row(job) for job in listed]
+    try:
+        quota = await coordinator.job_quota(token)
+    except httpx.HTTPError:
+        quota = None  # the slots card shows a dash
+    if not error:
+        known = {str(row["id"]) for row in rows}
+        rows = [r for r in await _pending_rows(user) if r["id"] not in known] + rows
+    running_jobs = await asyncio.gather(
+        *(_with_progress(token, r) for r in rows if r["status"] in ACTIVE_STATUSES)
+    )
+    statuses = [r["status"] for r in rows]
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "error": error,
+            "running_jobs": running_jobs,
+            "recent": rows[:DASHBOARD_RECENT],
+            "has_more": len(rows) > DASHBOARD_RECENT,
+            "counts": {s: statuses.count(s) for s in ("COMPLETED", "FAILED")},
+            "capped": len(listed) >= DASHBOARD_SCAN,
+            "scan": DASHBOARD_SCAN,
+            "quota": quota,
+        },
+        status_code=503 if error else 200,
+    )
+
+
+# The My jobs status filter: {status: label}. PREPARING is an upload the
+# coordinator doesn't know yet; the rest are the coordinator's job statuses.
+JOB_FILTERS = {
+    "PREPARING": "Preparing",
+    "PENDING": "Queued",
+    "RUNNING": "Running",
+    "COMPLETED": "Completed",
+    "FAILED": "Failed",
+    "CANCELLED": "Cancelled",
+}
+
+
+def _today() -> date:
+    """Today in Singapore, the days the job list's filter and times use."""
+    return datetime.now(admintools.SGT).date()
+
+
+def _day_start(day: date) -> datetime:
+    """Midnight at the start of a day in Singapore."""
+    return datetime.combine(day, time.min, admintools.SGT)
+
+
+def _parse_day(value: str | None) -> date | None:
+    """
+    A YYYY-MM-DD from a date input, or None if it is blank, not a date, or in
+    the future (no job can have been submitted then).
+    """
+    try:
+        day = date.fromisoformat(value) if value else None
+    except ValueError:
+        return None
+    return day if day is None or day <= _today() else None
+
+
+def _filter_query(statuses: list[str], start: date | None, end: date | None) -> str:
+    """The My jobs filter as a query string, without the page offset."""
+    pairs = [("status", s) for s in statuses]
+    pairs += [
+        (name, day.isoformat()) for name, day in (("from", start), ("to", end)) if day
+    ]
+    return urlencode(pairs)
+
+
+def _created_between(row: dict, start: date | None, end: date | None) -> bool:
+    """Whether a job list row was submitted on a Singapore day in [start, end]."""
+    if start is None and end is None:
+        return True
+    created = _when(row.get("created_at"))
+    if created is None:
+        return False
+    day = created.astimezone(admintools.SGT).date()
+    return (start is None or day >= start) and (end is None or day <= end)
+
+
+async def _has_any_job(token: str) -> bool:
+    """Whether the coordinator has any job for this user, ignoring filters."""
+    try:
+        return bool(await coordinator.list_jobs(token, 1, 0))
+    except httpx.HTTPError:
+        return True  # can't tell, so keep the filter on screen to change it
+
+
 @app.get("/jobs", response_class=HTMLResponse)
 async def jobs(
     request: Request,
-    user: Annotated[dict, Depends(current_user)],
+    user: Annotated[dict, Depends(regular_user)],
     offset: int = Query(0, ge=0),
+    status: Annotated[list[str] | None, Query()] = None,
+    date_from: Annotated[str | None, Query(alias="from")] = None,
+    date_to: Annotated[str | None, Query(alias="to")] = None,
 ):
     token = request.cookies[settings.session_cookie]
+    # unknown values are ignored; nothing chosen means every status
+    selected = [s for s in JOB_FILTERS if s in (status or [])]
+    wanted = [s for s in selected if s != "PREPARING"]
+    start, end = _parse_day(date_from), _parse_day(date_to)
     error = None
     rows: list[dict] = []
     has_more = False
     try:
-        listed = await coordinator.list_jobs(token, JOBS_PAGE_SIZE + 1, offset)
-        has_more = len(listed) > JOBS_PAGE_SIZE
-        rows = [_job_row(job) for job in listed[:JOBS_PAGE_SIZE]]
+        # only "Preparing" chosen: the coordinator has none of those jobs
+        if wanted or not selected:
+            listed = await coordinator.list_jobs(
+                token,
+                JOBS_PAGE_SIZE + 1,
+                offset,
+                wanted,
+                _day_start(start) if start else None,
+                # end is at most today, so the next day always exists
+                _day_start(end + timedelta(days=1)) if end else None,
+            )
+            has_more = len(listed) > JOBS_PAGE_SIZE
+            rows = [_job_row(job) for job in listed[:JOBS_PAGE_SIZE]]
     except (httpx.HTTPStatusError, httpx.RequestError):
         error = "Your jobs can't be loaded right now. Please try again shortly."
+    filtered = bool(selected or start or end)
+    has_jobs = bool(rows) or offset > 0
     if offset == 0 and not error:
+        pending = await _pending_rows(user)
         known = {row["id"] for row in rows}
-        rows = [r for r in await _pending_rows(user) if r["id"] not in known] + rows
+        rows = [
+            r
+            for r in pending
+            if r["id"] not in known
+            and (not selected or r["status"] in selected)
+            and _created_between(r, start, end)
+        ] + rows
+        # nothing matched: the filter is only shown if the user has any job
+        has_jobs = (
+            bool(rows) or bool(pending) or (filtered and await _has_any_job(token))
+        )
+
+    def url(statuses: list[str]) -> str:
+        query = _filter_query(statuses, start, end)
+        return f"/jobs?{query}" if query else "/jobs"
+
     return templates.TemplateResponse(
         request,
         "jobs.html",
@@ -593,6 +761,23 @@ async def jobs(
             "offset": offset,
             "page_size": JOBS_PAGE_SIZE,
             "has_more": has_more,
+            "selected": selected,
+            "filtered": filtered,
+            "has_jobs": has_jobs,
+            "start": start.isoformat() if start else "",
+            "end": end.isoformat() if end else "",
+            "today": _today().isoformat(),  # the latest day the date inputs allow
+            # statuses that can still be added to the filter
+            "options": {
+                s: label for s, label in JOB_FILTERS.items() if s not in selected
+            },
+            # one removable chip per chosen status, linking to the filter without it
+            "chips": [
+                {"label": JOB_FILTERS[s], "href": url([o for o in selected if o != s])}
+                for s in selected
+            ],
+            # keeps the filter on the Newer/Older links
+            "filter_query": _filter_query(selected, start, end),
         },
         status_code=503 if error else 200,
     )
@@ -853,7 +1038,7 @@ async def account(request: Request, user: Annotated[dict, Depends(current_user)]
     return templates.TemplateResponse(
         request,
         "account.html",
-        {"joined": joined.strftime("%d %b %Y") if joined else ""},
+        {"joined": admintools.sg_time(joined, "%d %b %Y")},
     )
 
 
@@ -922,7 +1107,7 @@ def _admin_page(
         template,
         {
             "errors": errors,
-            "updated": datetime.now(UTC).strftime("%H:%M:%S UTC"),
+            "updated": admintools.sg_time(datetime.now(UTC), "%H:%M:%S SGT"),
             **context,
         },
         status_code=status,
@@ -1021,17 +1206,23 @@ async def admin_burst(request: Request, offset: int = Query(0, ge=0)):
 @app.get("/admin/events", response_class=HTMLResponse, dependencies=[AdminOnly])
 async def admin_events(
     request: Request,
-    job: UUID | None = None,
+    job: Annotated[str | None, Query(max_length=45)] = None,
     node: Annotated[str | None, Query(max_length=253)] = None,
     offset: int = Query(0, ge=0),
 ):
     """Evictions, lost and failed replicas, optionally for one job or node."""
+    # a blank box in the filter form means any job, like a blank node
+    job_text = (job or "").strip()
+    try:
+        job_id = UUID(job_text) if job_text else None
+    except ValueError:
+        raise HTTPException(422, "Enter a full job ID") from None
     node = (node or "").strip() or None
     results, errors, status = await _admin_load(
         request,
         {
             "events": coordinator.admin_events(
-                _token(request), job, node, ADMIN_EVENTS_PAGE_SIZE + 1, offset
+                _token(request), job_id, node, ADMIN_EVENTS_PAGE_SIZE + 1, offset
             )
         },
     )
@@ -1042,7 +1233,7 @@ async def admin_events(
         errors,
         status,
         events=[admintools.event_row(e) for e in events[:ADMIN_EVENTS_PAGE_SIZE]],
-        filter_job=job,
+        filter_job=job_id,
         filter_node=node,
         offset=offset,
         page_size=ADMIN_EVENTS_PAGE_SIZE,
@@ -1068,7 +1259,7 @@ async def admin_users(request: Request, offset: int = Query(0, ge=0)):
         errors,
         status,
         users=[
-            {**u, "joined": admintools.utc_time(u["created_at"])}
+            {**u, "joined": admintools.sg_time(u["created_at"])}
             for u in users[:ADMIN_USERS_PAGE_SIZE]
         ],
         offset=offset,
@@ -1102,7 +1293,7 @@ async def admin_user_profile(
         "admin_user.html",
         errors,
         status,
-        profile={**profile, "joined": admintools.utc_time(profile["created_at"])}
+        profile={**profile, "joined": admintools.sg_time(profile["created_at"])}
         if profile
         else None,
         jobs=[_job_row(j) for j in jobs[:ADMIN_JOBS_PAGE_SIZE]],
