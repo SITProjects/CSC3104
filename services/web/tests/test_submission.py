@@ -3,7 +3,7 @@
 import json
 import re
 import time
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import httpx
@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from services.web import storage, uploads
+from services.web.admin import SGT
 from services.web.app import app
 from services.web.coordinator import coordinator
 from services.web.settings import settings
@@ -740,7 +741,7 @@ def test_job_list_shows_rows_and_paging(client, monkeypatch):
     ]
 
     async def fake_list(
-        token, limit=20, offset=0, statuses=(), created_from=None, created_to=None
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
     ):
         assert limit == 21
         return rows
@@ -748,14 +749,14 @@ def test_job_list_shows_rows_and_paging(client, monkeypatch):
     monkeypatch.setattr(coordinator, "list_jobs", fake_list)
     r = client.get("/jobs")
     assert r.status_code == 200
-    assert "2m 5s" in r.text and "24 Oct 2026 10:00 UTC" in r.text
+    assert "2m 5s" in r.text and "24 Oct 2026 18:00 SGT" in r.text
     assert "Older jobs" in r.text and "Newer jobs" not in r.text
     assert r.text.count("/jobs/00000000-") == 20  # the 21st row only signals "more"
 
 
 def test_job_list_empty_and_error_states(client, monkeypatch):
     async def empty(
-        token, limit=20, offset=0, statuses=(), created_from=None, created_to=None
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
     ):
         return []
 
@@ -763,7 +764,7 @@ def test_job_list_empty_and_error_states(client, monkeypatch):
     assert "Create a job" in client.get("/jobs").text
 
     async def down(
-        token, limit=20, offset=0, statuses=(), created_from=None, created_to=None
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
     ):
         raise httpx.ConnectError("down")
 
@@ -779,7 +780,7 @@ def test_job_list_filters_by_status_and_keeps_it_when_paging(client, monkeypatch
     calls = []
 
     async def fake_list(
-        token, limit=20, offset=0, statuses=(), created_from=None, created_to=None
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
     ):
         calls.append(list(statuses))
         return [
@@ -824,7 +825,7 @@ def test_job_list_preparing_filter_skips_the_coordinator(client, monkeypatch, s3
 
 def test_job_list_says_when_nothing_matches(client, monkeypatch, s3):
     async def fake_list(
-        token, limit=20, offset=0, statuses=(), created_from=None, created_to=None
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
     ):
         # the user has a job, just none that is cancelled
         return [] if statuses else [summary(11, "COMPLETED")]
@@ -839,9 +840,9 @@ def test_job_list_filters_by_date_and_keeps_it_everywhere(client, monkeypatch, s
     calls = []
 
     async def fake_list(
-        token, limit=20, offset=0, statuses=(), created_from=None, created_to=None
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
     ):
-        calls.append((list(statuses), created_from, created_to))
+        calls.append((list(statuses), created_after, created_before))
         return [
             {
                 "id": str(UUID(int=i)),
@@ -858,7 +859,14 @@ def test_job_list_filters_by_date_and_keeps_it_everywhere(client, monkeypatch, s
     monkeypatch.setattr(coordinator, "list_jobs", fake_list)
     r = client.get("/jobs?status=COMPLETED&from=2026-10-20&to=2026-10-25")
     assert r.status_code == 200
-    assert calls == [(["COMPLETED"], date(2026, 10, 20), date(2026, 10, 25))]
+    # Singapore days: from the start of the 20th to the start of the 26th
+    assert calls == [
+        (
+            ["COMPLETED"],
+            datetime(2026, 10, 20, tzinfo=SGT),
+            datetime(2026, 10, 26, tzinfo=SGT),
+        )
+    ]
     assert 'name="from" value="2026-10-20" max="2026-10-25"' in r.text
     assert 'name="to" value="2026-10-25" min="2026-10-20"' in r.text
     # removing the status chip keeps the dates, and so does paging
@@ -876,13 +884,13 @@ def test_job_list_does_not_allow_future_dates(client, monkeypatch, s3):
     calls = []
 
     async def fake_list(
-        token, limit=20, offset=0, statuses=(), created_from=None, created_to=None
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
     ):
-        calls.append((created_from, created_to))
+        calls.append((created_after, created_before))
         return [summary(11, "COMPLETED")]  # so the filter boxes are shown
 
     monkeypatch.setattr(coordinator, "list_jobs", fake_list)
-    today = datetime.now(UTC).date()
+    today = datetime.now(SGT).date()
     tomorrow = (today + timedelta(days=1)).isoformat()
     r = client.get(f"/jobs?from={tomorrow}&to=9999-12-31")
     assert r.status_code == 200 and calls == [(None, None)]  # both ignored
@@ -890,7 +898,9 @@ def test_job_list_does_not_allow_future_dates(client, monkeypatch, s3):
     assert f'name="from" value="" max="{today}"' in r.text
     assert f'name="to" value="" max="{today}"' in r.text
     r = client.get(f"/jobs?to={today}")
-    assert calls[-1] == (None, today)  # today itself is allowed
+    # today itself is allowed: up to the start of tomorrow
+    tomorrow = today + timedelta(days=1)
+    assert calls[-1] == (None, datetime(*tomorrow.timetuple()[:3], tzinfo=SGT))
 
 
 def test_job_list_has_no_filters_when_the_user_has_no_jobs(client, monkeypatch, s3):
@@ -905,9 +915,9 @@ def test_job_list_ignores_a_bad_date(client, monkeypatch, s3):
     calls = []
 
     async def fake_list(
-        token, limit=20, offset=0, statuses=(), created_from=None, created_to=None
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
     ):
-        calls.append((created_from, created_to))
+        calls.append((created_after, created_before))
         return []
 
     monkeypatch.setattr(coordinator, "list_jobs", fake_list)
@@ -920,10 +930,11 @@ def test_job_list_date_filter_applies_to_uploads_being_prepared(
     client, monkeypatch, s3
 ):
     stub_list(monkeypatch, [])
+    # 23:30 UTC on the 24th is 07:30 on the 25th in Singapore
     mark_pending(s3, created_at="2026-10-24T23:30:00+00:00")
-    assert "thesis.pdf" in client.get("/jobs?from=2026-10-24&to=2026-10-24").text
-    assert "thesis.pdf" not in client.get("/jobs?from=2026-10-25").text
-    assert "thesis.pdf" not in client.get("/jobs?to=2026-10-23").text
+    assert "thesis.pdf" in client.get("/jobs?from=2026-10-25&to=2026-10-25").text
+    assert "thesis.pdf" not in client.get("/jobs?from=2026-10-26").text
+    assert "thesis.pdf" not in client.get("/jobs?to=2026-10-24").text
 
 
 # --- local rendering fallback ------------------------------------------------
@@ -961,7 +972,7 @@ def mark_pending(s3, job_id=JOB_ID, owner=USER["id"], **fields):
 
 def stub_list(monkeypatch, rows):
     async def fake_list(
-        token, limit=20, offset=0, statuses=(), created_from=None, created_to=None
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
     ):
         return rows
 

@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import httpx
@@ -85,7 +85,7 @@ async def test_list_jobs_repeats_status_and_omits_it_when_empty():
 
 
 @pytest.mark.asyncio
-async def test_list_jobs_sends_dates_only_when_given():
+async def test_list_jobs_sends_times_only_when_given():
     seen = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -93,8 +93,11 @@ async def test_list_jobs_sends_dates_only_when_given():
         return httpx.Response(200, json=[])
 
     client = make_client(handler)
-    await client.list_jobs("t", 21, 0, [], date(2026, 10, 20), date(2026, 10, 25))
+    sgt = timezone(timedelta(hours=8))
+    after = datetime(2026, 10, 20, tzinfo=sgt)
+    await client.list_jobs("t", 21, 0, [], after, datetime(2026, 10, 26, tzinfo=sgt))
     await client.list_jobs("t", 21, 0)
-    assert seen[0]["created_from"] == "2026-10-20"
-    assert seen[0]["created_to"] == "2026-10-25"
-    assert "created_from" not in seen[1] and "created_to" not in seen[1]
+    # the offset's "+" arrives intact, not as a space
+    assert seen[0]["created_after"] == "2026-10-20T00:00:00+08:00"
+    assert seen[0]["created_before"] == "2026-10-26T00:00:00+08:00"
+    assert "created_after" not in seen[1] and "created_before" not in seen[1]

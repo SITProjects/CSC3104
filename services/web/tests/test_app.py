@@ -198,7 +198,7 @@ def _signed_in(monkeypatch, user=USER):
         return user
 
     async def fake_list_jobs(
-        token, limit=20, offset=0, statuses=(), created_from=None, created_to=None
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
     ):
         return []
 

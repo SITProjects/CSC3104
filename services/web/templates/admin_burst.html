@@ -11,7 +11,7 @@
 {% if errors.burst %}{{ error_alert(errors.burst) }}{% else %}
 <div class="table-container" tabindex="0" role="region" aria-label="Burst workers">
   <table class="table">
-    <caption>Recorded active workers first, then recent history. Costs as of {{ burst.observed_at|utc_time }}.</caption>
+    <caption>Recorded active workers first, then recent history. Costs as of {{ burst.observed_at|sg_time }}.</caption>
     <thead><tr>
       <th scope="col">Worker / instance</th><th scope="col">Type / market</th>
       <th scope="col">State / trust</th><th scope="col">Lifetime</th>
@@ -28,7 +28,7 @@
           {% if m.state %}<div>{{ status_badge(m.state) }}</div>{% endif %}
           {% if m.trust_score is not none %}<div class="text-xs text-muted-foreground">Trust {{ "%.3f"|format(m.trust_score|float) }}{% if m.cpu_percent is not none %} · CPU {{ "%.0f"|format(m.cpu_percent) }}%{% endif %}</div>{% endif %}
         </td>
-        <td class="whitespace-nowrap text-xs text-muted-foreground">{{ m.launched_at|utc_time }}<br>to {{ m.ended_at|utc_time or "ongoing" }}</td>
+        <td class="whitespace-nowrap text-xs text-muted-foreground">{{ m.launched_at|sg_time }}<br>to {{ m.ended_at|sg_time or "ongoing" }}</td>
         <td class="tabular-nums">{{ money(m.usd_per_hour) }}</td>
         <td class="tabular-nums">{{ money(m.total_usd) }}</td>
         <td class="tabular-nums">{{ money(m.attributed_usd) }}

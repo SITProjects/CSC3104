@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote, urlencode, urlsplit
@@ -94,7 +94,7 @@ def static_version(name: str) -> int:
 
 
 templates.env.globals["static_version"] = static_version
-templates.env.filters["utc_time"] = admintools.utc_time
+templates.env.filters["sg_time"] = admintools.sg_time
 
 DEFAULT_AFTER_LOGIN = "/"
 MIN_PASSWORD_LENGTH = 8
@@ -518,7 +518,7 @@ def _job_row(job: dict) -> dict:
     created, finished = _when(job["created_at"]), _when(job["finished_at"])
     return {
         **job,
-        "created": created.strftime("%d %b %Y %H:%M UTC") if created else "",
+        "created": admintools.sg_time(created),
         "took": _duration(created, finished),
         "running": finished is None,
     }
@@ -548,9 +548,7 @@ async def _pending_rows(user: dict) -> list[dict]:
                     "job_type": "ocr",
                     "status": "FAILED" if failed else "PREPARING",
                     "task_count": None,
-                    "created": created.strftime("%d %b %Y %H:%M UTC")
-                    if created
-                    else "",
+                    "created": admintools.sg_time(created),
                     "took": "" if failed else _duration(created, None),
                     "running": not failed,
                     "error": pending.get("error") if failed else None,
@@ -649,8 +647,13 @@ JOB_FILTERS = {
 
 
 def _today() -> date:
-    """Today as a UTC day, the days the job list's filter and times use."""
-    return datetime.now(UTC).date()
+    """Today in Singapore, the days the job list's filter and times use."""
+    return datetime.now(admintools.SGT).date()
+
+
+def _day_start(day: date) -> datetime:
+    """Midnight at the start of a day in Singapore."""
+    return datetime.combine(day, time.min, admintools.SGT)
 
 
 def _parse_day(value: str | None) -> date | None:
@@ -675,13 +678,13 @@ def _filter_query(statuses: list[str], start: date | None, end: date | None) -> 
 
 
 def _created_between(row: dict, start: date | None, end: date | None) -> bool:
-    """Whether a job list row was submitted on a UTC day in [start, end]."""
+    """Whether a job list row was submitted on a Singapore day in [start, end]."""
     if start is None and end is None:
         return True
     created = _when(row.get("created_at"))
     if created is None:
         return False
-    day = created.astimezone(UTC).date()
+    day = created.astimezone(admintools.SGT).date()
     return (start is None or day >= start) and (end is None or day <= end)
 
 
@@ -714,7 +717,13 @@ async def jobs(
         # only "Preparing" chosen: the coordinator has none of those jobs
         if wanted or not selected:
             listed = await coordinator.list_jobs(
-                token, JOBS_PAGE_SIZE + 1, offset, wanted, start, end
+                token,
+                JOBS_PAGE_SIZE + 1,
+                offset,
+                wanted,
+                _day_start(start) if start else None,
+                # end is at most today, so the next day always exists
+                _day_start(end + timedelta(days=1)) if end else None,
             )
             has_more = len(listed) > JOBS_PAGE_SIZE
             rows = [_job_row(job) for job in listed[:JOBS_PAGE_SIZE]]
@@ -1001,7 +1010,7 @@ async def account(request: Request, user: Annotated[dict, Depends(current_user)]
     return templates.TemplateResponse(
         request,
         "account.html",
-        {"joined": joined.strftime("%d %b %Y") if joined else ""},
+        {"joined": admintools.sg_time(joined, "%d %b %Y")},
     )
 
 
@@ -1070,7 +1079,7 @@ def _admin_page(
         template,
         {
             "errors": errors,
-            "updated": datetime.now(UTC).strftime("%H:%M:%S UTC"),
+            "updated": admintools.sg_time(datetime.now(UTC), "%H:%M:%S SGT"),
             **context,
         },
         status_code=status,
@@ -1222,7 +1231,7 @@ async def admin_users(request: Request, offset: int = Query(0, ge=0)):
         errors,
         status,
         users=[
-            {**u, "joined": admintools.utc_time(u["created_at"])}
+            {**u, "joined": admintools.sg_time(u["created_at"])}
             for u in users[:ADMIN_USERS_PAGE_SIZE]
         ],
         offset=offset,
@@ -1256,7 +1265,7 @@ async def admin_user_profile(
         "admin_user.html",
         errors,
         status,
-        profile={**profile, "joined": admintools.utc_time(profile["created_at"])}
+        profile={**profile, "joined": admintools.sg_time(profile["created_at"])}
         if profile
         else None,
         jobs=[_job_row(j) for j in jobs[:ADMIN_JOBS_PAGE_SIZE]],

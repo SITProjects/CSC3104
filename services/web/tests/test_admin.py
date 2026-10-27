@@ -93,10 +93,18 @@ def test_ago():
     assert admin.ago("2026-10-25T12:00:05+00:00", NOW) == "0s ago"  # clock skew
 
 
-def test_utc_time():
-    assert admin.utc_time(None) == ""
-    assert admin.utc_time("2026-10-25T19:05:00+08:00") == "25 Oct 2026 11:05 UTC"
-    assert admin.utc_time("2026-10-25T11:05:00") == "25 Oct 2026 11:05 UTC"
+def test_sg_time():
+    assert admin.sg_time(None) == ""
+    assert admin.sg_time("2026-10-25T11:05:00+00:00") == "25 Oct 2026 19:05 SGT"
+    assert (
+        admin.sg_time("2026-10-25T11:05:00") == "25 Oct 2026 19:05 SGT"
+    )  # naive is UTC
+    # the evening in UTC is already the next day in Singapore
+    assert (
+        admin.sg_time(datetime(2026, 10, 25, 20, 0, tzinfo=UTC))
+        == "26 Oct 2026 04:00 SGT"
+    )
+    assert admin.sg_time("2026-10-25T11:05:00Z", "%d %b %Y") == "25 Oct 2026"
 
 
 def _sidebar(monkeypatch, user, path="/account"):
@@ -154,7 +162,7 @@ def test_event_row():
     assert row["kind"] == "evicted"
     assert row["message"] == "owner came back"
     assert row["facts"] == ["replica 31", "attempt 2"]
-    assert row["time"] == "25 Oct 11:30:00"
+    assert row["time"] == "25 Oct 19:30:00"  # in Singapore time
     assert admin.event_row({**EVENT, "detail": None})["facts"] == []
 
 
@@ -275,7 +283,7 @@ def test_burst_page_lists_workers(monkeypatch, fake_admin_api):
     html = _signed_in(monkeypatch, ADMIN).get("/admin/burst?offset=20").text
     assert "Burst workers (1)" in html
     assert "burst-200" in html and "i-0abc" in html and "$0.023600" in html
-    assert "25 Oct 2026 11:00 UTC" in html and "to ongoing" in html
+    assert "25 Oct 2026 19:00 SGT" in html and "to ongoing" in html
     assert "2026-10-25T" not in html  # no raw ISO timestamps
     assert fake_admin_api["burst"]["machine_offset"] == 20
 
@@ -346,7 +354,7 @@ def test_users_page_lists_accounts(monkeypatch, fake_admin_api):
     html = _signed_in(monkeypatch, ADMIN).get("/admin/users").text
     assert "student@sit.edu.sg" in html
     assert f'href="/admin/users/{PROFILE["id"]}"' in html
-    assert "01 Oct 2026 02:00 UTC" in html
+    assert "01 Oct 2026 10:00 SGT" in html
     assert fake_admin_api["users"] == (51, 0)
 
 

@@ -1,6 +1,6 @@
 """The web app's only way of talking to the coordinator service."""
 
-from datetime import date
+from datetime import datetime
 from uuid import UUID
 
 import httpx
@@ -57,17 +57,21 @@ class CoordinatorClient:
         limit: int = 20,
         offset: int = 0,
         statuses: list[str] = (),
-        created_from: date | None = None,
-        created_to: date | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> list:
         """
         The user's jobs, newest first: only those in statuses if any are given,
-        and only those created between the two UTC days (inclusive) if given.
+        and only those created at or after created_after and before
+        created_before, if given.
         """
         params = {"limit": limit, "offset": offset, "status": list(statuses)}
-        for name, day in (("created_from", created_from), ("created_to", created_to)):
-            if day is not None:
-                params[name] = day.isoformat()
+        for name, when in (
+            ("created_after", created_after),
+            ("created_before", created_before),
+        ):
+            if when is not None:
+                params[name] = when.isoformat()
         return await self._send("GET", "/jobs", token, params=params)
 
     async def get_job(self, token: str, job_id: UUID) -> dict:
