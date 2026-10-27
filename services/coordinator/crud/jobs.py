@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
 
 from fastapi import HTTPException
 from sqlalchemy import func, select, update
@@ -75,7 +75,13 @@ async def get_job(
 
 
 async def list_jobs(
-    session: AsyncSession, owner_id: uuid.UUID | None, limit: int, offset: int
+    session: AsyncSession,
+    owner_id: uuid.UUID | None,
+    limit: int,
+    offset: int,
+    statuses: list[JobStatus] | None = None,
+    created_from: date | None = None,
+    created_to: date | None = None,
 ) -> list[Job]:
     """
     Returns jobs, newest first.
@@ -85,12 +91,23 @@ async def list_jobs(
         owner_id: The user whose jobs to list, or None for everyone's.
         limit: The most jobs to return.
         offset: How many of the newest jobs to skip.
+        statuses: Only jobs in one of these states, or None (or empty) for all.
+        created_from: Only jobs created on or after this day (UTC), if given.
+        created_to: Only jobs created on or before this day (UTC), if given.
     returns:
         list[Job]: The jobs, without their tasks.
     """
     stmt = select(Job).order_by(Job.created_at.desc(), Job.id)
     if owner_id is not None:
         stmt = stmt.where(Job.owner_id == owner_id)
+    if statuses:
+        stmt = stmt.where(Job.status.in_(statuses))
+    if created_from is not None:
+        start = datetime.combine(created_from, time.min, UTC)
+        stmt = stmt.where(Job.created_at >= start)
+    if created_to is not None:
+        end = datetime.combine(created_to + timedelta(days=1), time.min, UTC)
+        stmt = stmt.where(Job.created_at < end)
     return list((await session.scalars(stmt.limit(limit).offset(offset))).all())
 
 

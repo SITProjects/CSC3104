@@ -4,6 +4,7 @@ import hmac
 import logging
 import os
 from contextlib import asynccontextmanager, suppress
+from datetime import date
 from typing import Annotated
 from uuid import UUID
 
@@ -74,6 +75,7 @@ from services.coordinator.storage import presign
 from shared.db import (
     EventView,
     Job,
+    JobStatus,
     JobSummary,
     JobType,
     JobView,
@@ -552,12 +554,19 @@ async def list_my_jobs(
     session: DbSession,
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    status: Annotated[list[JobStatus] | None, Query()] = None,
+    created_from: date | None = None,
+    created_to: date | None = None,
 ) -> list[JobSummary]:
     """
-    Lists the signed-in user's jobs, newest first.
+    Lists the signed-in user's jobs, newest first. Repeat ?status= to keep only
+    jobs in those states; created_from and created_to (YYYY-MM-DD, UTC, both
+    inclusive) keep only jobs created in that range.
     """
     async with session:
-        jobs = await list_jobs(session, user.id, limit, offset)
+        jobs = await list_jobs(
+            session, user.id, limit, offset, status, created_from, created_to
+        )
         return [JobSummary.model_validate(job, from_attributes=True) for job in jobs]
 
 
