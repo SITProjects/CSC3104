@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - job.yml
+# Builds the ConfigMap from select_image.py, like the Spot watcher does
+configMapGenerator:
+  - name: select-ocr-image-code
+    namespace: idlecloud-system
+    files:
+      - select_image.py

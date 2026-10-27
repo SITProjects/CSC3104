@@ -58,7 +58,7 @@ controller in `controller/`, which calls the same functions on its own.
 | `controller/__main__.py` | The loop: observe, decide, act, every 30 seconds |
 | `Dockerfile`, `k8s/autoscaler.yml` | Image and Deployment with its permissions |
 | `deploy.sh` | One command that installs the autoscaler and Spot watcher on the hub |
-| `deploy_worker_image.py` | Points the OCR job type at a published image digest, after checking anyone can pull it |
+| `ocrimage/` | One-off Job, run by `deploy.sh`, that points OCR at the newest published image |
 
 ## Needed from member 1
 
@@ -204,6 +204,8 @@ It runs these steps, and is safe to run again:
    manifest. It runs inside the autoscaler image with the hub's role, so the
    hub needs no Python packages or AWS keys.
 4. Applies the autoscaler and the Spot watcher, then waits for the autoscaler.
+5. Runs a one-off Job that points OCR at the newest published OCR image (see
+   below), so campus and EC2 workers can download it.
 
 `AWS_REGION` and `K3S_VERSION` live only in `k8s/autoscaler.yml`, so the
 template and the running autoscaler always use the same values. The pod reaches
@@ -212,31 +214,32 @@ If its logs show missing credentials, ask member 1 to check that setting.
 
 ### Publishing the OCR worker image
 
-OCR image distribution is separate from installing the autoscaler. The
-`Publish worker images` workflow builds pull requests and publishes
-`ghcr.io/sitprojects/idlecloud-ocr` after relevant changes reach `main` (or a
-manual run from `main`). Confirm the image changes with member 5 and registry
-access with member 1 before merging. A package owner must make the GHCR package
-Public for workers to pull without credentials. Rerun the workflow if its
-anonymous pull check fails. No registry or AWS keys go on workers.
+The `Publish worker images` workflow builds the OCR image on pull requests and
+publishes `ghcr.io/sitprojects/idlecloud-ocr:main` when its files change on
+`main`. A package owner must make the GHCR package Public once, because workers
+download it without a login. If the workflow's last check fails, do that and
+rerun it. No registry or AWS keys go on workers.
 
-Copy the complete digest reference from the successful Actions summary or its
-`worker-image-<commit>` artifact. On the hub, after member 1's application deploy,
-select it with:
+`deploy.sh` then selects it by itself (step 5). The Job in `ocrimage/` runs in
+the coordinator image, which already has the database driver and credentials:
+
+1. It asks GHCR for the digest behind `main` without a login, exactly as a
+   worker would. If that fails, the package is not Public yet, and nothing
+   changes.
+2. It checks the image has a `linux/amd64` version, since all workers are amd64.
+3. It writes that exact digest to the `ocr` job type, so every replica of a task
+   runs identical code for voting. While OCR jobs are pending or running it
+   keeps the current image and says so. Run `deploy.sh` again after they finish.
+   On a first deployment the current image is the local-only
+   `idlecloud/ocr:0.1.0`, which fresh workers cannot download. Jobs queued on it
+   would never start, so the deploy stops and asks you to cancel them first.
+
+After a new OCR build is published, run `deploy.sh` (or `--no-build`) to switch
+to it. Check the selected image with:
 
 ```sh
-python3 -m services.autoscaler.deploy_worker_image --sudo-docker --image "ghcr.io/sitprojects/idlecloud-ocr@sha256:<digest>"
+kubectl -n idlecloud-system logs job/select-ocr-image
 ```
-
-The helper needs Python 3, Docker and kubectl. The coordinator container supplies
-the database driver and credentials. Omit `--sudo-docker` if Docker works as your
-user. Add `--check-only` to verify the anonymous pull without changing the
-database. The command updates the existing OCR job type and refuses an image
-change while OCR jobs are pending or running, so replicas vote on the same code.
-After selection, campus and fresh EC2 workers pull that digest automatically.
-Publishing a new build does not automatically replace the selected digest.
-If the hub's database is ever recreated, run the command again.
-Member 1's deployment and local image loader keep their existing behavior.
 
 ## Spot reclaim handling (Step 4)
 

@@ -148,11 +148,7 @@ jobs:
           fi
           {
             echo
-            echo 'Anonymous pull passed. On the hub, from the repository root, deploy this digest:'
+            echo 'Anonymous pull passed. On the hub, run `bash services/autoscaler/deploy.sh --no-build` to switch OCR to this image:'
             echo
-            echo '```sh'
-            printf 'python3 -m services.autoscaler.deploy_worker_image --sudo-docker --image %s\n' "$image_ref"
-            echo '```'
-            echo
-            echo 'The main tag tracks new builds. The command above pins this exact digest, so replicas vote on the same code.'
+            printf '`%s`\n' "$image_ref"
           } >> "$GITHUB_STEP_SUMMARY"
