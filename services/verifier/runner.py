@@ -14,7 +14,7 @@ from .k8s import trust_sync_loop
 from .output import output_loop
 
 log = logging.getLogger("verifier")
-VERIFIER_INTERVAL = 1  # seconds between checks when idle or after an error
+VERIFIER_INTERVAL = 5  # seconds between checks when idle or after an error
 
 
 async def verifier_loop(
