@@ -32,4 +32,11 @@ a sibling finished could reuse its node. The scheduler therefore launches a
 task's copies one after another (a copy waits while an earlier sibling has no
 node yet) and adds a hard rule keeping each new copy off every node its siblings
 used, finished or not (`crud.sibling_nodes`, `k8s.build_replica_job_manifest`).
-A task with more copies than usable workers waits until enough workers join.
+
+With fewer usable workers than copies, or after a copy's PC was lost, a copy
+can have no allowed worker left. Housekeeping waits `PLACEMENT_TIMEOUT_S`
+(default 300 s, long enough for a PC to come back or a burst worker to join),
+then fails it with a `replica_unplaceable` event. The copy still counts towards
+the vote total, so the task passes only if two different PCs agree; otherwise
+it is disputed or fails, and the job ends instead of hanging. The rule is never
+relaxed to reuse a PC, since one PC would then get two votes.

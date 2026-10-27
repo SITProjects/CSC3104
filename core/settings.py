@@ -5,7 +5,7 @@ MAX_OVERFLOW = 10
 POOL_SIZE = 5
 DEBUG_ECHO = False
 COORDINATOR_URL = os.environ.get("COORDINATOR_URL", "http://localhost:8001")
-SCHEDULER_INTERVAL = 5
+SCHEDULER_INTERVAL = 5  # seconds
 BATCH_SIZE = 10  # number of replicas to fetch from the database at a time
 JOB_NAMESPACE = "idlecloud-jobs"
 # MinIO address that presigned URLs are signed for; it must be reachable by the
@@ -15,6 +15,7 @@ S3_BUCKET = os.environ.get("S3_BUCKET", "csc3104-local")
 S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "http://localhost:9000")
 RETRY_ATTEMPTS = 3
 HOUSEKEEPING_INTERVAL = 60  # seconds
+PLACEMENT_TIMEOUT = int(os.environ.get("PLACEMENT_TIMEOUT_S", "300"))  # seconds
 # Node heartbeats: a projected service-account token for this audience, checked
 # with a TokenReview. Only these service accounts may send heartbeats, and only
 # for the node their Pod runs on, or the Node their token is bound to (lab PC

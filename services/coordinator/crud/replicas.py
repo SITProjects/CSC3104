@@ -50,6 +50,29 @@ async def mark_lost(session: AsyncSession, replica_id: int, attempt: int) -> boo
     return changed is not None
 
 
+async def fail_unplaced(
+    session: AsyncSession, replica_id: int, attempt: int
+) -> int | None:
+    """
+    Fails a RUNNING attempt whose Pod never got a node, so its task can be voted
+    on, and returns its task id. A Pod placed since housekeeping looked is left
+    alone (None).
+    """
+    return await session.scalar(
+        update(Replica)
+        .where(
+            Replica.id == replica_id,
+            Replica.attempt == attempt,
+            Replica.status == ReplicaStatus.RUNNING,
+            Replica.node_name.is_(None),
+        )
+        .values(
+            status=ReplicaStatus.FAILED, token_hash=None, ended_at=datetime.now(UTC)
+        )
+        .returning(Replica.task_id)
+    )
+
+
 async def lock_stale_replica_job(
     session: AsyncSession, replica_id: int, attempt: int
 ) -> bool:

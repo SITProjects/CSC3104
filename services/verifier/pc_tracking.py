@@ -15,7 +15,9 @@ async def get_dispute_exclusions(
     Collects current and historical PCs to exclude from extra replicas.
 
     Eviction and loss events preserve earlier assignments. An event for the exact
-    replica and attempt can also recover a cleared final PC assignment.
+    replica and attempt can also recover a cleared final PC assignment. A copy
+    the coordinator gave up on because no allowed PC was left (replica_unplaceable)
+    ran nowhere, so it adds no PC and is not missing one.
 
     Missing current or historical PC names prevent creating extra replicas,
     because previously used PCs cannot be safely excluded. The verifier fails
@@ -34,7 +36,9 @@ async def get_dispute_exclusions(
         await session.scalars(
             select(Event).where(
                 Event.task_id == task.id,
-                Event.type.in_(["replica_evicted", "replica_lost"]),
+                Event.type.in_(
+                    ["replica_evicted", "replica_lost", "replica_unplaceable"]
+                ),
             )
         )
     ).all()
@@ -43,7 +47,8 @@ async def get_dispute_exclusions(
     for event in history_events:
         # Event details retain the PC name even if the node record is deleted.
         detail = event.detail if isinstance(event.detail, dict) else {}
-        previous_nodes.append(detail.get("node_name"))
+        if event.type != "replica_unplaceable":
+            previous_nodes.append(detail.get("node_name"))
         replica_id, attempt = detail.get("replica_id"), detail.get("attempt")
         if isinstance(replica_id, int) and isinstance(attempt, int):
             covered.add((replica_id, attempt))

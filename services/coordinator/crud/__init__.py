@@ -13,6 +13,7 @@ from .nodes import ensure_node, list_nodes, mark_offline, update_node_state
 from .replicas import (
     create_replicas,
     evict_replica,
+    fail_unplaced,
     fetch_running_replicas,
     fetch_scheduled_replicas,
     get_replica_with_task,
@@ -53,6 +54,7 @@ __all__ = [
     "ensure_job_type_exists",
     "ensure_node",
     "evict_replica",
+    "fail_unplaced",
     "fetch_running_replicas",
     "fetch_scheduled_replicas",
     "get_job",
