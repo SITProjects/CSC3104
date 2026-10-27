@@ -4,7 +4,7 @@ import hmac
 import logging
 import os
 from contextlib import asynccontextmanager, suppress
-from datetime import date
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -555,17 +555,18 @@ async def list_my_jobs(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     status: Annotated[list[JobStatus] | None, Query()] = None,
-    created_from: date | None = None,
-    created_to: date | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
 ) -> list[JobSummary]:
     """
     Lists the signed-in user's jobs, newest first. Repeat ?status= to keep only
-    jobs in those states; created_from and created_to (YYYY-MM-DD, UTC, both
-    inclusive) keep only jobs created in that range.
+    jobs in those states. created_after (inclusive) and created_before
+    (exclusive) are ISO times with an offset; they keep only jobs created in
+    that range, so the caller decides where its days start.
     """
     async with session:
         jobs = await list_jobs(
-            session, user.id, limit, offset, status, created_from, created_to
+            session, user.id, limit, offset, status, created_after, created_before
         )
         return [JobSummary.model_validate(job, from_attributes=True) for job in jobs]
 
