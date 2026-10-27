@@ -34,7 +34,7 @@ K3S_VERSION=$(env_in_manifest K3S_VERSION)
 
 step "Checking what member 1 sets up"
 secret_key() {
-  kubectl -n "$NS" get secret "$1" -o jsonpath="{.data.$2}" 2>/dev/null | grep -q . ||
+  [ -n "$(kubectl -n "$NS" get secret "$1" -o jsonpath="{.data.$2}" 2>/dev/null)" ] ||
     die "Secret $1 has no key $2. $3"
 }
 secret_key idlecloud-db DATABASE_URL "Run infra/k8s/deploy.sh first."
@@ -55,7 +55,9 @@ if [ "$BUILD" = 1 ]; then
   sudo docker build -f services/autoscaler/Dockerfile -t "$IMAGE" .
   sudo docker save "$IMAGE" | sudo k3s ctr images import -
 fi
-sudo k3s ctr images ls -q | grep -q "docker.io/$IMAGE" ||
+# grep reads the whole list (no -q), so ctr is never cut off mid-write. Under
+# pipefail that SIGPIPE would fail the check even when the image is there.
+sudo k3s ctr images ls -q | grep -Fx "docker.io/$IMAGE" >/dev/null ||
   die "$IMAGE is not in k3s; run without --no-build"
 sudo docker image inspect "$IMAGE" >/dev/null 2>&1 ||
   die "$IMAGE is not in Docker; run without --no-build to rebuild it for the launch-template step"
