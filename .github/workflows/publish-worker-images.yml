@@ -1,0 +1,158 @@
+name: Publish worker images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-worker-images.yml
+      - .dockerignore
+      - worker/ocr-task/Dockerfile
+      - worker/ocr-task/main.py
+      - shared/__init__.py
+      - shared/checkpoint.py
+      - shared/normalized_text.py
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-worker-images.yml
+      - .dockerignore
+      - worker/ocr-task/Dockerfile
+      - worker/ocr-task/main.py
+      - shared/__init__.py
+      - shared/checkpoint.py
+      - shared/normalized_text.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker-images-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # PR code gets a build check with no registry login or package write access.
+  build-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build OCR worker
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: worker/ocr-task/Dockerfile
+          platforms: linux/amd64
+          push: false
+
+  publish:
+    # Manual runs from other branches must not replace the production image.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Choose image name
+        id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+        shell: bash
+        run: echo "name=ghcr.io/${OWNER,,}/idlecloud-ocr" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish OCR worker
+        id: publish
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: worker/ocr-task/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+            ${{ steps.image.outputs.name }}:main
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Record published digest
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" > worker-image.txt
+          {
+            echo '### OCR worker image'
+            echo
+            printf 'Published `%s@%s` for `linux/amd64`.\n' "$IMAGE" "$DIGEST"
+            echo
+            echo 'The worker-image artifact contains the exact image reference.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save image reference
+        uses: actions/upload-artifact@v7
+        with:
+          name: worker-image-${{ github.sha }}
+          path: worker-image.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Verify workers can pull without credentials
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A fresh Docker config prevents the publishing login from masking a
+          # private package. Fresh campus and EC2 workers have no registry keys.
+          anonymous_config=$(mktemp -d)
+          trap 'rm -rf -- "$anonymous_config"' EXIT
+          image_ref="$IMAGE@$DIGEST"
+          if ! docker --config "$anonymous_config" pull --platform linux/amd64 "$image_ref"; then
+            echo '::error::OCR image was published but anonymous pull failed. New GHCR packages are private by default. Open the idlecloud-ocr package settings, change visibility to Public, and rerun this workflow from main. Also check the pull error above for network or registry failures.'
+            {
+              echo
+              echo '**Worker deployment is not ready:** the anonymous pull failed.'
+              echo 'For a new package, an owner must change its visibility to Public and rerun this workflow from main.'
+              echo 'See https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility for the package settings.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          {
+            echo
+            echo 'Anonymous pull passed. On the hub, from the repository root, deploy this digest:'
+            echo
+            echo '```sh'
+            printf 'python3 -m services.autoscaler.deploy_worker_image --sudo-docker --image %s\n' "$image_ref"
+            echo '```'
+            echo
+            echo 'The main tag tracks new builds. The command above pins this exact digest, so replicas vote on the same code.'
+          } >> "$GITHUB_STEP_SUMMARY"
