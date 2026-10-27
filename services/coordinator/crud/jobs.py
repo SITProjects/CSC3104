@@ -105,7 +105,8 @@ async def list_jobs(
     if created_from is not None:
         start = datetime.combine(created_from, time.min, UTC)
         stmt = stmt.where(Job.created_at >= start)
-    if created_to is not None:
+    # date.max has no next day to stop before, and nothing is created after it
+    if created_to is not None and created_to < date.max:
         end = datetime.combine(created_to + timedelta(days=1), time.min, UTC)
         stmt = stmt.where(Job.created_at < end)
     return list((await session.scalars(stmt.limit(limit).offset(offset))).all())
