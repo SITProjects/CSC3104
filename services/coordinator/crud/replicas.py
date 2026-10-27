@@ -2,8 +2,9 @@ import hashlib
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from core.settings import RETRY_ATTEMPTS
 from shared.db.models import (
@@ -47,6 +48,29 @@ async def mark_lost(session: AsyncSession, replica_id: int, attempt: int) -> boo
         .returning(Replica.id)
     )
     return changed is not None
+
+
+async def fail_unplaced(
+    session: AsyncSession, replica_id: int, attempt: int
+) -> int | None:
+    """
+    Fails a RUNNING attempt whose Pod never got a node, so its task can be voted
+    on, and returns its task id. A Pod placed since housekeeping looked is left
+    alone (None).
+    """
+    return await session.scalar(
+        update(Replica)
+        .where(
+            Replica.id == replica_id,
+            Replica.attempt == attempt,
+            Replica.status == ReplicaStatus.RUNNING,
+            Replica.node_name.is_(None),
+        )
+        .values(
+            status=ReplicaStatus.FAILED, token_hash=None, ended_at=datetime.now(UTC)
+        )
+        .returning(Replica.task_id)
+    )
 
 
 async def lock_stale_replica_job(
@@ -103,6 +127,12 @@ async def fetch_scheduled_replicas(
     Rows already locked by another scheduler are skipped, so two coordinators
     never launch the same replica.
 
+    A task's copies launch one after another: a copy waits while an earlier copy
+    of its task is still unplaced (SCHEDULED, or RUNNING with no node yet).
+    Once that copy has a node, sibling_nodes() can exclude it for this one.
+    Kubernetes' pod anti-affinity alone only keeps copies apart while they run,
+    so a copy started after a sibling finished could land on the same PC.
+
     args:
         session: The scheduler's database session.
         limit: The most replicas to return.
@@ -110,6 +140,13 @@ async def fetch_scheduled_replicas(
         list[tuple[Replica, Task, JobType]]: Each replica with its task and job type,
             oldest first.
     """
+    earlier = aliased(Replica)
+    unplaced_earlier_sibling = exists().where(
+        earlier.task_id == Replica.task_id,
+        earlier.id < Replica.id,
+        earlier.node_name.is_(None),
+        earlier.status.in_([ReplicaStatus.SCHEDULED, ReplicaStatus.RUNNING]),
+    )
     stmt = (
         select(Replica, Task, JobType)
         .join(Replica.task)
@@ -121,6 +158,7 @@ async def fetch_scheduled_replicas(
             Task.status.in_(
                 [TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.DISPUTED]
             ),
+            ~unplaced_earlier_sibling,
         )
         .order_by(Replica.id)
         .limit(limit)
@@ -129,6 +167,24 @@ async def fetch_scheduled_replicas(
     )
     result = await session.execute(stmt)
     return [(replica, task, job_type) for replica, task, job_type in result.all()]
+
+
+async def sibling_nodes(session: AsyncSession, replica: Replica) -> list[str]:
+    """
+    The nodes the other copies of this replica's task have used, finished or
+    not, so a new copy can be kept off all of them and the vote stays between
+    different PCs.
+    """
+    rows = await session.scalars(
+        select(Replica.node_name)
+        .where(
+            Replica.task_id == replica.task_id,
+            Replica.id != replica.id,
+            Replica.node_name.is_not(None),
+        )
+        .distinct()
+    )
+    return sorted(rows.all())
 
 
 async def get_replica_with_task(

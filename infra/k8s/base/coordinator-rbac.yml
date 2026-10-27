@@ -35,7 +35,8 @@ subjects:
     name: coordinator
     namespace: idlecloud-system
 ---
-# Read node Ready, so the Pod watcher can tell EVICTED from LOST
+# Read node Ready, so the Pod watcher can tell EVICTED from LOST, and list the
+# workers so GET /capacity can count free room for new task copies
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -43,7 +44,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

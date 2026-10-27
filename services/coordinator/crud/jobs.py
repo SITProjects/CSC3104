@@ -28,7 +28,7 @@ async def create_job(
         job_type=req.job_type,
         params=req.params,
         status=JobStatus.PENDING,
-        task_count=len(req.tasks),
+        task_count=req.task_count or len(req.tasks),
         replicas_per_task=req.replicas_per_task,
     )
     session.add(job)

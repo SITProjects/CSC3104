@@ -27,7 +27,9 @@ from services.coordinator.auth import (
     verify_password,
 )
 from services.coordinator.burst import router as burst_router
+from services.coordinator.capacity import current_free_slots
 from services.coordinator.crud import (
+    add_tasks,
     cancel_job,
     count_active_jobs,
     count_jobs_by_status,
@@ -61,6 +63,9 @@ from services.coordinator.loops import (
 )
 from services.coordinator.models import (
     Ack,
+    AddTasksIn,
+    AddTasksResponse,
+    CapacityOut,
     CreateJobResponse,
     Credentials,
     HeartbeatIn,
@@ -74,6 +79,7 @@ from services.coordinator.storage import presign
 from shared.db import (
     EventView,
     Job,
+    JobStatus,
     JobSummary,
     JobType,
     JobView,
@@ -98,6 +104,7 @@ K3API = Annotated[client.BatchV1Api, Depends(lambda: client.BatchV1Api())]
 AuthAPI = Annotated[
     client.AuthenticationV1Api, Depends(lambda: client.AuthenticationV1Api())
 ]
+CoreAPI = Annotated[client.CoreV1Api, Depends(lambda: client.CoreV1Api())]
 
 
 @asynccontextmanager
@@ -544,6 +551,66 @@ async def my_job_quota(user: CurrentUser, session: DbSession) -> dict[str, int]:
     async with session:
         active = await count_active_jobs(session, user.id)
     return {"active": active, "limit": MAX_ACTIVE_JOBS_PER_USER}
+
+
+@app.get("/capacity")
+async def free_capacity(
+    user: CurrentUser,
+    core_api: CoreAPI,
+    cpu: int = Query(1, ge=1, le=16),
+    mem: int = Query(256, ge=64, le=4096),
+) -> CapacityOut:
+    """
+    How many more task copies of this size the usable worker nodes can take now.
+
+    The web app uses it to decide how finely to split a job. It is an estimate:
+    nothing is reserved, and workers come and go.
+
+    args:
+        cpu: Cores one copy asks for.
+        mem: MiB one copy asks for.
+    raises:
+        HTTPException: 503 if the cluster can't be read.
+    """
+    try:
+        slots, nodes = await current_free_slots(core_api, cpu, mem)
+    except Exception as exc:
+        log.warning("reading free capacity failed: %r", exc)
+        raise HTTPException(503, "cluster capacity is unavailable") from exc
+    return CapacityOut(slots=slots, nodes=nodes)
+
+
+@app.post("/jobs/{id}/tasks", status_code=201)
+async def add_my_tasks(
+    id: UUID, req: AddTasksIn, user: CurrentUser, session: DbSession
+) -> AddTasksResponse:
+    """
+    Adds tasks to one of the signed-in user's unfinished jobs, created with a
+    task_count larger than its first tasks. Repeating a request is harmless:
+    indices the job already has are skipped.
+
+    raises:
+        HTTPException: 404 if the job isn't the user's, 409 if it has ended,
+            422 if an index is task_count or more.
+    """
+    async with session.begin():
+        # the same lock cancel_my_job takes first, so the two never interleave
+        job = await session.get(Job, id, with_for_update=True)
+        if job is None or owner_filter(user) not in (None, job.owner_id):
+            raise HTTPException(404, f"job {id} not found")
+        if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
+            raise HTTPException(409, f"job {id} is {job.status.value}")
+        if any(task.index >= job.task_count for task in req.tasks):
+            raise HTTPException(
+                422, f"task indices must be below task_count ({job.task_count})"
+            )
+        added = await add_tasks(session, job, req.tasks)
+        await create_replicas(session, added, job.replicas_per_task)
+    return AddTasksResponse(
+        job_id=id,
+        added_task_ids=[task.id for task in added],
+        replica_count=len(added) * job.replicas_per_task,
+    )
 
 
 @app.get("/jobs")

@@ -13,6 +13,7 @@ from .nodes import ensure_node, list_nodes, mark_offline, update_node_state
 from .replicas import (
     create_replicas,
     evict_replica,
+    fail_unplaced,
     fetch_running_replicas,
     fetch_scheduled_replicas,
     get_replica_with_task,
@@ -23,8 +24,9 @@ from .replicas import (
     record_placement,
     recover_replicas,
     schedule_replica,
+    sibling_nodes,
 )
-from .tasks import create_tasks, mark_task_running, set_voting
+from .tasks import add_tasks, create_tasks, mark_task_running, set_voting
 from .users import (
     create_session,
     create_user,
@@ -37,6 +39,7 @@ from .users import (
 )
 
 __all__ = [
+    "add_tasks",
     "cancel_job",
     "count_active_jobs",
     "count_jobs_by_status",
@@ -51,6 +54,7 @@ __all__ = [
     "ensure_job_type_exists",
     "ensure_node",
     "evict_replica",
+    "fail_unplaced",
     "fetch_running_replicas",
     "fetch_scheduled_replicas",
     "get_job",
@@ -73,5 +77,6 @@ __all__ = [
     "recover_replicas",
     "schedule_replica",
     "set_voting",
+    "sibling_nodes",
     "update_node_state",
 ]

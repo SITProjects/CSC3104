@@ -1,9 +1,11 @@
 """From an uploaded PDF to a coordinator job.
 
 The upload is saved to S3, which starts the Lambda page splitter. Each Lambda
-batch calls back /hooks/pages-ready, and once every page image exists the web app
-creates the job. The coordinator's POST /jobs needs the uploader's bearer token,
-so it is kept in jobs/{id}/pending.json (private bucket) until the job is made.
+batch calls back /hooks/pages-ready. The first batch that is ready creates the
+job, with its final task count, and each later batch adds its own tasks, so OCR
+starts while the rest of the PDF is still being rendered. The coordinator calls
+need the uploader's bearer token, so it is kept in jobs/{id}/pending.json
+(private bucket) until every task has been sent.
 
 There is no in-memory state, so it works with more than one web replica and
 survives a restart: "are all pages there?" is answered by listing S3.
@@ -74,9 +76,13 @@ async def save_upload(
     pages: int,
     cpu: int,
     mem: int,
+    pages_per_task: int | None = None,
 ) -> None:
     """
     Stores the PDF so the page splitter starts.
+
+    pages_per_task fixes how the PDF is split (jobs.plan_tasks), so every
+    callback, whichever web replica gets it, plans the same tasks.
 
     The pending record goes first, because writing input.pdf is what triggers the
     Lambda and its first callback may arrive within a second.
@@ -92,6 +98,7 @@ async def save_upload(
             "page_count": pages,
             "cpu_request": cpu,
             "mem_request": mem,
+            "pages_per_task": pages_per_task or settings.pages_per_task,
             "created_at": datetime.now(UTC).isoformat(),
         },
     )
@@ -117,8 +124,30 @@ def timestamp_is_fresh(timestamp: str | None, now: float | None = None) -> bool:
     )
 
 
+async def _cancel_started_job(job_id: UUID | str, pending: dict) -> None:
+    """
+    Cancels the coordinator job for an upload that is failing, if its first
+    batches already created one, so it can't wait for the rest for ever. Best
+    effort: no job (404), an ended one (409) or no token is nothing to do.
+    """
+    token = pending.get("token")
+    if not token:
+        return
+    try:
+        await coordinator.cancel_job(token, UUID(str(job_id)))
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code not in (401, 404, 409):
+            log.warning("cancelling %s after its upload failed: %r", job_id, exc)
+    except httpx.RequestError as exc:
+        log.warning("cancelling %s after its upload failed: %r", job_id, exc)
+
+
 async def _fail(job_id: UUID | str, pending: dict, message: str) -> dict:
-    """Marks an upload failed and deletes its stored session token."""
+    """
+    Marks an upload failed and deletes its stored session token, after
+    cancelling any job its first batches already started.
+    """
+    await _cancel_started_job(job_id, pending)
     pending = {**pending, "state": "failed", "error": message}
     pending.pop("token", None)
     await asyncio.to_thread(storage.put_json, storage.pending_key(job_id), pending)
@@ -165,13 +194,16 @@ async def discard_pending(job_id: UUID | str, pending: dict) -> None:
 
 async def create_job_if_ready(job_id: UUID) -> bool:
     """
-    Creates the coordinator job once every page image is in S3.
+    Sends the coordinator every task whose pages are all in S3: the first time
+    it creates the job with its final task count, later it adds tasks.
 
-    Safe to call repeatedly and from several callbacks at once: a second create
-    is answered 409 by the coordinator and counts as done.
+    Safe to call repeatedly and from several callbacks at once: a create that
+    finds the job is answered 409 and becomes an add, and the coordinator skips
+    task indices it already has. Once every task is sent the pending record and
+    its token are deleted.
 
     returns:
-        bool: True if the job now exists.
+        bool: True once the job has all its tasks.
     raises:
         httpx.HTTPError: If the coordinator can't be reached or fails, so the
             caller can answer 5xx and the Lambda retries.
@@ -184,20 +216,44 @@ async def create_job_if_ready(job_id: UUID) -> bool:
         await expire_if_stale(job_id, pending)
         return False
     expected = pending["page_count"]
-    if await asyncio.to_thread(storage.count_pages, job_id) < expected:
+    plan = jobs.plan_tasks(expected, pending.get("pages_per_task"))
+    rendered = await asyncio.to_thread(storage.page_numbers, job_id)
+    ready = [
+        task
+        for task in plan
+        if all(page in rendered for page in range(task["first"], task["last"] + 1))
+    ]
+    if not ready:
         return False
+    payload = [jobs.task_payload(task) for task in ready]
     try:
-        # uploads saved before users chose resources fall back to the old fixed ones
-        spec = jobs.job_spec(
-            str(job_id),
-            "ocr",
-            pending.get("cpu_request", settings.task_cpu),
-            pending.get("mem_request", settings.task_mem_mib),
-            expected,
-        )
-        await coordinator.create_job(pending["token"], spec)
+        try:
+            # uploads saved before users chose resources fall back to the old fixed ones
+            spec = jobs.job_spec(
+                str(job_id),
+                "ocr",
+                pending.get("cpu_request", settings.task_cpu),
+                pending.get("mem_request", settings.task_mem_mib),
+                expected,
+                tasks=payload,
+                task_count=len(plan),
+                params={
+                    "uploaded_at": pending.get("created_at"),
+                    "pages_per_task": pending.get("pages_per_task"),
+                },
+            )
+            await coordinator.create_job(pending["token"], spec)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 409:
+                raise
+            # an earlier batch (or another web replica) created it: add to it
+            await coordinator.add_tasks(pending["token"], job_id, payload)
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
+        if code == 409:
+            # from add_tasks: the job ended (cancelled, failed), so stop sending
+            await discard_pending(job_id, pending)
+            return False
         if code == 401:
             await _fail(
                 job_id,
@@ -215,8 +271,9 @@ async def create_job_if_ready(job_id: UUID) -> bool:
                 "Upload again once one finishes.",
             )
             return False
-        if code != 409:  # 409: another callback got there first
-            raise
+        raise
+    if len(ready) < len(plan):
+        return False  # later batches add the rest
     await discard_pending(job_id, pending)
     return True
 
@@ -236,10 +293,11 @@ async def on_pages_ready(event: PagesReady) -> None:
     await create_job_if_ready(event.job_id)
 
 
-def _render_pages(job_id: UUID, data: bytes) -> None:
+def _render_pages(job_id: UUID, data: bytes, first: int, last: int) -> None:
+    """Renders pages first..last (numbered from 1) and stores their images."""
     with pymupdf.open(stream=data, filetype="pdf") as doc:
-        for number, page in enumerate(doc, start=1):
-            pixmap = page.get_pixmap(
+        for number in range(first, last + 1):
+            pixmap = doc[number - 1].get_pixmap(
                 dpi=LOCAL_RENDER_DPI, colorspace=pymupdf.csGRAY, alpha=False
             )
             storage.put_bytes(
@@ -247,11 +305,23 @@ def _render_pages(job_id: UUID, data: bytes) -> None:
             )
 
 
+def _page_count(data: bytes) -> int:
+    with pymupdf.open(stream=data, filetype="pdf") as doc:
+        return doc.page_count
+
+
 async def render_locally(job_id: UUID, data: bytes) -> None:
-    """Stand-in for the Lambda when running without AWS (LOCAL_RENDER=true)."""
+    """
+    Stand-in for the Lambda when running without AWS (LOCAL_RENDER=true). Like
+    the Lambda it works in batches, and each batch's tasks start straight away.
+    """
     try:
-        await asyncio.to_thread(_render_pages, job_id, data)
-        await create_job_if_ready(job_id)
+        pages = await asyncio.to_thread(_page_count, data)
+        batch = settings.render_batch_pages
+        for first in range(1, pages + 1, batch):
+            last = min(first + batch - 1, pages)
+            await asyncio.to_thread(_render_pages, job_id, data, first, last)
+            await create_job_if_ready(job_id)
     except Exception as exc:
         log.exception("local page rendering failed for %s", job_id)
         pending = await asyncio.to_thread(storage.get_json, storage.pending_key(job_id))

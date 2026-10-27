@@ -15,6 +15,7 @@ S3_BUCKET = os.environ.get("S3_BUCKET", "csc3104-local")
 S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "http://localhost:9000")
 RETRY_ATTEMPTS = 3
 HOUSEKEEPING_INTERVAL = 60  # seconds
+PLACEMENT_TIMEOUT = int(os.environ.get("PLACEMENT_TIMEOUT_S", "300"))  # seconds
 # Node heartbeats: a projected service-account token for this audience, checked
 # with a TokenReview. Only these service accounts may send heartbeats, and only
 # for the node their Pod runs on, or the Node their token is bound to (lab PC

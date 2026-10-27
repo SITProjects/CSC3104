@@ -86,6 +86,19 @@ def count_pages(job_id: UUID) -> int:
     )
 
 
+def page_numbers(job_id: UUID) -> set[int]:
+    """The numbers of the page images rendered for the job so far."""
+    paginator = _client().get_paginator("list_objects_v2")
+    prefix = f"jobs/{job_id}/pages/"
+    numbers = set()
+    for page in paginator.paginate(Bucket=settings.s3_bucket, Prefix=prefix):
+        for item in page.get("Contents", []):
+            name = item["Key"].removeprefix(prefix).removesuffix(".png")
+            if name.isdigit():
+                numbers.add(int(name))
+    return numbers
+
+
 def delete(key: str) -> None:
     _client().delete_object(Bucket=settings.s3_bucket, Key=key)
 
