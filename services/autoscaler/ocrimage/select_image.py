@@ -26,6 +26,9 @@ REPO = os.environ.get("OCR_IMAGE_REPO", "sitprojects/idlecloud-ocr")
 TAG = "main"
 REGISTRY = "https://ghcr.io"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+# An image any worker can download. Anything else, such as the local
+# idlecloud/ocr:0.1.0 from the seed migration, only exists where it was loaded.
+PUBLISHED = re.compile(r"ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}")
 # An image index (several platforms) or a single image, in OCI or Docker format
 ACCEPT = (
     "application/vnd.oci.image.index.v1+json, "
@@ -98,6 +101,14 @@ def select(image: str) -> str:
             "SELECT count(*) FROM jobs WHERE job_type = 'ocr'"
             " AND status IN ('PENDING', 'RUNNING')"
         ).fetchone()[0]
+        if active and not PUBLISHED.fullmatch(row[0]):
+            # Keeping it would report success while fresh workers cannot start
+            # these jobs. Switching mid-job could mix builds within one vote.
+            sys.exit(
+                f"{active} OCR job(s) are queued on {row[0]}, which fresh workers "
+                "cannot download. Cancel them, then run deploy.sh again. "
+                "Nothing changed."
+            )
         if active:
             return (
                 f"Kept {row[0]}: {active} OCR job(s) are still active. "

@@ -230,6 +230,9 @@ the coordinator image, which already has the database driver and credentials:
 3. It writes that exact digest to the `ocr` job type, so every replica of a task
    runs identical code for voting. While OCR jobs are pending or running it
    keeps the current image and says so. Run `deploy.sh` again after they finish.
+   On a first deployment the current image is the local-only
+   `idlecloud/ocr:0.1.0`, which fresh workers cannot download. Jobs queued on it
+   would never start, so the deploy stops and asks you to cancel them first.
 
 After a new OCR build is published, run `deploy.sh` (or `--no-build`) to switch
 to it. Check the selected image with:
