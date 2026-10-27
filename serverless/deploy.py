@@ -322,6 +322,13 @@ def cluster_secret() -> str:
 def callback_env(web_url: str | None, allow_http: bool = False) -> dict:
     """The callback settings to write, or {} to keep each function's own."""
     if not web_url:
+        if os.environ.get("WEBHOOK_URL"):
+            # Older instructions exported WEBHOOK_URL. Ignoring it would quietly
+            # deploy with the wrong callback, so stop and point to the flag.
+            raise SystemExit(
+                "WEBHOOK_URL is no longer read. Pass the web app's address with "
+                "--web-url instead, or unset WEBHOOK_URL to keep the current settings."
+            )
         print("--web-url not given: keeping the current callback settings")
         return {}
     url = web_url.rstrip("/")
