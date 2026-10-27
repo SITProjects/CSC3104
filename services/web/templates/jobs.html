@@ -5,7 +5,7 @@
 {% block content %}
 <h1 class="mb-6 text-2xl font-semibold tracking-tight">My jobs</h1>
 
-{% if rows or filtered or offset > 0 %}
+{% if has_jobs %}
 {# Two filter boxes in one form, so each keeps the other's values. Dates apply
    with Apply (or Enter), since a half-typed date would otherwise reload the
    page; they are UTC days, like the Submitted column. Picking a status adds it
@@ -15,10 +15,10 @@
   {% set box = "flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2" %}
   <div class="{{ box }}" role="group" aria-label="Submitted between">
     <label class="label gap-2 text-sm text-muted-foreground">From
-      <input type="date" class="input h-8 w-auto text-foreground" name="from" value="{{ start }}"{% if end %} max="{{ end }}"{% endif %}>
+      <input type="date" class="input h-8 w-auto text-foreground" name="from" value="{{ start }}" max="{{ end or today }}">
     </label>
     <label class="label gap-2 text-sm text-muted-foreground">To
-      <input type="date" class="input h-8 w-auto text-foreground" name="to" value="{{ end }}"{% if start %} min="{{ start }}"{% endif %}>
+      <input type="date" class="input h-8 w-auto text-foreground" name="to" value="{{ end }}"{% if start %} min="{{ start }}"{% endif %} max="{{ today }}">
     </label>
     <button type="submit" class="btn" data-variant="outline" data-size="sm">Apply</button>
   </div>
@@ -43,7 +43,7 @@
 {% set page_query = filter_query ~ "&" if filter_query else "" %}
 {% if error %}
 {{ error_alert(error) }}
-{% elif not rows and offset == 0 and filtered %}
+{% elif not rows and offset == 0 and has_jobs %}
 <p class="text-muted-foreground">No jobs match this filter. <a class="text-foreground underline underline-offset-4" href="/jobs">Show all jobs</a>.</p>
 {% elif not rows and offset == 0 %}
 <p class="text-muted-foreground">You haven't submitted anything yet. <a class="text-foreground underline underline-offset-4" href="/jobs/new">Create a job</a> to get started.</p>

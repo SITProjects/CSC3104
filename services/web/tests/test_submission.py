@@ -823,7 +823,13 @@ def test_job_list_preparing_filter_skips_the_coordinator(client, monkeypatch, s3
 
 
 def test_job_list_says_when_nothing_matches(client, monkeypatch, s3):
-    stub_list(monkeypatch, [])
+    async def fake_list(
+        token, limit=20, offset=0, statuses=(), created_from=None, created_to=None
+    ):
+        # the user has a job, just none that is cancelled
+        return [] if statuses else [summary(11, "COMPLETED")]
+
+    monkeypatch.setattr(coordinator, "list_jobs", fake_list)
     r = client.get("/jobs?status=CANCELLED")
     assert "No jobs match this filter" in r.text and "Create a job" not in r.text
     assert 'href="/jobs" aria-label="Remove the Cancelled filter"' in r.text
@@ -864,6 +870,35 @@ def test_job_list_filters_by_date_and_keeps_it_everywhere(client, monkeypatch, s
         "?status=COMPLETED&amp;from=2026-10-20&amp;to=2026-10-25&amp;offset=20"
         in r.text
     )
+
+
+def test_job_list_does_not_allow_future_dates(client, monkeypatch, s3):
+    calls = []
+
+    async def fake_list(
+        token, limit=20, offset=0, statuses=(), created_from=None, created_to=None
+    ):
+        calls.append((created_from, created_to))
+        return [summary(11, "COMPLETED")]  # so the filter boxes are shown
+
+    monkeypatch.setattr(coordinator, "list_jobs", fake_list)
+    today = datetime.now(UTC).date()
+    tomorrow = (today + timedelta(days=1)).isoformat()
+    r = client.get(f"/jobs?from={tomorrow}&to=9999-12-31")
+    assert r.status_code == 200 and calls == [(None, None)]  # both ignored
+    # the pickers stop at today too
+    assert f'name="from" value="" max="{today}"' in r.text
+    assert f'name="to" value="" max="{today}"' in r.text
+    r = client.get(f"/jobs?to={today}")
+    assert calls[-1] == (None, today)  # today itself is allowed
+
+
+def test_job_list_has_no_filters_when_the_user_has_no_jobs(client, monkeypatch, s3):
+    stub_list(monkeypatch, [])
+    for path in ("/jobs", "/jobs?status=CANCELLED&from=2026-10-20"):
+        r = client.get(path)
+        assert 'aria-label="Filter jobs"' not in r.text, path
+        assert "Create a job" in r.text and "No jobs match" not in r.text
 
 
 def test_job_list_ignores_a_bad_date(client, monkeypatch, s3):

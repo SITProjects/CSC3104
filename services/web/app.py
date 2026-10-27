@@ -648,12 +648,21 @@ JOB_FILTERS = {
 }
 
 
+def _today() -> date:
+    """Today as a UTC day, the days the job list's filter and times use."""
+    return datetime.now(UTC).date()
+
+
 def _parse_day(value: str | None) -> date | None:
-    """A YYYY-MM-DD from a date input, or None if it is blank or not a date."""
+    """
+    A YYYY-MM-DD from a date input, or None if it is blank, not a date, or in
+    the future (no job can have been submitted then).
+    """
     try:
-        return date.fromisoformat(value) if value else None
+        day = date.fromisoformat(value) if value else None
     except ValueError:
         return None
+    return day if day is None or day <= _today() else None
 
 
 def _filter_query(statuses: list[str], start: date | None, end: date | None) -> str:
@@ -674,6 +683,14 @@ def _created_between(row: dict, start: date | None, end: date | None) -> bool:
         return False
     day = created.astimezone(UTC).date()
     return (start is None or day >= start) and (end is None or day <= end)
+
+
+async def _has_any_job(token: str) -> bool:
+    """Whether the coordinator has any job for this user, ignoring filters."""
+    try:
+        return bool(await coordinator.list_jobs(token, 1, 0))
+    except httpx.HTTPError:
+        return True  # can't tell, so keep the filter on screen to change it
 
 
 @app.get("/jobs", response_class=HTMLResponse)
@@ -703,15 +720,22 @@ async def jobs(
             rows = [_job_row(job) for job in listed[:JOBS_PAGE_SIZE]]
     except (httpx.HTTPStatusError, httpx.RequestError):
         error = "Your jobs can't be loaded right now. Please try again shortly."
+    filtered = bool(selected or start or end)
+    has_jobs = bool(rows) or offset > 0
     if offset == 0 and not error:
+        pending = await _pending_rows(user)
         known = {row["id"] for row in rows}
         rows = [
             r
-            for r in await _pending_rows(user)
+            for r in pending
             if r["id"] not in known
             and (not selected or r["status"] in selected)
             and _created_between(r, start, end)
         ] + rows
+        # nothing matched: the filter is only shown if the user has any job
+        has_jobs = (
+            bool(rows) or bool(pending) or (filtered and await _has_any_job(token))
+        )
 
     def url(statuses: list[str]) -> str:
         query = _filter_query(statuses, start, end)
@@ -727,9 +751,11 @@ async def jobs(
             "page_size": JOBS_PAGE_SIZE,
             "has_more": has_more,
             "selected": selected,
-            "filtered": bool(selected or start or end),
+            "filtered": filtered,
+            "has_jobs": has_jobs,
             "start": start.isoformat() if start else "",
             "end": end.isoformat() if end else "",
+            "today": _today().isoformat(),  # the latest day the date inputs allow
             # statuses that can still be added to the filter
             "options": {
                 s: label for s, label in JOB_FILTERS.items() if s not in selected
