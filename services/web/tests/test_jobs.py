@@ -69,7 +69,7 @@ def test_job_spec_for_ocr_splits_pages_and_uses_given_resources():
     assert spec["job_id"] == "abc"
     assert spec["job_type"] == "ocr"
     assert spec["params"] == {"page_count": 12}
-    assert spec["replicas_per_task"] == 3
+    assert spec["replicas_per_task"] == settings.replicas_per_task == 1
     assert (spec["cpu_request"], spec["mem_request"]) == (2, 768)
     assert len(spec["tasks"]) == 2
 

@@ -19,7 +19,10 @@ class Settings(BaseSettings):
     pages_per_task: int = 10
     min_pages_per_task: int = 2
     render_batch_pages: int = 20
-    replicas_per_task: int = 3
+    # Copies each task starts with. With 1, the verifier adds a second copy only
+    # for PCs it doesn't trust yet and for random spot checks. 3 is the old
+    # always-vote behaviour, kept for comparison runs.
+    replicas_per_task: int = 1
     # Only for uploads saved before users chose CPU and memory themselves
     task_cpu: int = 1
     task_mem_mib: int = 512
