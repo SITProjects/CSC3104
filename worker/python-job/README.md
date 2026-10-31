@@ -32,3 +32,12 @@ import pandas as pd
 df = pd.read_csv("data.csv")
 df.describe().to_csv(os.path.join(os.environ["OUTPUT_DIR"], "summary.csv"))
 ```
+
+`examples/train_resumable.py` is a demo of checkpoints: it trains a
+scikit-learn classifier one epoch at a time and carries on from the last saved
+epoch if the job moves to another PC. Recovery uses the latest usable upload
+from an earlier attempt; it is not guaranteed to include the last epoch saved
+locally. Upload it and run
+`python train_resumable.py --epochs 40 --seconds-per-epoch 3`, then press a key
+on the worker running it. The job continues on another PC, and its
+`metrics.json` shows `resumed_from_epoch`.

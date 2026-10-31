@@ -274,6 +274,13 @@ async def get_replica_manifest(
         if replica.attempt > 1
         else None,
         checkpoint_put_url=presign("put_object", f"{prefix}/checkpoint.json", ttl),
+        checkpoint_archive_get_urls=[
+            presign("get_object", f"{prefix}/attempts/{attempt}/checkpoint.tar.gz", ttl)
+            for attempt in range(replica.attempt - 1, 0, -1)
+        ],
+        checkpoint_archive_put_url=presign(
+            "put_object", f"{prefix}/attempts/{replica.attempt}/checkpoint.tar.gz", ttl
+        ),
     )
 
 

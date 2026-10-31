@@ -164,8 +164,9 @@ def parse_command(text: str | None) -> list[str]:
         raise UploadError("The command has a quote that isn't closed.") from None
 
 
-# worker/runner makes this folder next to the files for what the job returns
-RUNNER_OUTPUT_NAME = "output"
+# worker/runner makes these folders next to the files: what the job returns,
+# and the state it keeps if it moves to another PC
+RUNNER_FOLDERS = ("output", "checkpoint")
 
 
 def input_names(filenames: list[str]) -> list[str]:
@@ -175,18 +176,19 @@ def input_names(filenames: list[str]) -> list[str]:
     raises:
         UploadError: If there are more than settings.max_input_files, two
             files end up with the same name, or one takes the runner's
-            output folder name.
+            output or checkpoint folder name.
     """
     if len(filenames) > settings.max_input_files:
         raise UploadError(f"Upload at most {settings.max_input_files} files.")
     names = [clean_filename(name, "input") for name in filenames]
     if len(set(names)) != len(names):
         raise UploadError("Two of the files have the same name.")
-    if RUNNER_OUTPUT_NAME in names:
-        raise UploadError(
-            f"A file can't be called {RUNNER_OUTPUT_NAME}: that folder holds "
-            "your results. Rename it and upload again."
-        )
+    for name in RUNNER_FOLDERS:
+        if name in names:
+            raise UploadError(
+                f"A file can't be called {name}: the runner keeps that folder "
+                "for your results and checkpoints. Rename it and upload again."
+            )
     return names
 
 

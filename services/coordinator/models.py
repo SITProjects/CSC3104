@@ -159,6 +159,10 @@ class Manifest(BaseModel):
     # presigned PUT for output.tar.gz: what a generic job (worker/runner) returns
     # to its owner. Workers that only report result.json, like OCR, ignore it.
     output_archive_url: str
+    # Generic checkpoints are separate per attempt, so an old copy's late PUT
+    # cannot overwrite a newer copy's progress. Try earlier attempts newest first.
+    checkpoint_archive_get_urls: list[str]
+    checkpoint_archive_put_url: str
     checkpoint_get_url: str | None  # None on first attempt
     checkpoint_put_url: str
     attempt: int
