@@ -21,6 +21,10 @@ def update_trust_score(score: Decimal, agrees: bool) -> Decimal:
     """
     Calculates a PC's new trust score after comparing a result with the majority.
 
+    A disagreement also drops the score to INITIAL_TRUST at most, so even a PC
+    at 1.0 loses its trusted status at once. Its results are then checked again
+    until it earns trust back, like BOINC resetting a host after a bad result.
+
     The caller supplies a valid database score and only scores successful results
     once a majority exists. This helper does not save scores or change nodes.
 
@@ -30,8 +34,9 @@ def update_trust_score(score: Decimal, agrees: bool) -> Decimal:
     returns:
         Decimal: The updated score, clamped between zero and one.
     """
-    change = AGREEMENT_REWARD if agrees else -DISAGREEMENT_PENALTY
-    return max(Decimal(0), min(Decimal(1), score + change))
+    if agrees:
+        return min(Decimal(1), score + AGREEMENT_REWARD)
+    return max(Decimal(0), min(INITIAL_TRUST, score - DISAGREEMENT_PENALTY))
 
 
 def trust_label(score: Decimal) -> str:

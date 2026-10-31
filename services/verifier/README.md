@@ -6,6 +6,40 @@ Compare replica result hashes by majority vote, handle disputed tasks, update
 node trust scores and labels, and assemble verified page text into final job
 output. Common normalization helpers belong in root `shared/`.
 
+## Spot checks instead of three copies
+
+Running every task three times costs three times the compute. Extra copies
+are only needed where a PC isn't trusted yet, so trusted PCs are checked at
+random instead (`spot_check.py`). The idea comes from BOINC's adaptive
+replication, in a simpler form with our own trust rules.
+
+- Every task starts with one copy (the web app's `REPLICAS_PER_TASK`, default 1).
+- When it finishes, a result from a trusted PC (score 0.8 or more) is accepted.
+  A random share of them, `SPOT_CHECK_RATE` (default 0.1), gets a second copy
+  on another PC first. A result from any other PC always gets the second copy.
+  A result accepted on its own earns its PC no trust, because nothing was
+  compared.
+- Two copies must agree. If they don't, one tie-breaker copy runs, so three
+  PCs can settle one bad result. Later disputes add two copies, up to five.
+- A PC that loses a vote drops to 0.5 at most, so even a PC at 1.0 loses its
+  trusted status at once and is fully checked again until it earns it back.
+- In the same transaction, its results that were accepted on trust in jobs
+  still running are reopened with one more copy (`task_rechecked`). A job that
+  already finished has published its output, so it is not reopened.
+
+With most PCs trusted, a task needs about 1 + `SPOT_CHECK_RATE` copies (1.1)
+instead of 3, before disputes, failures and re-checks. That is still more than
+running once. The trade-off is risk: a trusted PC's wrong result is accepted
+unchecked 90% of the time, and finished jobs are not repaired. A PC that fakes
+a share f of its results is caught at least once within n tasks with
+probability 1 - (1 - rate × f)^n. Results from PCs that aren't trusted yet
+also take longer, because the second copy runs after the first.
+
+Set `REPLICAS_PER_TASK=3` on the web app to start with three copies again, for
+example to compare compute use. The stricter trust penalty stays in both cases.
+Events: `task_spot_check` (second copy for a single result) and
+`task_rechecked` (reopened result).
+
 ## Ending jobs
 
 - OCR jobs are completed by `output.py` once every task is verified and the

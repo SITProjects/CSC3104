@@ -33,16 +33,18 @@ Open http://localhost:8000 (seeded logins: `user@example.com` / `password123`,
 | `web` with `LOCAL_RENDER=true` | the page-rendering Lambda |
 | `coordinator`, `verifier`, `postgres` | themselves |
 
-- A task's three copies must run on different nodes, hence three workers. Each
-  reports this machine's full CPU and memory, so Kubernetes can place more work
-  than the machine really has.
+- A task's copies must run on different nodes. A result from a PC that isn't
+  trusted yet needs a second copy, and a disagreement adds a tie-breaker, so
+  three workers are enough for normal runs (see `services/verifier/README.md`).
+  Each worker reports this machine's full CPU and memory, so Kubernetes can
+  place more work than the machine really has.
 - Worker Pods reach the coordinator and MinIO at fixed IPs on the `cluster`
   network (`172.29.0.10` and `172.29.0.11`), because Pods can't resolve compose
   service names.
 - The worker nodes have their own image store: `scripts/load-worker-images.sh`
   builds `idlecloud/ocr` and loads it into each. A recreated worker volume needs
   it again.
-- A Test workload job (New job page) is the quickest check: its three copies
+- A Test workload job (New job page) is the quickest check: its copies
   report the same fixed result, so it should reach Completed in under a minute.
   Its image, `python:3.12-slim`, is pulled from Docker Hub on first use.
 - Inspect the cluster with `docker compose exec k3-server kubectl get nodes`

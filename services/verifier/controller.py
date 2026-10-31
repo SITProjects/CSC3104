@@ -15,6 +15,7 @@ from shared.db.models import (
 )
 
 from .pc_tracking import get_dispute_exclusions
+from .spot_check import accept_on_trust, reopen_trusted_results
 from .trust import score_replicas
 from .voting import MAX_REPLICAS, winning_hash
 
@@ -30,9 +31,12 @@ async def verify_next_task(
     Locks a VOTING task with FOR UPDATE SKIP LOCKED, so concurrent verifiers
     cannot process the same task. Only active jobs are eligible. The coordinator
     sets VOTING once replicas have finished. A majority verifies the task and
-    stores final_hash.
-    An unresolved task gets two extra SCHEDULED replicas, or one if four already
-    exist, without exceeding five total. No majority at five fails the task.
+    stores final_hash. A single copy is accepted only from a trusted PC that
+    was not picked for a spot check, otherwise it gets one more copy (see
+    spot_check.py).
+    An unresolved task gets one extra SCHEDULED replica if it has two, otherwise
+    two, without exceeding five total. No majority at five fails the task. PCs
+    that lose a vote have their results accepted on trust reopened.
 
     All configured initial counts from one to five are supported. Failed replicas
     count towards the total but do not contribute votes. A task_disputed event
@@ -81,23 +85,40 @@ async def process_vote(session: AsyncSession, task: Task) -> None:
         replica_count,
     )
 
-    if winner:
+    # One copy is only enough from a trusted PC that wasn't picked for a check.
+    # It earns that PC no trust, because nothing was compared.
+    if winner and replica_count == 1:
+        if await accept_on_trust(session, successful[0]):
+            task.status = TaskStatus.VERIFIED
+            task.final_hash = winner
+            return
+        extra, event = 1, "task_spot_check"
+    elif winner:
         await score_replicas(session, successful, winner)
         task.status = TaskStatus.VERIFIED
+        task.final_hash = winner
+        # PCs that lost the vote: re-check what they got accepted on trust.
+        losers = {r.node_name for r in successful if r.result_hash != winner}
+        losers.discard(None)
+        if losers:
+            await reopen_trusted_results(session, sorted(losers))
+        return
     elif replica_count == MAX_REPLICAS:
         task.status = TaskStatus.FAILED
+        task.final_hash = None
+        return
     else:
-        try:
-            excluded_nodes = await get_dispute_exclusions(session, task, replicas)
-        except ValueError:
-            await fail_verification(
-                session, task, "missing_pc_assignment", replica_count
-            )
-            return
+        # Two copies that disagree get one tie-breaker first, so three PCs are
+        # enough to settle one bad result. Later disputes add two.
+        extra = 1 if replica_count == 2 else min(2, MAX_REPLICAS - replica_count)
+        event = "task_disputed"
 
-        await handle_dispute(session, task, replica_count, excluded_nodes)
-
-    task.final_hash = winner
+    try:
+        excluded_nodes = await get_dispute_exclusions(session, task, replicas)
+    except ValueError:
+        await fail_verification(session, task, "missing_pc_assignment", replica_count)
+        return
+    await handle_dispute(session, task, extra, excluded_nodes, event)
 
 
 async def next_voting_task(session: AsyncSession) -> Task | None:
@@ -143,27 +164,32 @@ async def get_replicas(session: AsyncSession, task_id: int) -> Sequence[Replica]
 
 
 async def handle_dispute(
-    session: AsyncSession, task: Task, replica_count: int, excluded_nodes: list[str]
+    session: AsyncSession,
+    task: Task,
+    extra: int,
+    excluded_nodes: list[str],
+    event: str = "task_disputed",
 ) -> None:
     """
     Marks a task disputed, creates extra replicas and records their exclusions.
 
-    Adds up to two replicas without exceeding MAX_REPLICAS. Flushes to obtain
-    replica ids for the event; the caller owns and commits the transaction.
+    Used for a vote with no majority (task_disputed) and for a single copy that
+    needs a second one (task_spot_check). Flushes to obtain replica ids for the
+    event; the caller owns and commits the transaction.
 
     args:
         session: The verifier's current transaction.
-        task: The locked task with no majority and room for more replicas.
-        replica_count: The number of existing replicas, including failures.
+        task: The locked task that needs more copies.
+        extra: How many copies to add, keeping the total at MAX_REPLICAS or less.
         excluded_nodes: Previously used PCs excluded from the extra replicas.
+        event: The event type to record.
     """
     task.status = TaskStatus.DISPUTED
-    extra_replicas = await create_replicas(
-        session, [task], min(2, MAX_REPLICAS - replica_count)
-    )
+    task.final_hash = None
+    extra_replicas = await create_replicas(session, [task], extra)
     await create_event(
         session,
-        "task_disputed",
+        event,
         task.job_id,
         task.id,
         detail={
