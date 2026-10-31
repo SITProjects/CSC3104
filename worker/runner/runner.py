@@ -19,7 +19,8 @@ was uploaded, so a program that saves its progress there can carry on.
 
 On SIGTERM (the PC's owner is back) the command gets SIGTERM too and a short
 time to stop, the checkpoint folder is uploaded, and the copy is reported
-evicted. Standard library only, so any approved image can copy this file.
+evicted. Standard library only, so any approved image with Python 3.12 or newer
+can copy this file.
 """
 
 import hashlib
@@ -305,10 +306,13 @@ class Checkpoints:
         for url in self.get_urls:
             try:
                 data = _send(request.Request(url), UPLOAD_TIMEOUT_SECONDS)
-            except error.HTTPError as exc:
-                if exc.code == 404:
+            except OSError as exc:  # includes HTTPError and network failures
+                if isinstance(exc, error.HTTPError) and exc.code == 404:
                     continue
-                raise
+                self.log.note(
+                    f"Couldn't fetch a saved checkpoint ({exc}), trying an older one."
+                )
+                continue
             try:
                 with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
                     # Reject extraction outside the folder and unsafe special files.
