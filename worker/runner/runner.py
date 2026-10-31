@@ -7,19 +7,26 @@ The task input holds the command and the uploaded files:
 The runner downloads the files into a fresh work folder, runs the command
 there, then packs the output folder and the command's log into output.tar.gz,
 uploads it and reports the command's exit code. The command sees:
-    OUTPUT_DIR   files to return to the user (work folder/output)
-    HOME         the work folder, for tools that want a writable home
+    OUTPUT_DIR      files to return to the user (work folder/output)
+    CHECKPOINT_DIR  state to keep if the copy moves (work folder/checkpoint)
+    HOME            the work folder, for tools that want a writable home
 It does not see the replica token.
 
+The checkpoint folder is uploaded as checkpoint.tar.gz every
+CHECKPOINT_INTERVAL_SECONDS when it has changed, and once more when the copy
+is stopped. A rerun of the copy on another PC starts with the last folder that
+was uploaded, so a program that saves its progress there can carry on.
+
 On SIGTERM (the PC's owner is back) the command gets SIGTERM too and a short
-time to stop, then the copy is reported evicted and runs again from the start
-on another PC. Standard library only, so any approved image can copy this file.
+time to stop, the checkpoint folder is uploaded, and the copy is reported
+evicted. Standard library only, so any approved image can copy this file.
 """
 
 import hashlib
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -33,17 +40,24 @@ from urllib import error, request
 REQUEST_TIMEOUT_SECONDS = 20
 UPLOAD_TIMEOUT_SECONDS = 120
 ATTEMPTS = 3
-# the Pod gets 30 s after SIGTERM; leave time to report the eviction
-STOP_WAIT_SECONDS = 20
+# The Pod gets 30 s after SIGTERM: up to 15 s for the command to stop, the
+# rest for the last checkpoint upload and the eviction report (best effort)
+STOP_WAIT_SECONDS = 15
+# Leave five seconds of the Pod's grace period for process/container teardown.
+SHUTDOWN_BUDGET_SECONDS = 25
+EVICTION_REPORT_TIMEOUT_SECONDS = 5
 MAX_LOG_BYTES = 5 * 1024 * 1024
 MAX_OUTPUT_BYTES = 100 * 1024 * 1024
+MAX_CHECKPOINT_BYTES = 100 * 1024 * 1024
+CHECKPOINT_INTERVAL_SECONDS = float(os.environ.get("CHECKPOINT_INTERVAL_SECONDS", "60"))
 EXIT_EVICTED = 143
 # exit codes for problems before the command starts, like a shell's
 EXIT_BAD_INPUT = 2
 EXIT_NOT_FOUND = 127
 HIDDEN_FROM_COMMAND = ("REPLICA_TOKEN", "REPLICA_ID", "COORDINATOR_URL", "TASK_INDEX")
-# the runner's own folder in the work folder; the web app refuses it as a file name
+# the runner's own folders in the work folder; the web app refuses these file names
 OUTPUT_NAME = "output"
+CHECKPOINT_NAME = "checkpoint"
 
 
 def read_environment() -> dict[str, str]:
@@ -59,7 +73,7 @@ def read_environment() -> dict[str, str]:
     return config
 
 
-def _send(req: request.Request, timeout: float) -> bytes:
+def _send(req: request.Request, timeout: float, attempts: int = ATTEMPTS) -> bytes:
     """Sends a request, trying again after network errors and 5xx replies."""
     attempt = 1
     while True:
@@ -67,16 +81,24 @@ def _send(req: request.Request, timeout: float) -> bytes:
             with request.urlopen(req, timeout=timeout) as response:
                 return response.read()
         except error.HTTPError as exc:
-            if exc.code < 500 or attempt == ATTEMPTS:
+            if exc.code < 500 or attempt == attempts:
                 raise
         except OSError:  # URLError, timeouts and dropped connections
-            if attempt == ATTEMPTS:
+            if attempt == attempts:
                 raise
         time.sleep(2**attempt)
         attempt += 1
 
 
-def call(config: dict[str, str], method: str, path: str, body: dict | None = None):
+def call(
+    config: dict[str, str],
+    method: str,
+    path: str,
+    body: dict | None = None,
+    *,
+    timeout: float = REQUEST_TIMEOUT_SECONDS,
+    attempts: int = ATTEMPTS,
+):
     """Calls /internal/replicas/{id}/{path} on the coordinator."""
     headers = {"Authorization": f"Bearer {config['token']}"}
     data = None
@@ -86,7 +108,8 @@ def call(config: dict[str, str], method: str, path: str, body: dict | None = Non
     url = f"{config['coordinator_url']}/internal/replicas/{config['replica_id']}/{path}"
     reply = _send(
         request.Request(url, data=data, headers=headers, method=method),
-        REQUEST_TIMEOUT_SECONDS,
+        timeout,
+        attempts,
     )
     return json.loads(reply or b"null")
 
@@ -119,10 +142,10 @@ def check_input(task_input: dict) -> tuple[list[str], dict[str, str]]:
         name = key.removeprefix("inputs/")
         if name == key or not name or "/" in name or name in (".", ".."):
             raise ValueError(f"Unexpected input file {key!r}.")
-        if name == OUTPUT_NAME:
+        if name in (OUTPUT_NAME, CHECKPOINT_NAME):
             raise ValueError(
-                f"An input file can't be called {OUTPUT_NAME!r}: "
-                "that folder holds your results."
+                f"An input file can't be called {name!r}: the runner keeps that "
+                "folder for your results and checkpoints."
             )
         names[key] = name
     return command, names
@@ -142,14 +165,16 @@ class Log:
     def __init__(self) -> None:
         self.buffer = io.BytesIO()
         self.truncated = False
+        self.lock = threading.Lock()  # the checkpoint saver writes notes too
 
     def write(self, line: bytes) -> None:
-        sys.stdout.buffer.write(line)
-        sys.stdout.buffer.flush()
-        if self.buffer.tell() + len(line) <= MAX_LOG_BYTES:
-            self.buffer.write(line)
-        else:
-            self.truncated = True
+        with self.lock:
+            sys.stdout.buffer.write(line)
+            sys.stdout.buffer.flush()
+            if self.buffer.tell() + len(line) <= MAX_LOG_BYTES:
+                self.buffer.write(line)
+            else:
+                self.truncated = True
 
     def note(self, message: str) -> None:
         self.write(f"[idlecloud] {message}\n".encode())
@@ -159,14 +184,19 @@ class Log:
         return self.buffer.getvalue() + tail
 
 
-def command_env(work: Path, output: Path) -> dict[str, str]:
+def command_env(work: Path) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in HIDDEN_FROM_COMMAND}
-    env.update(HOME=str(work), OUTPUT_DIR=str(output), PYTHONUNBUFFERED="1")
+    env.update(
+        HOME=str(work),
+        OUTPUT_DIR=str(work / OUTPUT_NAME),
+        CHECKPOINT_DIR=str(work / CHECKPOINT_NAME),
+        PYTHONUNBUFFERED="1",
+    )
     return env
 
 
 def run_command(
-    command: list[str], work: Path, output: Path, log: Log, stopping: threading.Event
+    command: list[str], work: Path, log: Log, stopping: threading.Event
 ) -> int:
     """
     Runs the command in its own process group and returns its exit code.
@@ -178,7 +208,7 @@ def run_command(
         child = subprocess.Popen(
             command,
             cwd=work,
-            env=command_env(work, output),
+            env=command_env(work),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -232,6 +262,122 @@ def pack(output: Path, log: Log) -> bytes:
     return buffer.getvalue()
 
 
+class Checkpoints:
+    """
+    Keeps a copy's checkpoint folder in an attempt-specific S3 archive.
+
+    save() uploads the folder only when it changed since the last upload, so
+    an idle folder costs nothing. A failed upload is logged and tried again on
+    the next save; the last good upload stays in S3, because a PUT replaces an
+    object whole or not at all.
+    """
+
+    def __init__(self, folder: Path, manifest: dict, log: Log) -> None:
+        self.folder = folder
+        self.get_urls = manifest.get("checkpoint_archive_get_urls", [])
+        # a coordinator from before checkpoints sends no URL: then nothing is kept
+        self.put_url = manifest.get("checkpoint_archive_put_url")
+        self.log = log
+        self.saved = self.state()  # nothing to upload until the folder changes
+        self.lock = threading.Lock()
+
+    def state(self) -> list[tuple[str, int, int, int, int]]:
+        """Paths and metadata, including atomic replacements of equal-size files."""
+        found = []
+        for path in self.folder.rglob("*"):
+            try:
+                info = path.lstat()
+            except FileNotFoundError:  # the program removed it meanwhile
+                continue
+            found.append(
+                (
+                    str(path.relative_to(self.folder)),
+                    info.st_size,
+                    info.st_mtime_ns,
+                    info.st_ino,
+                    info.st_ctime_ns,
+                )
+            )
+        return sorted(found)
+
+    def restore(self) -> None:
+        """Tries earlier attempts newest first, including when a retry saved nothing."""
+        for url in self.get_urls:
+            try:
+                data = _send(request.Request(url), UPLOAD_TIMEOUT_SECONDS)
+            except error.HTTPError as exc:
+                if exc.code == 404:
+                    continue
+                raise
+            try:
+                with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+                    # Reject extraction outside the folder and unsafe special files.
+                    archive.extractall(self.folder, filter="data")
+            except (tarfile.TarError, OSError, EOFError) as exc:
+                self.log.note(f"The saved checkpoint couldn't be unpacked ({exc}).")
+                shutil.rmtree(self.folder)
+                self.folder.mkdir()
+                continue
+            self.saved = self.state()
+            self.log.note(f"Restored the checkpoint folder ({len(data)} bytes).")
+            return
+        if self.get_urls:
+            self.log.note("No usable checkpoint was saved earlier, starting fresh.")
+        self.saved = self.state()
+
+    def save(self, cancel: threading.Event | None = None) -> None:
+        with self.lock:
+            if not self.put_url or (cancel is not None and cancel.is_set()):
+                return
+            try:
+                now = self.state()
+                if now == self.saved:
+                    return
+                size = folder_size(self.folder)
+                if size > MAX_CHECKPOINT_BYTES:
+                    self.log.note(
+                        f"The checkpoint folder holds {size} bytes, more than the "
+                        f"{MAX_CHECKPOINT_BYTES} allowed, so it was not saved."
+                    )
+                    self.saved = now  # don't repeat the note until it changes
+                    return
+                buffer = io.BytesIO()
+                with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+                    for path in sorted(self.folder.iterdir()):
+                        archive.add(path, arcname=path.name)
+                # tarfile stats before opening paths. Even an atomic rename can
+                # otherwise produce a valid archive containing truncated state.
+                if self.state() != now or (cancel is not None and cancel.is_set()):
+                    return
+                upload(self.put_url, buffer.getvalue(), "application/gzip")
+            except (OSError, tarfile.TarError) as exc:
+                if cancel is None or not cancel.is_set():
+                    self.log.note(f"Couldn't save the checkpoint folder: {exc}")
+                return
+            self.saved = now
+
+    def save_every(self, interval: float, done: threading.Event) -> None:
+        """Saves every interval seconds until done is set."""
+        while not done.wait(interval):
+            self.save(cancel=done)
+
+
+def save_before_eviction(checkpoints: Checkpoints, deadline: float) -> None:
+    """Gives a final save only the time left before the eviction report is due."""
+    remaining = deadline - EVICTION_REPORT_TIMEOUT_SECONDS - time.monotonic()
+    if remaining <= 0:
+        return
+    # A periodic upload may own the lock. Keep both lock waiting and network
+    # work off the main thread so neither can consume the whole Pod grace.
+    saver = threading.Thread(target=checkpoints.save, daemon=True)
+    saver.start()
+    saver.join(timeout=remaining)
+    if saver.is_alive():
+        checkpoints.log.note(
+            "Checkpoint save is still in progress; using the last completed upload."
+        )
+
+
 def report(config: dict[str, str], manifest: dict, archive: bytes, code: int) -> None:
     """Uploads output.tar.gz and result.json, then reports result.json's hash."""
     upload(manifest["output_archive_url"], archive, "application/gzip")
@@ -252,7 +398,15 @@ def report(config: dict[str, str], manifest: dict, archive: bytes, code: int) ->
 def main() -> int:
     config = read_environment()
     stopping = threading.Event()
-    signal.signal(signal.SIGTERM, lambda *_: stopping.set())
+    shutdown_deadline = None
+
+    def stop(*_):
+        nonlocal shutdown_deadline
+        if shutdown_deadline is None:
+            shutdown_deadline = time.monotonic() + SHUTDOWN_BUDGET_SECONDS
+        stopping.set()
+
+    signal.signal(signal.SIGTERM, stop)
 
     manifest = call(config, "GET", "manifest")
     log = Log()
@@ -260,9 +414,12 @@ def main() -> int:
         work = Path(folder)
         output = work / OUTPUT_NAME
         output.mkdir()
+        (work / CHECKPOINT_NAME).mkdir()
+        checkpoints = Checkpoints(work / CHECKPOINT_NAME, manifest, log)
         try:
             command, names = check_input(manifest["input"])
             download_inputs(manifest, names, work)
+            checkpoints.restore()
         except ValueError as exc:
             log.note(str(exc))
             code = EXIT_BAD_INPUT
@@ -271,16 +428,36 @@ def main() -> int:
             code = EXIT_BAD_INPUT
         else:
             # a stop during the download means the command never starts
-            code = (
-                EXIT_EVICTED
-                if stopping.is_set()
-                else run_command(command, work, output, log, stopping)
-            )
+            if stopping.is_set():
+                code = EXIT_EVICTED
+            else:
+                done = threading.Event()
+                saver = threading.Thread(
+                    target=checkpoints.save_every,
+                    args=(CHECKPOINT_INTERVAL_SECONDS, done),
+                    daemon=True,
+                )
+                saver.start()
+                try:
+                    code = run_command(command, work, log, stopping)
+                finally:
+                    done.set()
 
         if stopping.is_set():
-            # the copy runs again elsewhere; a refused report changes nothing
+            # keep the latest progress, then let the copy run again elsewhere;
+            # a refused report changes nothing
+            deadline = shutdown_deadline or time.monotonic() + SHUTDOWN_BUDGET_SECONDS
+            save_before_eviction(checkpoints, deadline)
             try:
-                call(config, "POST", "evicted")
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    call(
+                        config,
+                        "POST",
+                        "evicted",
+                        timeout=min(EVICTION_REPORT_TIMEOUT_SECONDS, remaining),
+                        attempts=1,
+                    )
             except OSError as exc:
                 print(f"Couldn't report the eviction: {exc}", file=sys.stderr)
             return EXIT_EVICTED

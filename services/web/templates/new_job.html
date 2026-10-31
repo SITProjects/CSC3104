@@ -54,7 +54,7 @@
         <input class="input font-mono" id="command" type="text" name="command" maxlength="{{ max_command_chars }}"
                value="{{ form.command or '' }}" placeholder="python train.py --epochs 5" aria-describedby="command-hint"
                {% if runs %}required{% else %}disabled{% endif %}>
-        <p id="command-hint">Runs in a folder with your files, as it would in a terminal. Anything saved in <code>$OUTPUT_DIR</code> comes back in the download, with the log.</p>
+        <p id="command-hint">Runs in a folder with your files, as it would in a terminal. Anything saved in <code>$OUTPUT_DIR</code> comes back in the download, with the log. Save progress in <code>$CHECKPOINT_DIR</code> to carry on if the job moves to another PC.</p>
       </div>
       <div role="group" class="field">
         <label class="label" for="inputs">Files <span class="font-normal text-muted-foreground">(optional)</span></label>

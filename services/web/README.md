@@ -46,9 +46,9 @@ start with `REPLICAS_PER_TASK` copies (default 1, see `services/verifier/README.
 and job types without `voting` always run one.
 
 A test job is created at once. A Python script job (a generic job, `runs_command`)
-takes a command and up to 10 files (50 MB in all, none named `output`). The files
-go to `jobs/{id}/inputs/` and are deleted again only if the coordinator refuses
-the job (a 4xx). After a lost reply or a 5xx the job may exist, so they stay.
+takes a command and up to 10 files (50 MB in all, none named `output` or
+`checkpoint`). The files go to `jobs/{id}/inputs/` and are deleted again only
+if the coordinator refuses the job (a 4xx). After a lost reply or a 5xx the job may exist, so they stay.
 The job is created at once with one task whose input is
 `{"command": [...], "files": ["inputs/..."]}`. `worker/runner` runs it, and
 `/jobs/{id}/output.tar.gz` downloads the output folder and log, also after a
