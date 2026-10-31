@@ -2,8 +2,9 @@
 
 Owner: member 5.
 
-Provide the New job page (`/jobs/new`: pick a job type, upload a PDF for OCR,
-and choose CPU and memory where the job type allows it), the public job API, page-ready callbacks, live progress,
+Provide the New job page (`/jobs/new`: pick a job type, upload a PDF for OCR or
+a command and files for a Python script, and choose CPU and memory where the job
+type allows it), the public job API, page-ready callbacks, live progress,
 result downloads, and the admin dashboard. Calculate workload resource
 requests and pass jobs to the coordinator.
 
@@ -39,11 +40,19 @@ see "Local stack" in `infra/README.md`. Open http://localhost:8000 (API docs at
 
 `/jobs/new` lets the user pick a job type (`JOB_TYPES` in `jobs.py`, mirroring the
 types seeded in `shared/migrations`). Each type has a default CPU and memory; only
-types with `custom_resources` (today the test workload) let the user change them,
-within the coordinator's limits (1 to 16 cores, 64 to 4096 MiB). Tasks always run 3
-replicas.
+types with `custom_resources` (the test workload and Python script) let the user
+change them, within the coordinator's limits (1 to 16 cores, 64 to 4096 MiB). Tasks
+start with `REPLICAS_PER_TASK` copies (default 1, see `services/verifier/README.md`),
+and job types without `voting` always run one.
 
-A test job is created at once. An OCR job takes one PDF (up to 50 MB and 500 pages):
+A test job is created at once. A Python script job (a generic job, `runs_command`)
+takes a command and up to 10 files (50 MB in all, none named `output`). The files
+go to `jobs/{id}/inputs/` and are deleted again only if the coordinator refuses
+the job (a 4xx). After a lost reply or a 5xx the job may exist, so they stay.
+The job is created at once with one task whose input is
+`{"command": [...], "files": ["inputs/..."]}`. `worker/runner` runs it, and
+`/jobs/{id}/output.tar.gz` downloads the output folder and log, also after a
+failed run. An OCR job takes one PDF (up to 50 MB and 500 pages):
 the web app checks it, saves it to `jobs/{id}/input.pdf` and sends the user to
 `/jobs/{id}`. Each OCR copy gets 1 core and 256 MiB: Tesseract runs one thread, so
 more copies beat bigger ones.

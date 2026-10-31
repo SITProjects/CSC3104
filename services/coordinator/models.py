@@ -156,6 +156,9 @@ class Manifest(BaseModel):
     input: dict[str, Any]
     input_urls: dict[str, str]  # name -> presigned GET URL
     output_upload_url: str  # presigned PUT for result.json
+    # presigned PUT for output.tar.gz: what a generic job (worker/runner) returns
+    # to its owner. Workers that only report result.json, like OCR, ignore it.
+    output_archive_url: str
     checkpoint_get_url: str | None  # None on first attempt
     checkpoint_put_url: str
     attempt: int

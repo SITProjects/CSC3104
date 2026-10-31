@@ -8,6 +8,9 @@ on:
       - .dockerignore
       - worker/ocr-task/Dockerfile
       - worker/ocr-task/main.py
+      - worker/runner/runner.py
+      - worker/python-job/Dockerfile
+      - worker/python-job/requirements.txt
       - shared/__init__.py
       - shared/checkpoint.py
       - shared/normalized_text.py
@@ -18,6 +21,9 @@ on:
       - .dockerignore
       - worker/ocr-task/Dockerfile
       - worker/ocr-task/main.py
+      - worker/runner/runner.py
+      - worker/python-job/Dockerfile
+      - worker/python-job/requirements.txt
       - shared/__init__.py
       - shared/checkpoint.py
       - shared/normalized_text.py
@@ -36,6 +42,14 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ocr
+            dockerfile: worker/ocr-task/Dockerfile
+          - name: python
+            dockerfile: worker/python-job/Dockerfile
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -45,11 +59,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build OCR worker
+      - name: Build ${{ matrix.name }} worker
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: worker/ocr-task/Dockerfile
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: false
 
@@ -58,6 +72,14 @@ jobs:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ocr
+            dockerfile: worker/ocr-task/Dockerfile
+          - name: python
+            dockerfile: worker/python-job/Dockerfile
     permissions:
       contents: read
       packages: write
@@ -71,8 +93,9 @@ jobs:
         id: image
         env:
           OWNER: ${{ github.repository_owner }}
+          NAME: ${{ matrix.name }}
         shell: bash
-        run: echo "name=ghcr.io/${OWNER,,}/idlecloud-ocr" >> "$GITHUB_OUTPUT"
+        run: echo "name=ghcr.io/${OWNER,,}/idlecloud-${NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -84,12 +107,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and publish OCR worker
+      - name: Build and publish ${{ matrix.name }} worker
         id: publish
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: worker/ocr-task/Dockerfile
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
           tags: |
@@ -103,13 +126,14 @@ jobs:
         env:
           IMAGE: ${{ steps.image.outputs.name }}
           DIGEST: ${{ steps.publish.outputs.digest }}
+          NAME: ${{ matrix.name }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           printf '%s@%s\n' "$IMAGE" "$DIGEST" > worker-image.txt
           {
-            echo '### OCR worker image'
+            echo "### $NAME worker image"
             echo
             printf 'Published `%s@%s` for `linux/amd64`.\n' "$IMAGE" "$DIGEST"
             echo
@@ -119,7 +143,7 @@ jobs:
       - name: Save image reference
         uses: actions/upload-artifact@v7
         with:
-          name: worker-image-${{ github.sha }}
+          name: worker-image-${{ matrix.name }}-${{ github.sha }}
           path: worker-image.txt
           if-no-files-found: error
           retention-days: 30
@@ -128,6 +152,7 @@ jobs:
         env:
           IMAGE: ${{ steps.image.outputs.name }}
           DIGEST: ${{ steps.publish.outputs.digest }}
+          NAME: ${{ matrix.name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -137,7 +162,7 @@ jobs:
           trap 'rm -rf -- "$anonymous_config"' EXIT
           image_ref="$IMAGE@$DIGEST"
           if ! docker --config "$anonymous_config" pull --platform linux/amd64 "$image_ref"; then
-            echo '::error::OCR image was published but anonymous pull failed. New GHCR packages are private by default. Open the idlecloud-ocr package settings, change visibility to Public, and rerun this workflow from main. Also check the pull error above for network or registry failures.'
+            echo "::error::The $NAME image was published but anonymous pull failed. New GHCR packages are private by default. Open the idlecloud-$NAME package settings, change visibility to Public, and rerun this workflow from main. Also check the pull error above for network or registry failures."
             {
               echo
               echo '**Worker deployment is not ready:** the anonymous pull failed.'
@@ -148,7 +173,11 @@ jobs:
           fi
           {
             echo
-            echo 'Anonymous pull passed. On the hub, run `bash services/autoscaler/deploy.sh --no-build` to switch OCR to this image:'
+            if [[ "$NAME" == ocr ]]; then
+              echo 'Anonymous pull passed. On the hub, run `bash services/autoscaler/deploy.sh --no-build` to switch OCR to this image:'
+            else
+              echo "Anonymous pull passed. The $NAME job type uses the :main tag, so new workers pull this image:"
+            fi
             echo
             printf '`%s`\n' "$image_ref"
           } >> "$GITHUB_STEP_SUMMARY"

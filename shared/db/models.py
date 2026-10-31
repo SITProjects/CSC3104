@@ -306,6 +306,14 @@ class JobType(Base):
         server_default=text("true"),
     )
 
+    # Whether results are checked by voting and spot checks (migration 010).
+    # Generic jobs that run a user's own program are run once instead.
+    verify: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    )
+
     jobs: Mapped[list["Job"]] = relationship(
         back_populates="job_type_obj",
     )

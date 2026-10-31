@@ -5,6 +5,7 @@ final text. Nothing here talks to the network, so it is easy to test.
 
 import json
 import math
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -37,9 +38,14 @@ class JobType:
     default_mem: int
     # whether users may ask for other CPU and memory; if not, the defaults apply
     custom_resources: bool
+    # generic jobs: the user gives a command and files, and gets output.tar.gz
+    runs_command: bool = False
+    # mirrors job_types.verify: whether copies are compared. Without it a task
+    # runs once, whatever REPLICAS_PER_TASK says.
+    voting: bool = True
 
 
-# Mirrors the job types seeded in shared/migrations (002 and 003). The coordinator
+# Mirrors the job types seeded in shared/migrations (002, 003 and 010). The coordinator
 # has no endpoint to list them, and it refuses a job_type it doesn't know.
 JOB_TYPES = {
     t.name: t
@@ -66,6 +72,19 @@ JOB_TYPES = {
             default_mem=64,
             # changing the request is how to check where the scheduler places a job
             custom_resources=True,
+        ),
+        JobType(
+            "python",
+            "Python script",
+            "Runs your own command, such as python train.py, once on an idle PC "
+            "with numpy, pandas and scikit-learn. Save files to $OUTPUT_DIR to "
+            "download them.",
+            needs_pdf=False,
+            default_cpu=1,
+            default_mem=1024,
+            custom_resources=True,
+            runs_command=True,
+            voting=False,
         ),
     )
 }
@@ -122,6 +141,68 @@ def parse_resources(
         ),
         _whole_number(mem, job_type.default_mem, "memory in MiB", MIN_MEM, MAX_MEM),
     )
+
+
+def parse_command(text: str | None) -> list[str]:
+    """
+    Splits the command the user typed, the way a shell would, without running
+    a shell: "python train.py --epochs 5" -> ["python", "train.py", "--epochs", "5"].
+
+    raises:
+        UploadError: If it is empty, too long or has an unclosed quote.
+    """
+    text = (text or "").strip()
+    if not text:
+        raise UploadError("Enter the command to run, for example python main.py.")
+    if len(text) > settings.max_command_chars:
+        raise UploadError(
+            f"The command is limited to {settings.max_command_chars} characters."
+        )
+    try:
+        return shlex.split(text)
+    except ValueError:
+        raise UploadError("The command has a quote that isn't closed.") from None
+
+
+# worker/runner makes this folder next to the files for what the job returns
+RUNNER_OUTPUT_NAME = "output"
+
+
+def input_names(filenames: list[str]) -> list[str]:
+    """
+    Safe, distinct names for a generic job's uploaded files, in upload order.
+
+    raises:
+        UploadError: If there are more than settings.max_input_files, two
+            files end up with the same name, or one takes the runner's
+            output folder name.
+    """
+    if len(filenames) > settings.max_input_files:
+        raise UploadError(f"Upload at most {settings.max_input_files} files.")
+    names = [clean_filename(name, "input") for name in filenames]
+    if len(set(names)) != len(names):
+        raise UploadError("Two of the files have the same name.")
+    if RUNNER_OUTPUT_NAME in names:
+        raise UploadError(
+            f"A file can't be called {RUNNER_OUTPUT_NAME}: that folder holds "
+            "your results. Rename it and upload again."
+        )
+    return names
+
+
+def output_replica(job: dict[str, Any]) -> int | None:
+    """
+    The copy whose output.tar.gz a generic job's owner downloads: the accepted
+    one, or for a failed job the last copy that finished, so its log can be
+    read. None while no copy has finished.
+    """
+    if not job["tasks"]:
+        return None
+    task = job["tasks"][0]
+    finished = [r for r in task["replicas"] if r["status"] == "DONE"]
+    accepted = [r for r in finished if r["result_hash"] == task["final_hash"]]
+    chosen = accepted or finished
+    return max(r["id"] for r in chosen) if chosen else None
 
 
 class ResultUnavailable(RuntimeError):
@@ -240,13 +321,15 @@ def job_spec(
     tasks: list[dict[str, Any]] | None = None,
     task_count: int | None = None,
     params: dict[str, Any] | None = None,
+    task_input: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     The body for the coordinator's POST /jobs.
 
     args:
         job_type: "ocr" splits page_count pages into tasks; any other type runs
-            one task with no input.
+            one task, with task_input as its input (a generic job's command and
+            files) or none.
         cpu: Cores for each copy of a task.
         mem: MiB for each copy of a task.
         tasks: The tasks to send now (OCR), instead of all of them.
@@ -259,13 +342,16 @@ def job_spec(
         if tasks is None:
             tasks = build_tasks(page_count)
     else:
-        job_params, tasks = {}, [{"input": {}}]
+        job_params, tasks = {}, [{"input": task_input or {}}]
+    kind = JOB_TYPES.get(job_type)
     spec = {
         "job_id": job_id,
         "job_type": job_type,
         "params": {**job_params, **(params or {})},
         "tasks": tasks,
-        "replicas_per_task": settings.replicas_per_task,
+        "replicas_per_task": settings.replicas_per_task
+        if kind is None or kind.voting
+        else 1,
         "cpu_request": cpu,
         "mem_request": mem,
     }
@@ -394,14 +480,16 @@ def _read_pages(raw: bytes | None) -> dict[str, str] | None:
     return pages
 
 
-def clean_filename(name: str | None) -> str:
+def clean_filename(name: str | None, fallback: str = "upload.pdf") -> str:
     """
     Makes an uploaded file name safe to store and show: no folders, no control
     characters, at most settings.max_filename_chars long.
     """
     name = (name or "").replace("\\", "/").rsplit("/", 1)[-1]
     name = "".join(ch for ch in name if ch.isprintable()).strip()
-    return name[: settings.max_filename_chars] or "upload.pdf"
+    if name in (".", ".."):
+        name = ""
+    return name[: settings.max_filename_chars] or fallback
 
 
 def assemble_text(job: dict[str, Any], fetch: Callable[[int], bytes | None]) -> str:

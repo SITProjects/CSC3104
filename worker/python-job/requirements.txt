@@ -1,0 +1,4 @@
+# Libraries user scripts can import. Pinned, so every run uses the same versions.
+numpy==2.3.5
+pandas==2.3.3
+scikit-learn==1.7.2

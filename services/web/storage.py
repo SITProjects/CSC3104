@@ -32,6 +32,16 @@ def page_key(job_id: UUID, page: int) -> str:
     return f"jobs/{job_id}/pages/{page:04d}.png"
 
 
+def input_file_key(job_id: UUID, name: str) -> str:
+    """A generic job's uploaded file, as the runner downloads it (task input files)."""
+    return f"jobs/{job_id}/inputs/{name}"
+
+
+def output_archive_key(job_id: UUID, replica_id: int) -> str:
+    """What a generic job's copy returns: its output folder and log (worker/runner)."""
+    return f"jobs/{job_id}/replicas/{replica_id}/output.tar.gz"
+
+
 def pending_key(job_id: UUID) -> str:
     return f"jobs/{job_id}/pending.json"
 
