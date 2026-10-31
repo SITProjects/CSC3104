@@ -1,5 +1,6 @@
-// New job page: show the fields the chosen job type needs, check a PDF before
-// sending it, show upload progress, and put any server error on the page.
+// New job page: show the fields the chosen job type needs (a PDF, or a command
+// and files), check a PDF before sending it, show upload progress, and put any
+// server error on the page.
 // Without JavaScript the form still posts normally and the server checks it all.
 (() => {
   const form = document.getElementById("job-form");
@@ -9,6 +10,7 @@
   const typeHint = $("job-type-hint");
   const pdfSection = $("pdf-section");
   const resources = $("resources-section");
+  const commandSection = $("command-section");
   const input = $("file");
   const title = $("file-title");
   const errorBox = $("form-error");
@@ -36,6 +38,11 @@
     pdfSection.hidden = type.needsPdf !== "true";
     input.disabled = pdfSection.hidden;
     input.required = !pdfSection.hidden;
+    commandSection.hidden = type.runsCommand !== "true";
+    for (const field of commandSection.querySelectorAll("input")) {
+      field.disabled = commandSection.hidden;
+    }
+    $("command").required = !commandSection.hidden;
     resources.hidden = type.customResources !== "true";
     for (const field of resources.querySelectorAll("input")) {
       field.disabled = resources.hidden;

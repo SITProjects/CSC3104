@@ -20,7 +20,7 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.coordinator.crud import create_event, create_replicas
-from shared.db.models import Job, JobStatus, Node, Replica, Task, TaskStatus
+from shared.db.models import Job, JobStatus, JobType, Node, Replica, Task, TaskStatus
 
 from .trust import HIGH_TRUST_THRESHOLD
 
@@ -115,7 +115,10 @@ async def reopen_trusted_results(
         await session.scalars(
             select(Task)
             .join(Job, Task.job_id == Job.id)
+            .join(JobType, Job.job_type == JobType.name)
             .where(
+                # a job type without voting also runs once, but on purpose
+                JobType.verify,
                 Task.status == TaskStatus.VERIFIED,
                 Job.status.in_(ACTIVE_JOBS),
                 copies == 1,

@@ -8,6 +8,7 @@ from services.coordinator.crud import create_event, create_replicas
 from shared.db.models import (
     Job,
     JobStatus,
+    JobType,
     Replica,
     ReplicaStatus,
     Task,
@@ -62,7 +63,8 @@ async def verify_next_task(
 
 async def process_vote(session: AsyncSession, task: Task) -> None:
     """
-    Applies a majority vote or records a dispute or terminal data error.
+    Applies a majority vote or records a dispute or terminal data error. Job
+    types without voting are decided by accept_single_run instead.
 
     args:
         session: The verifier's current transaction.
@@ -80,6 +82,9 @@ async def process_vote(session: AsyncSession, task: Task) -> None:
         for replica in replicas
         if replica.status == ReplicaStatus.DONE and replica.exit_code == 0
     ]
+    if not await verifies(session, task):
+        await accept_single_run(session, task, successful, replica_count)
+        return
     winner = winning_hash(
         [replica.result_hash for replica in successful if replica.result_hash],
         replica_count,
@@ -119,6 +124,34 @@ async def process_vote(session: AsyncSession, task: Task) -> None:
         await fail_verification(session, task, "missing_pc_assignment", replica_count)
         return
     await handle_dispute(session, task, extra, excluded_nodes, event)
+
+
+async def verifies(session: AsyncSession, task: Task) -> bool:
+    """Whether the task's job type checks results by voting (job_types.verify)."""
+    verify = await session.scalar(
+        select(JobType.verify)
+        .join(Job, Job.job_type == JobType.name)
+        .where(Job.id == task.job_id)
+    )
+    return verify is not False  # vote unless the type says otherwise
+
+
+async def accept_single_run(
+    session: AsyncSession, task: Task, successful: list[Replica], replica_count: int
+) -> None:
+    """
+    Decides a task of a job type without voting, such as a user's own program.
+
+    A successful run is accepted as it is, and no PC's trust changes because
+    nothing was compared. A run that failed fails the task instead of starting
+    more copies: the program would most likely fail the same way again.
+    Evictions don't get here, the coordinator runs those copies again first.
+    """
+    if successful:
+        task.status = TaskStatus.VERIFIED
+        task.final_hash = max(successful, key=lambda r: r.id).result_hash
+        return
+    await fail_verification(session, task, "run_failed", replica_count)
 
 
 async def next_voting_task(session: AsyncSession) -> Task | None:

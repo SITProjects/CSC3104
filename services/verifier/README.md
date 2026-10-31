@@ -40,6 +40,15 @@ example to compare compute use. The stricter trust penalty stays in both cases.
 Events: `task_spot_check` (second copy for a single result) and
 `task_rechecked` (reopened result).
 
+## Job types without voting
+
+A job type with `verify = false` in `job_types` (migration 010, the `python`
+type) is not voted on. Its single run is accepted if it succeeded, and fails
+the task if it didn't, without more copies or trust changes
+(`controller.accept_single_run`). Evicted copies are still run again by the
+coordinator first. The coordinator refuses such a job if it asks for more than
+one copy per task.
+
 ## Ending jobs
 
 - OCR jobs are completed by `output.py` once every task is verified and the

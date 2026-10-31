@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -329,6 +330,8 @@ def _new_job_page(
             "mem_range": (jobtools.MIN_MEM, jobtools.MAX_MEM),
             "max_mb": settings.max_upload_mb,
             "max_pages": settings.max_pages,
+            "max_input_files": settings.max_input_files,
+            "max_command_chars": settings.max_command_chars,
             "at_limit": at_limit,
         },
         status_code=status,
@@ -420,8 +423,10 @@ async def new_job_submit(
     cpu: Annotated[str | None, Form()] = None,
     mem: Annotated[str | None, Form()] = None,
     file: Annotated[UploadFile | None, File()] = None,
+    command: Annotated[str | None, Form()] = None,
+    inputs: Annotated[list[UploadFile] | None, File()] = None,
 ):
-    form = {"job_type": job_type, "cpu": cpu, "mem": mem}
+    form = {"job_type": job_type, "cpu": cpu, "mem": mem, "command": command}
     try:
         kind = jobtools.parse_job_type(job_type)
         cpu_cores, mem_mib = jobtools.parse_resources(kind, cpu, mem)
@@ -430,6 +435,10 @@ async def new_job_submit(
     token = request.cookies[settings.session_cookie]
     if limit := await _job_limit_reached(token, user):
         return _new_job_page(request, limit, 429, form, at_limit=limit)
+    if kind.runs_command:
+        return await _create_command_job(
+            request, form, kind.name, cpu_cores, mem_mib, command, inputs or []
+        )
     if not kind.needs_pdf:
         return await _create_job_now(request, form, kind.name, cpu_cores, mem_mib)
 
@@ -470,17 +479,95 @@ async def new_job_submit(
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
-async def _create_job_now(
-    request: Request, form: dict, job_type: str, cpu: int, mem: int
+async def _create_command_job(
+    request: Request,
+    form: dict,
+    job_type: str,
+    cpu: int,
+    mem: int,
+    command: str | None,
+    files: list[UploadFile],
 ) -> Response:
-    """Creates a job that needs no upload straight away and opens its page."""
-    job_id = str(uuid4())
+    """
+    Creates a generic job: stores its files under jobs/{id}/inputs/, then asks
+    the coordinator for one task that runs the command (worker/runner). The
+    files are removed again only if the coordinator refused the job.
+    """
+    files = [f for f in files if f.filename]  # browsers send an empty part for none
+    limit = settings.max_upload_mb * MIB
+    try:
+        argv = jobtools.parse_command(command)
+        names = jobtools.input_names([f.filename for f in files])
+        contents, total = [], 0
+        for upload in files:
+            data = await upload.read(limit + 1 - total)
+            total += len(data)
+            if total > limit:
+                raise jobtools.UploadError(
+                    f"The files are over {settings.max_upload_mb} MB in all."
+                )
+            contents.append(data)
+    except jobtools.UploadError as exc:
+        return _new_job_page(request, str(exc), 422, form)
+
+    job_id = uuid4()
+    keys = [storage.input_file_key(job_id, name) for name in names]
+    try:
+        for key, data in zip(keys, contents):
+            await asyncio.to_thread(
+                storage.put_bytes, key, data, "application/octet-stream"
+            )
+    except (BotoCoreError, ClientError):
+        log.exception("saving the files of %s to S3 failed", job_id)
+        await _delete_quietly(keys)
+        return _new_job_page(
+            request, "Couldn't store the files. Please try again.", 503, form
+        )
+    task_input = {"command": argv, "files": [f"inputs/{name}" for name in names]}
+
+    async def remove_files() -> None:
+        await _delete_quietly(keys)
+
+    return await _create_job_now(
+        request, form, job_type, cpu, mem, task_input, job_id, remove_files
+    )
+
+
+async def _delete_quietly(keys: list[str]) -> None:
+    """Best-effort removal of uploaded files that no job will use."""
+    for key in keys:
+        try:
+            await asyncio.to_thread(storage.delete, key)
+        except (BotoCoreError, ClientError) as exc:
+            log.warning("couldn't delete %s: %r", key, exc)
+
+
+async def _create_job_now(
+    request: Request,
+    form: dict,
+    job_type: str,
+    cpu: int,
+    mem: int,
+    task_input: dict | None = None,
+    job_id: UUID | None = None,
+    on_refused: Callable[[], Awaitable[None]] | None = None,
+) -> Response:
+    """
+    Creates a job whose input is ready now (no PDF to render) and opens its page.
+
+    on_refused runs only when the coordinator answered with a 4xx, so the job
+    surely doesn't exist. After a lost reply or a 5xx the job may have been
+    created, so nothing it needs is touched.
+    """
+    job_id = str(job_id or uuid4())
     try:
         await coordinator.create_job(
             request.cookies[settings.session_cookie],
-            jobtools.job_spec(job_id, job_type, cpu, mem),
+            jobtools.job_spec(job_id, job_type, cpu, mem, task_input=task_input),
         )
     except httpx.HTTPStatusError as exc:
+        if on_refused and 400 <= exc.response.status_code < 500:
+            await on_refused()
         if exc.response.status_code == 401:
             raise LoginRequired(NEW_JOB_PATH) from exc
         if exc.response.status_code == 429:
@@ -493,7 +580,8 @@ async def _create_job_now(
         log.warning("creating %s job failed: %r", job_type, exc)
         return _new_job_page(
             request,
-            "The job service is unavailable. Please try again shortly.",
+            "The job service didn't answer. Check your jobs before trying "
+            "again, as the job may have been created.",
             503,
             form,
         )
@@ -981,6 +1069,47 @@ async def job_result(
         media_type="text/plain; charset=utf-8",
         headers={
             "Content-Disposition": f'attachment; filename="result-{str(job_id)[:8]}.txt"'
+        },
+    )
+
+
+@app.get("/jobs/{job_id}/output.tar.gz")
+async def job_output(
+    request: Request, job_id: UUID, user: Annotated[dict, Depends(current_user)]
+):
+    """
+    Downloads what a generic job returned: its output folder and log. A failed
+    run returns one too, so its log can be read.
+    """
+    token = request.cookies[settings.session_cookie]
+    try:
+        job = await coordinator.get_job(token, job_id)  # also checks the owner
+        kind = jobtools.JOB_TYPES.get(job["job_type"])
+        if kind is None or not kind.runs_command:
+            raise HTTPException(404, "This job has no output to download.")
+        replica_id = jobtools.output_replica(job)
+        data = (
+            await asyncio.to_thread(
+                storage.get_bytes, storage.output_archive_key(job_id, replica_id)
+            )
+            if replica_id is not None
+            else None
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(404, "Job not found") from exc
+        raise _unavailable(request, exc) from exc
+    except (httpx.RequestError, BotoCoreError, ClientError) as exc:
+        raise _unavailable(request, exc) from exc
+    if data is None:
+        raise HTTPException(409, "The job hasn't returned any output yet.")
+    return Response(
+        data,
+        media_type="application/gzip",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="output-{str(job_id)[:8]}.tar.gz"'
+            )
         },
     )
 

@@ -12,9 +12,23 @@ from shared.db import JobType, User
 from shared.db.models import Job, JobStatus, Replica, ReplicaStatus, Task, TaskStatus
 
 
-async def ensure_job_type_exists(session: AsyncSession, job_type: str) -> None:
-    if await session.get(JobType, job_type) is None:
-        raise HTTPException(422, f"unknown job_type {job_type!r}")
+async def check_job_type(session: AsyncSession, req: JobSpec) -> None:
+    """
+    Checks the job type exists, and that a type without voting (verify false,
+    such as a user's own program) runs each task once.
+
+    raises:
+        HTTPException: 422 for an unknown type or a second copy that would run
+            the program again.
+    """
+    kind = await session.get(JobType, req.job_type)
+    if kind is None:
+        raise HTTPException(422, f"unknown job_type {req.job_type!r}")
+    if not kind.verify and req.replicas_per_task != 1:
+        raise HTTPException(
+            422,
+            f"job_type {req.job_type!r} runs each task once: replicas_per_task must be 1",
+        )
 
 
 async def create_job(

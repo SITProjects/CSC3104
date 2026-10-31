@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # The Lambda's callback is a few hundred bytes; anything bigger is refused unread
     callback_max_bytes: int = 16 * 1024
     max_filename_chars: int = 200
+    # Generic jobs (worker/runner): the files are limited to max_upload_mb in all
+    max_input_files: int = 10
+    max_command_chars: int = 1000
 
     # Signs the Lambda's /hooks/pages-ready callback. Empty disables the hook.
     hmac_secret: str = ""

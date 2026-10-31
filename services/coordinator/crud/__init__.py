@@ -1,10 +1,10 @@
 from .events import create_event, list_events
 from .jobs import (
     cancel_job,
+    check_job_type,
     count_active_jobs,
     count_jobs_by_status,
     create_job,
-    ensure_job_type_exists,
     get_job,
     list_jobs,
     mark_job_running,
@@ -41,6 +41,7 @@ from .users import (
 __all__ = [
     "add_tasks",
     "cancel_job",
+    "check_job_type",
     "count_active_jobs",
     "count_jobs_by_status",
     "create_event",
@@ -51,7 +52,6 @@ __all__ = [
     "create_user",
     "delete_expired_sessions",
     "delete_session",
-    "ensure_job_type_exists",
     "ensure_node",
     "evict_replica",
     "fail_unplaced",

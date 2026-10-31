@@ -25,6 +25,11 @@
     EVICTED: "bg-amber-100 text-amber-800", LOST: "bg-amber-100 text-amber-800",
   };
   const DESTRUCTIVE = new Set(["FAILED", "DISPUTED", "CANCELLED"]);
+  // Job types with something to download, and when the button shows
+  const DOWNLOADS = {
+    ocr: { file: "result.txt", what: "text", when: ["COMPLETED"] },
+    python: { file: "output.tar.gz", what: "output", when: ["COMPLETED", "FAILED"] },
+  };
 
   function el(tag, className, text) {
     const node = document.createElement(tag);
@@ -134,6 +139,7 @@
   }
 
   function render(job) {
+    const download = DOWNLOADS[job.job_type];
     styleBadge($("status-badge"), job.status);
     renderStages(job);
 
@@ -146,7 +152,7 @@
     if (job.stage === "preparing") text = "Preparing your pages. This usually takes under a minute.";
     else if (job.stage === "failed") text = "This upload could not be processed.";
     else if (job.status === "COMPLETED")
-      text = job.job_type === "ocr" ? "Done. Your text is ready to download." : "Done.";
+      text = download ? `Done. Your ${download.what} is ready to download.` : "Done.";
     else if (job.status === "CANCELLED") text = "This job was cancelled.";
     else if (job.status === "FAILED") text = `${job.progress}% done before the job failed.`;
     else text = `${job.progress}% complete`;
@@ -162,8 +168,14 @@
       $("stat-disputed").textContent = job.tasks_disputed;
       $("task-rows").replaceChildren(...job.tasks.map(renderTask));
     }
-    // only OCR jobs have text to download
-    $("download").hidden = job.status !== "COMPLETED" || job.job_type !== "ocr";
+    // OCR jobs return text. Generic jobs return their output and log, even
+    // when the command failed, so the log can be read.
+    const link = $("download");
+    link.hidden = !download || !download.when.includes(job.status);
+    if (download) {
+      link.href = `/jobs/${jobId}/${download.file}`;
+      link.lastChild.textContent = ` Download ${download.what}`;
+    }
     // Cancel works while preparing too. A failed upload can only be dismissed.
     const dismiss = job.stage === "failed";
     $("cancel-form").hidden = job.terminal && !dismiss;

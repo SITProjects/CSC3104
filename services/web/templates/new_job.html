@@ -5,7 +5,7 @@
 {% set chosen = job_types|selectattr("name", "equalto", form.job_type)|first %}
 <header class="mb-6">
   <h1 class="text-2xl font-semibold tracking-tight">New job</h1>
-  <p class="mt-2 text-muted-foreground">Pick what to run. The work is split into small tasks, and each task is run on three idle lab PCs whose results must agree before we trust them.</p>
+  <p class="mt-2 text-muted-foreground">Pick what to run. It runs on idle lab PCs, and moves to another PC if a PC's owner comes back. OCR results are spot-checked on a second PC.</p>
 </header>
 
 <div class="mb-4">{{ error_alert(error, "form-error") }}</div>
@@ -27,6 +27,7 @@
         {% for t in job_types %}
         <option value="{{ t.name }}" data-needs-pdf="{{ 'true' if t.needs_pdf else 'false' }}"
                 data-custom-resources="{{ 'true' if t.custom_resources else 'false' }}"
+                data-runs-command="{{ 'true' if t.runs_command else 'false' }}"
                 data-description="{{ t.description }}" data-cpu="{{ t.default_cpu }}" data-mem="{{ t.default_mem }}"
                 {% if chosen and chosen.name == t.name %}selected{% endif %}>{{ t.label }}</option>
         {% endfor %}
@@ -43,6 +44,24 @@
         <input id="file" class="absolute inset-0 size-full cursor-pointer opacity-0" type="file" name="file" accept="application/pdf,.pdf"
                {% if chosen and chosen.needs_pdf %}required{% else %}disabled{% endif %}>
       </label>
+    </div>
+
+    {# Generic job types: the user's own command and files (worker/runner). #}
+    {% set runs = chosen and chosen.runs_command %}
+    <div id="command-section" class="grid gap-6" {% if not runs %}hidden{% endif %}>
+      <div role="group" class="field">
+        <label class="label" for="command">Command</label>
+        <input class="input font-mono" id="command" type="text" name="command" maxlength="{{ max_command_chars }}"
+               value="{{ form.command or '' }}" placeholder="python train.py --epochs 5" aria-describedby="command-hint"
+               {% if runs %}required{% else %}disabled{% endif %}>
+        <p id="command-hint">Runs in a folder with your files, as it would in a terminal. Anything saved in <code>$OUTPUT_DIR</code> comes back in the download, with the log.</p>
+      </div>
+      <div role="group" class="field">
+        <label class="label" for="inputs">Files <span class="font-normal text-muted-foreground">(optional)</span></label>
+        <input class="input" id="inputs" type="file" name="inputs" multiple aria-describedby="inputs-hint"
+               {% if not runs %}disabled{% endif %}>
+        <p id="inputs-hint">Your script and its data: up to {{ max_input_files }} files and {{ max_mb }} MB in all.</p>
+      </div>
     </div>
 
     {# Only for job types that let users choose; the others always use their defaults. #}

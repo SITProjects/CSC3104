@@ -32,6 +32,7 @@ from services.coordinator.capacity import current_free_slots
 from services.coordinator.crud import (
     add_tasks,
     cancel_job,
+    check_job_type,
     count_active_jobs,
     count_jobs_by_status,
     create_event,
@@ -41,7 +42,6 @@ from services.coordinator.crud import (
     create_tasks,
     create_user,
     delete_session,
-    ensure_job_type_exists,
     evict_replica,
     get_job,
     get_replica_with_task,
@@ -214,7 +214,7 @@ async def submit_job(
         CreateJobResponse: The job id, task ids and number of replicas made.
     raises:
         HTTPException: 409 if a job with req.job_id exists, 422 if the job type
-            doesn't exist, 429 if the owner already has MAX_ACTIVE_JOBS_PER_USER
+            doesn't exist or runs once and more copies were asked for, 429 if the owner already has MAX_ACTIVE_JOBS_PER_USER
             unfinished jobs.
     """
     async with session.begin():
@@ -228,7 +228,7 @@ async def submit_job(
                 f"you already have {active} unfinished jobs; "
                 f"the limit is {MAX_ACTIVE_JOBS_PER_USER}",
             )
-        await ensure_job_type_exists(session, req.job_type)
+        await check_job_type(session, req)
         job = await create_job(session, req, owner_id)
         tasks = await create_tasks(session, job, req)
         task_ids = [task.id for task in tasks]
@@ -269,6 +269,7 @@ async def get_replica_manifest(
             for f in task.input.get("files", [])
         },
         output_upload_url=presign("put_object", f"{prefix}/result.json", ttl),
+        output_archive_url=presign("put_object", f"{prefix}/output.tar.gz", ttl),
         checkpoint_get_url=presign("get_object", f"{prefix}/checkpoint.json", ttl)
         if replica.attempt > 1
         else None,
