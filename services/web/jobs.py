@@ -43,10 +43,12 @@ class JobType:
     # mirrors job_types.verify: whether copies are compared. Without it a task
     # runs once, whatever REPLICAS_PER_TASK says.
     voting: bool = True
+    # the command placeholder for generic types
+    example: str = ""
 
 
-# Mirrors the job types seeded in shared/migrations (002, 003 and 010). The coordinator
-# has no endpoint to list them, and it refuses a job_type it doesn't know.
+# Mirrors the job types seeded in shared/migrations (002, 003, 010 and 012).
+# The coordinator has no endpoint to list them, and it refuses an unknown job_type.
 JOB_TYPES = {
     t.name: t
     for t in (
@@ -85,6 +87,20 @@ JOB_TYPES = {
             custom_resources=True,
             runs_command=True,
             voting=False,
+            example="python train.py --epochs 5",
+        ),
+        JobType(
+            "pytorch",
+            "Python with PyTorch (CPU)",
+            "Runs your own Python script with PyTorch, numpy, pandas and scikit-learn "
+            "once on an idle PC. Save files in the output folder to download them.",
+            needs_pdf=False,
+            default_cpu=2,
+            default_mem=2048,
+            custom_resources=True,
+            runs_command=True,
+            voting=False,
+            example="python train_digits.py --epochs 30",
         ),
     )
 }

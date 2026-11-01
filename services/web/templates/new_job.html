@@ -28,6 +28,7 @@
         <option value="{{ t.name }}" data-needs-pdf="{{ 'true' if t.needs_pdf else 'false' }}"
                 data-custom-resources="{{ 'true' if t.custom_resources else 'false' }}"
                 data-runs-command="{{ 'true' if t.runs_command else 'false' }}"
+                data-example="{{ t.example }}"
                 data-description="{{ t.description }}" data-cpu="{{ t.default_cpu }}" data-mem="{{ t.default_mem }}"
                 {% if chosen and chosen.name == t.name %}selected{% endif %}>{{ t.label }}</option>
         {% endfor %}
@@ -52,9 +53,9 @@
       <div role="group" class="field">
         <label class="label" for="command">Command</label>
         <input class="input font-mono" id="command" type="text" name="command" maxlength="{{ max_command_chars }}"
-               value="{{ form.command or '' }}" placeholder="python train.py --epochs 5" aria-describedby="command-hint"
+               value="{{ form.command or '' }}" placeholder="{{ chosen.example if chosen and chosen.example else "python train.py --epochs 5" }}" aria-describedby="command-hint"
                {% if runs %}required{% else %}disabled{% endif %}>
-        <p id="command-hint">Runs in a folder with your files, as it would in a terminal. Anything saved in <code>$OUTPUT_DIR</code> comes back in the download, with the log. Save progress in <code>$CHECKPOINT_DIR</code> to carry on if the job moves to another PC.</p>
+        <p id="command-hint">Runs without a shell in a folder with your files. Save results in <code>output/</code> (<code>$OUTPUT_DIR</code> in scripts) and they come back in the download, with the log. Programs that save progress in <code>$CHECKPOINT_DIR</code> carry on if the job moves to another PC.</p>
       </div>
       <div role="group" class="field">
         <label class="label" for="inputs">Files <span class="font-normal text-muted-foreground">(optional)</span></label>

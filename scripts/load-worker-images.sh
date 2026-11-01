@@ -23,17 +23,20 @@ image_in() {
 
 ocr=$(image_in shared/migrations/003_seed_ocr_job_type.sql "idlecloud/ocr:")
 python=$(image_in shared/migrations/010_python_job_type.sql "ghcr.io/sitprojects/idlecloud-python:")
+pytorch=$(image_in shared/migrations/012_pytorch_job_type.sql "ghcr.io/sitprojects/idlecloud-pytorch:")
 
 echo "== Building $ocr"
 docker build -f worker/ocr-task/Dockerfile -t "$ocr" .
 echo "== Building $python"
 docker build -f worker/python-job/Dockerfile -t "$python" .
+echo "== Building $pytorch"
+docker build -f worker/pytorch-job/Dockerfile -t "$pytorch" .
 
 workers=$(docker compose ps --services --status running | grep '^k3-worker-' || true)
 [ -n "$workers" ] || { echo "no k3-worker containers are running; start the stack first" >&2; exit 1; }
 
 for worker in $workers; do
-	for image in "$ocr" "$python"; do
+	for image in "$ocr" "$python" "$pytorch"; do
 		echo "== Loading $image into $worker"
 		docker save "$image" | docker compose exec -T "$worker" ctr images import -
 	done

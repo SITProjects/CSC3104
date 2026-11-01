@@ -4,8 +4,8 @@ Owner: member 6.
 
 `runner.py` runs a user's own command for a generic job type and reports back
 like any worker. Each approved image copies it in and uses it as the entrypoint
-(see `worker/python-job`). It uses only the Python standard library, so any
-image with Python 3.12 or newer can include it.
+(see `worker/python-job` and `worker/pytorch-job`). It uses only the Python
+standard library, so any image with Python 3.12 or newer can include it.
 
 ## What it does
 
