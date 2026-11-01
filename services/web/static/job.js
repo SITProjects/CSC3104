@@ -29,6 +29,7 @@
   const DOWNLOADS = {
     ocr: { file: "result.txt", what: "text", when: ["COMPLETED"] },
     python: { file: "output.tar.gz", what: "output", when: ["COMPLETED", "FAILED"] },
+    pytorch: { file: "output.tar.gz", what: "output", when: ["COMPLETED", "FAILED"] },
   };
 
   function el(tag, className, text) {

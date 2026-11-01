@@ -11,6 +11,8 @@ on:
       - worker/runner/runner.py
       - worker/python-job/Dockerfile
       - worker/python-job/requirements.txt
+      - worker/pytorch-job/Dockerfile
+      - worker/pytorch-job/requirements.txt
       - shared/__init__.py
       - shared/checkpoint.py
       - shared/normalized_text.py
@@ -24,6 +26,8 @@ on:
       - worker/runner/runner.py
       - worker/python-job/Dockerfile
       - worker/python-job/requirements.txt
+      - worker/pytorch-job/Dockerfile
+      - worker/pytorch-job/requirements.txt
       - shared/__init__.py
       - shared/checkpoint.py
       - shared/normalized_text.py
@@ -50,6 +54,8 @@ jobs:
             dockerfile: worker/ocr-task/Dockerfile
           - name: python
             dockerfile: worker/python-job/Dockerfile
+          - name: pytorch
+            dockerfile: worker/pytorch-job/Dockerfile
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -80,6 +86,8 @@ jobs:
             dockerfile: worker/ocr-task/Dockerfile
           - name: python
             dockerfile: worker/python-job/Dockerfile
+          - name: pytorch
+            dockerfile: worker/pytorch-job/Dockerfile
     permissions:
       contents: read
       packages: write

@@ -35,6 +35,7 @@
   function showFieldsFor() {
     const type = chosen();
     if (type.description) typeHint.textContent = type.description;
+    if (type.example) $("command").placeholder = type.example;
     pdfSection.hidden = type.needsPdf !== "true";
     input.disabled = pdfSection.hidden;
     input.required = !pdfSection.hidden;

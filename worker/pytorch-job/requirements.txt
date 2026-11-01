@@ -1,0 +1,7 @@
+# Keep shared pins in step with worker/python-job/requirements.txt.
+# +cpu stops pip choosing the much larger CUDA build.
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy==2.3.5
+pandas==2.3.3
+scikit-learn==1.7.2
+torch==2.15.0+cpu
