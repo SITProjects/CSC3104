@@ -1,5 +1,7 @@
 """Deploy the page pipeline: build the image, push it to ECR, create or update
 both Lambdas, and make uploads of jobs/{job_id}/input.pdf start the splitter.
+Also set seven-day S3 expiry for jobs/ and pending-index/ and one-day cleanup
+of incomplete multipart uploads, keeping other lifecycle rules.
 
 Run from the repo root, with Docker running. Point the callback at the web
 app's public HTTPS address, such as its CloudFront domain:
@@ -46,6 +48,10 @@ REPO_NAME = "idlecloud-serverless"
 SPLIT_FN = "idlecloud-split"
 RENDER_FN = "idlecloud-render"
 TRIGGER_ID = "idlecloud-split-on-upload"
+EXPIRY_RULE_PREFIX = "idlecloud-expire-"
+EXPIRING_PREFIXES = ("jobs/", "pending-index/")
+# A backstop for leftover files, measured from upload, not job completion.
+LEFTOVER_DAYS = 7
 OWN_ROLE = "idlecloud-lambda-role"
 # Lambda settings this script writes only when --web-url is given
 CALLBACK_KEYS = ("WEBHOOK_URL", "HMAC_SECRET", "ALLOW_NO_WEBHOOK")
@@ -298,6 +304,51 @@ def connect_trigger(lam, s3, bucket: str, account: str, split_arn: str) -> None:
     print(f"Uploads to s3://{bucket}/jobs/<job_id>/input.pdf now start {SPLIT_FN}")
 
 
+def with_expiry_rules(rules: list[dict]) -> list[dict]:
+    """The bucket's lifecycle rules with our expiry rules added or replaced.
+    put_bucket_lifecycle_configuration replaces every rule, so other rules
+    are kept as they were."""
+    others = [
+        rule for rule in rules if not rule.get("ID", "").startswith(EXPIRY_RULE_PREFIX)
+    ]
+    return others + [
+        {
+            "ID": EXPIRY_RULE_PREFIX + prefix.rstrip("/"),
+            "Status": "Enabled",
+            "Filter": {"Prefix": prefix},
+            "Expiration": {"Days": LEFTOVER_DAYS},
+            "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1},
+        }
+        for prefix in EXPIRING_PREFIXES
+    ]
+
+
+def expire_leftover_files(s3, bucket: str) -> None:
+    try:
+        try:
+            rules = s3.get_bucket_lifecycle_configuration(Bucket=bucket)["Rules"]
+        except ClientError as error:
+            if error.response["Error"]["Code"] != "NoSuchLifecycleConfiguration":
+                raise
+            rules = []
+        s3.put_bucket_lifecycle_configuration(
+            Bucket=bucket,
+            LifecycleConfiguration={"Rules": with_expiry_rules(rules)},
+        )
+    except ClientError as error:
+        if error.response["Error"]["Code"] != "AccessDenied":
+            raise
+        print(
+            "WARNING: S3 lifecycle rules were not set (AccessDenied). "
+            "Member 1 can add them in the S3 console."
+        )
+        return
+    print(
+        f"Objects under jobs/ and pending-index/ now expire after {LEFTOVER_DAYS} "
+        "days. Incomplete multipart uploads are aborted after 1 day."
+    )
+
+
 def cluster_secret() -> str:
     """The web app's callback secret, read from the cluster with kubectl."""
     namespace, name, key = WEB_SECRET
@@ -398,6 +449,7 @@ def main() -> None:
         lam, SPLIT_FN, image_uri, role, {**env, "RENDER_FUNCTION_NAME": RENDER_FN}
     )
     connect_trigger(lam, s3, args.bucket, account, split_arn)
+    expire_leftover_files(s3, args.bucket)
     print(f"Done. Image {image_uri}")
 
 

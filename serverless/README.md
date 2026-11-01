@@ -109,6 +109,12 @@ Before deploying, the script checks that the web app answers on `/healthz`.
   reach Lambda, so creating a function is retried for about a minute.
 - **Trigger**: uploads matching `jobs/*/input.pdf` start `idlecloud-split`. The
   bucket's other notification settings are kept.
+- **File cleanup**: objects under `jobs/` and `pending-index/` expire 7 days
+  after upload, even if their job is still queued or running. S3 removes them
+  in the background, so deletion may take longer. Incomplete multipart uploads
+  are aborted after 1 day. Other lifecycle rules are kept. If access is denied,
+  the script warns and carries on, and member 1 can add the rules in the S3
+  console.
 - **Callbacks**: without `--web-url`, each function keeps the callback
   settings it already has. A new function only logs what it would send
   (`ALLOW_NO_WEBHOOK=1`) until a run sets the URL and secret. Lambda replaces
