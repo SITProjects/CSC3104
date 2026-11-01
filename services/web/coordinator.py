@@ -96,6 +96,9 @@ class CoordinatorClient:
     async def cancel_job(self, token: str, job_id: UUID) -> None:
         await self._send("POST", f"/jobs/{job_id}/cancel", token)
 
+    async def delete_files(self, token: str, job_id: UUID) -> None:
+        await self._send("POST", f"/jobs/{job_id}/delete-files", token)
+
     async def admin_nodes(self, token: str) -> list:
         return await self._send("GET", "/admin/nodes", token)
 

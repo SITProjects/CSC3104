@@ -435,6 +435,7 @@ def progress_view(job: dict[str, Any]) -> dict[str, Any]:
         "id": str(job["id"]),
         "job_type": job["job_type"],
         "status": job["status"],
+        "files_deleted_at": job.get("files_deleted_at"),
         "terminal": job["status"] in TERMINAL_STATUSES,
         "progress": progress,
         "tasks_total": total,

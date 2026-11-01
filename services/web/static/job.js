@@ -181,11 +181,24 @@
     $("cancel-form").hidden = job.terminal && !dismiss;
     $("cancel-button").textContent = dismiss ? "Dismiss" : "Cancel job";
     $("cancel-button").dataset.mode = dismiss ? "dismiss" : "cancel";
+    const gone = Boolean(job.files_deleted_at);
+    $("delete-files-form").hidden = !job.terminal || dismiss || gone;
+    if (gone) {
+      link.hidden = true;
+      $("overall-text").textContent = (job.status === "COMPLETED" ? "Done." : text)
+        + " Its files have been deleted.";
+    }
   }
 
   $("cancel-form").addEventListener("submit", (e) => {
     const asking = $("cancel-button").dataset.mode === "cancel";
     if (asking && !confirm("Cancel this job? Work already done is discarded.")) {
+      e.preventDefault();
+    }
+  });
+
+  $("delete-files-form").addEventListener("submit", (e) => {
+    if (!confirm("Delete this job's files? You can't download them afterwards.")) {
       e.preventDefault();
     }
   });
