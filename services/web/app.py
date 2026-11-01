@@ -41,6 +41,7 @@ from services.web.settings import settings
 BASE_DIR = Path(__file__).parent
 log = logging.getLogger("uvicorn.error")
 BURST_PAGE_SIZE = 20  # burst workers per page on the admin dashboard
+FILES_GONE = "This job's files have been deleted or have expired."
 
 # Main navigation. "admin": True items are shown to admins only, "admin": False
 # items to everyone but admins, and the rest to everyone (the pages check the
@@ -1014,6 +1015,25 @@ async def job_cancel(
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
+@app.post("/jobs/{job_id}/delete-files")
+async def job_delete_files(
+    request: Request, job_id: UUID, user: Annotated[dict, Depends(current_user)]
+):
+    """Deletes a finished job's files. The coordinator checks the owner and status."""
+    token = request.cookies[settings.session_cookie]
+    try:
+        await coordinator.delete_files(token, job_id)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(404, "Job not found") from exc
+        if exc.response.status_code == 409:
+            raise HTTPException(409, exc.response.json()["detail"]) from exc
+        raise _unavailable(request, exc) from exc
+    except httpx.RequestError as exc:
+        raise _unavailable(request, exc) from exc
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
 async def _forget_pending(job_id: UUID, user: dict) -> None:
     """Deletes the upload record of one of the user's jobs, if it still has one."""
     try:
@@ -1043,6 +1063,8 @@ async def job_result(
     token = request.cookies[settings.session_cookie]
     try:
         job = await coordinator.get_job(token, job_id)
+        if job.get("files_deleted_at"):
+            raise HTTPException(404, FILES_GONE)
         text = await asyncio.to_thread(storage.get_bytes, storage.result_key(job_id))
         if text is None:
             if job["status"] != "COMPLETED":
@@ -1084,6 +1106,8 @@ async def job_output(
     token = request.cookies[settings.session_cookie]
     try:
         job = await coordinator.get_job(token, job_id)  # also checks the owner
+        if job.get("files_deleted_at"):
+            raise HTTPException(404, FILES_GONE)
         kind = jobtools.JOB_TYPES.get(job["job_type"])
         if kind is None or not kind.runs_command:
             raise HTTPException(404, "This job has no output to download.")
@@ -1102,6 +1126,8 @@ async def job_output(
     except (httpx.RequestError, BotoCoreError, ClientError) as exc:
         raise _unavailable(request, exc) from exc
     if data is None:
+        if job["status"] in ("COMPLETED", "FAILED"):
+            raise HTTPException(404, FILES_GONE)
         raise HTTPException(409, "The job hasn't returned any output yet.")
     return Response(
         data,

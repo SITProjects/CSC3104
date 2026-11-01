@@ -4,9 +4,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from kubernetes.client import BatchV1Api, CoreV1Api, V1Job, V1Node, V1Pod
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from core.settings import HOUSEKEEPING_INTERVAL, PLACEMENT_TIMEOUT
+from core.settings import FILE_RETENTION_HOURS, HOUSEKEEPING_INTERVAL, PLACEMENT_TIMEOUT
 from services.coordinator.capacity import WORKER_SELECTOR, usable
 from services.coordinator.crud import (
     create_event,
@@ -17,6 +18,7 @@ from services.coordinator.crud import (
     mark_offline,
     set_voting,
 )
+from services.coordinator.crud.jobs import delete_job_files
 from services.coordinator.crud.users import delete_expired_sessions
 from services.coordinator.k8s import (
     cancel_k3_job,
@@ -24,7 +26,7 @@ from services.coordinator.k8s import (
     list_replica_jobs,
     list_replica_pods,
 )
-from shared.db.models import Task
+from shared.db.models import Job, Task
 
 log = logging.getLogger("coordinator.housekeeping")
 LAUNCH_GRACE = timedelta(minutes=2)
@@ -167,11 +169,46 @@ async def fail_unplaceable(
         await cancel_k3_job(stuck.job_name, batch_api)
 
 
+async def delete_expired_job_files(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Remove up to 20 finished jobs' files, retrying each failed job next pass."""
+    async with session_factory() as session:
+        job_ids = (
+            await session.scalars(
+                select(Job.id)
+                .where(
+                    Job.finished_at.is_not(None),
+                    Job.files_deleted_at.is_(None),
+                    Job.finished_at
+                    < func.now() - timedelta(hours=FILE_RETENTION_HOURS),
+                )
+                .order_by(Job.finished_at)
+                .limit(20)
+            )
+        ).all()
+    cleaned = 0
+    for job_id in job_ids:
+        try:
+            async with session_factory() as session:
+                await delete_job_files(session, job_id)
+        except Exception:
+            log.exception("Could not delete files for job %s", job_id)
+        else:
+            cleaned += 1
+    if cleaned:
+        log.info("Deleted files for %s finished jobs", cleaned)
+
+
 async def housekeeping_pass(
     session_factory: async_sessionmaker[AsyncSession],
     batch_api: BatchV1Api,
     core_api: CoreV1Api,
 ) -> None:
+    try:
+        await delete_expired_job_files(session_factory)
+    except Exception:
+        log.exception("Could not clean up expired job files")
     now = datetime.now(UTC)
     async with session_factory.begin() as session:
         await mark_offline(session, now - HEARTBEAT_GRACE)

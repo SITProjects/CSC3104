@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import UTC, datetime
 
@@ -7,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from services.coordinator import storage
 from services.coordinator.models import JobSpec
 from shared.db import JobType, User
 from shared.db.models import Job, JobStatus, Replica, ReplicaStatus, Task, TaskStatus
@@ -60,6 +62,17 @@ async def mark_job_running(session: AsyncSession, job_id: uuid.UUID) -> None:
         .values(status=JobStatus.RUNNING)
     )
     await session.execute(stmt)
+
+
+async def delete_job_files(session: AsyncSession, job_id: uuid.UUID) -> None:
+    """Remove S3 files before recording success, so failed writes can be retried."""
+    await asyncio.to_thread(storage.delete_prefix, f"jobs/{job_id}/")
+    await session.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.files_deleted_at.is_(None))
+        .values(files_deleted_at=func.now())
+    )
+    await session.commit()
 
 
 async def get_job(

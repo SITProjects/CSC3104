@@ -15,6 +15,9 @@
       <form id="cancel-form" method="post" action="/jobs/{{ job_id }}/cancel" hidden>
         <button type="submit" id="cancel-button" class="btn" data-variant="destructive" data-mode="cancel">Cancel job</button>
       </form>
+      <form id="delete-files-form" method="post" action="/jobs/{{ job_id }}/delete-files" hidden>
+        <button type="submit" class="btn" data-variant="destructive">Delete job files</button>
+      </form>
     </div>
   </div>
 
@@ -28,7 +31,7 @@
     ("queue", "Queued", "Waiting for idle lab PCs to pick up the tasks."),
     ("run", "Running", "Each task runs on an idle PC. It moves if the PC's owner returns."),
     ("check", "Checking results", "Results from new PCs, and a random share of the rest, are checked on a second PC. Python scripts run once."),
-    ("done", "Completed", "The result is ready."),
+    ("done", "Completed", "The result is ready. Its files are deleted a day after the job finishes."),
   ] %}
   <section class="card" aria-labelledby="stages-heading">
     <section>

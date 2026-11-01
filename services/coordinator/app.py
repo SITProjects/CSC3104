@@ -55,6 +55,7 @@ from services.coordinator.crud import (
     set_voting,
     update_node_state,
 )
+from services.coordinator.crud.jobs import delete_job_files
 from services.coordinator.k8s import cancel_k3_job, review_token
 from services.coordinator.loops import (
     LeaderLoop,
@@ -672,6 +673,22 @@ async def cancel_my_job(
         cancelled_replicas = await cancel_job(session, id)
     await delete_k3_jobs(cancelled_replicas, k3_api)
     return Ack()
+
+
+@app.post("/jobs/{id}/delete-files", status_code=204)
+async def delete_my_job_files(
+    id: UUID, user: CurrentUser, session: DbSession
+) -> Response:
+    """Delete a finished job's files for its owner or an administrator."""
+    async with session:
+        job = await session.get(Job, id, with_for_update=True)
+        if job is None or owner_filter(user) not in (None, job.owner_id):
+            raise HTTPException(404, f"job {id} not found")
+        if job.finished_at is None:
+            raise HTTPException(409, "Only a finished job's files can be deleted.")
+        if job.files_deleted_at is None:
+            await delete_job_files(session, id)
+    return Response(status_code=204)
 
 
 def owner_filter(user: User) -> UUID | None:

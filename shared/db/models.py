@@ -388,6 +388,11 @@ class Job(Base):
         nullable=True,
     )
 
+    files_deleted_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+
     job_type_obj: Mapped["JobType"] = relationship(
         back_populates="jobs",
     )
@@ -410,6 +415,13 @@ class Job(Base):
         CheckConstraint(
             "replicas_per_task BETWEEN 1 AND 5",
             name="jobs_replicas_per_task_check",
+        ),
+        Index(
+            "jobs_files_to_delete_idx",
+            "finished_at",
+            postgresql_where=text(
+                "finished_at IS NOT NULL AND files_deleted_at IS NULL"
+            ),
         ),
     )
 
@@ -774,6 +786,7 @@ class JobView(BaseModel):
     job_type: str
     status: JobStatus
     progress: int = 0  # 0-100, average over tasks
+    files_deleted_at: datetime | None = None
     # All the tasks the job will have; tasks can be fewer while more are added
     task_count: int
     tasks: list[TaskView]
