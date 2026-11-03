@@ -141,10 +141,15 @@ python -m serverless.deploy --bucket csc3104-idle-compute --web-url https://<web
 
 ### Adding workers
 
-- **Campus PCs (Windows):** create a WireGuard peer on the hub with
-  `sudo bash infra/wireguard/add-peer.sh worker <name>`, then run
-  `agent/install-worker.ps1` on the PC. See
-  [`agent/README.md`](agent/README.md#set-up-a-worker).
+- **Campus PCs (Windows):** sign in as an admin and open **Campus workers**
+  (`/admin/workers`). Add the PC by name, download its setup zip and run
+  `agent/install-worker.ps1 -Bundle <zip>` on the PC. Once the page shows it as
+  joined, download its agent credentials and run the installer again with
+  `-AgentCredentials <zip>`. No shell on the hub is needed. See
+  [`agent/README.md`](agent/README.md#set-up-a-worker) and
+  [`services/web/README.md`](services/web/README.md#campus-workers-admin).
+- **Laptops** (VPN access only) use
+  `sudo bash infra/wireguard/add-peer.sh laptop <name>` on the hub.
 - **Burst EC2 workers** are launched and ended by the autoscaler. See
   [`services/autoscaler/README.md`](services/autoscaler/README.md).
 

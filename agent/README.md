@@ -21,8 +21,9 @@ in [`eval/eviction/`](../eval/eviction/README.md).
 - Ubuntu 24.04 in WSL2: `wsl --install -d Ubuntu-24.04`, then open it once and
   create the user.
 - This PC's setup files, either:
-  - a setup zip from the admin pages, which holds the node name, `wg0.conf`,
-    the join token and the node agent's kubeconfig; or
+  - a setup zip from the admin pages (**Campus workers**, `/admin/workers`:
+    add the PC, then **Download setup zip**), which holds the node name,
+    `wg0.conf`, the join token and the node agent's kubeconfig; or
   - `wg0.conf` and `agent-token` from `/etc/wireguard/peers/<name>/` on the hub,
     after `sudo bash infra/wireguard/add-peer.sh worker <name>`.
 
@@ -90,8 +91,9 @@ The node joins with the `idlecloud/owner-active` taint, so it gets no tasks
 until the node agent runs and sees the PC is idle. The agent needs its own
 Kubernetes identity, and a heartbeat token for the coordinator.
 
-With a setup zip, the identity is already installed. Once the admin pages show
-the PC as joined, download its agent credentials and run the installer again:
+With a setup zip, the identity is already installed. Once the PC's page under
+**Campus workers** shows it as joined, use **Download agent credentials** there
+and run the installer again:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\agent\install-worker.ps1 `
