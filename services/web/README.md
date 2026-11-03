@@ -5,8 +5,9 @@ Owner: member 5.
 Provide the New job page (`/jobs/new`: pick a job type, upload a PDF for OCR or
 a command and files for a Python script, and choose CPU and memory where the job
 type allows it), the public job API, page-ready callbacks, live progress,
-result downloads, and the admin dashboard. Calculate workload resource
-requests and pass jobs to the coordinator.
+result downloads, and the admin dashboard, including the Campus workers pages
+that add lab PCs to the cluster. Calculate workload resource requests and pass
+jobs to the coordinator.
 
 Jinja2 templates are in `templates/`, plain JavaScript in `static/`. The OCR
 workload lives separately in `worker/ocr-task/`.
@@ -109,6 +110,43 @@ front of it: the session cookie is Secure, and the Lambda only calls `https://` 
 ```sh
 uv run pytest services/web
 ```
+
+## Campus workers (admin)
+
+`/admin/workers` lets an admin lend a lab PC to the cluster without a shell on
+the hub. The coordinator's `/admin/workers` API does the work through the
+enrollment helper on the hub (see `services/coordinator/README.md`, section
+"Campus workers"); this app only shows it and passes downloads through.
+
+1. **Add a worker:** enter its node name (lowercase letters, digits and dashes;
+   it is lowercased and trimmed for you). The app opens the worker's page.
+2. **Download setup zip** and run the installer on the PC with
+   `install-worker.ps1 -Bundle <zip>` (the page shows the exact command). The
+   zip holds the PC's VPN key and a join token valid for 24 hours. If it
+   expires before the PC joins, **Request a new join token** and download the
+   zip again.
+3. Within a minute of the installer finishing, the page shows the PC as joined.
+   **Download agent credentials** (it issues the heartbeat token the first
+   time) and run the installer again with `-AgentCredentials <zip>`. Until
+   then the coordinator gets no heartbeats from the PC, so it runs no tasks.
+4. The heartbeat token lasts a year. From 30 days before it runs out, the page
+   warns and offers **Issue a new heartbeat token**; then download and install
+   the agent credentials again.
+5. **Remove worker** (it asks first) moves the PC's tasks elsewhere and takes
+   it out of the cluster and the VPN.
+
+The list shows each worker's status (waiting to join, idle, busy, offline) and
+its next step. Every change and download appears in the event log with the
+admin's email.
+
+- Zips are passed through with `Cache-Control: no-store`. Laptops and burst
+  slots never appear here; `infra/wireguard/add-peer.sh` still handles those.
+- Messages after an action come from a fixed list (`?done=...`), so nothing in
+  the URL reaches the page. Errors from the hub's helper, such as "alice
+  already exists as a laptop.", are shown as they are; a failed command shows a
+  fixed hint to check `journalctl -u idlecloud-enroll` instead of its text.
+- `static/confirm.js` asks before any form with a `data-confirm` question is
+  sent. Without it the forms still work, unasked.
 
 ## Burst workers and cost (member 6)
 
