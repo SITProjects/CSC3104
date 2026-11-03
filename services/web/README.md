@@ -135,9 +135,14 @@ enrollment helper on the hub (see `services/coordinator/README.md`, section
 5. **Remove worker** (it asks first) moves the PC's tasks elsewhere and takes
    it out of the cluster and the VPN.
 
-The list shows each worker's status (waiting to join, idle, busy, offline) and
-its next step. Every change and download appears in the event log with the
-admin's email.
+The list shows each worker's status (waiting to join, idle, busy, offline), with
+what needs doing under it, and buttons for its download (**Setup zip** before
+joining, **Agent credentials** after) and **Refresh token** (a new join token,
+or once it has one, a new heartbeat token; it asks first and comes back to the
+list). Filter it by name or VPN address and by status, including **Needs
+attention**: an expired join token, missing agent credentials, a heartbeat
+token running out, or a state the cluster couldn't report. Every change and
+download appears in the event log with the admin's email.
 
 - Zips are passed through with `Cache-Control: no-store`. Laptops and burst
   slots never appear here; `infra/wireguard/add-peer.sh` still handles those.
