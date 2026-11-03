@@ -1,0 +1,106 @@
+name: Build Windows sensor
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/build-sensor.yml
+      - agent/windows-sensor/**
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/build-sensor.yml
+      - agent/windows-sensor/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-sensor-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  RELEASE_TAG: sensor-latest
+
+jobs:
+  # PR code gets a build check with no write access.
+  build-check:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build the .exe
+        working-directory: agent/windows-sensor
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          # The same command as "Build the .exe" in agent/windows-sensor/README.md
+          pyinstaller --onefile --noconsole --hidden-import pystray._win32 --name idlecloud-sensor sensor.py
+          if (-not (Test-Path dist/idlecloud-sensor.exe)) { throw 'No .exe was built.' }
+
+  publish:
+    # Manual runs from other branches must not replace the published .exe.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build the .exe
+        working-directory: agent/windows-sensor
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          pyinstaller --onefile --noconsole --hidden-import pystray._win32 --name idlecloud-sensor sensor.py
+          $hash = (Get-FileHash dist/idlecloud-sensor.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  idlecloud-sensor.exe" | Out-File -Encoding ascii dist/idlecloud-sensor.exe.sha256
+
+      - name: Save the .exe
+        uses: actions/upload-artifact@v7
+        with:
+          name: idlecloud-sensor-${{ github.sha }}
+          path: |
+            agent/windows-sensor/dist/idlecloud-sensor.exe
+            agent/windows-sensor/dist/idlecloud-sensor.exe.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish to the sensor-latest release
+        working-directory: agent/windows-sensor/dist
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          # Recreated each time, so its tag points at the commit that was built.
+          # The download link stays the same.
+          gh release delete $env:RELEASE_TAG --repo $env:REPO --cleanup-tag --yes 2>$null
+          gh release create $env:RELEASE_TAG --repo $env:REPO --target $env:SHA `
+            --title 'Windows sensor (latest)' --prerelease `
+            --notes "idlecloud-sensor.exe built from $env:SHA. install-worker.ps1 installs it on lab PCs; see agent/windows-sensor/README.md." `
+            idlecloud-sensor.exe idlecloud-sensor.exe.sha256
+          if ($LASTEXITCODE -ne 0) { throw 'Publishing the release failed.' }
+          "### Windows sensor`n`nPublished ``idlecloud-sensor.exe`` from $env:SHA to the $env:RELEASE_TAG release." |
+            Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY

@@ -107,8 +107,10 @@ A failed change is retried every 2 seconds, and the taint is re-checked every
 kept.
 
 The agent needs its own Kubernetes identity. The K3s join token is not enough,
-and K3s does not let a node change its own taints. Once the worker shows in
-`kubectl get nodes`, run this from a machine with admin kubectl:
+and K3s does not let a node change its own taints. Workers added from the admin
+pages get it in their setup zip (made by the enrollment helper, `infra/enroll`).
+Otherwise, once the worker shows in `kubectl get nodes`, run this from a
+machine with admin kubectl:
 
 ```bash
 agent/node-agent/make-kubeconfig.sh <node-name>

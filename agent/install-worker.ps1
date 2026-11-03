@@ -11,26 +11,44 @@ Turns this Windows PC into an IdleCloud worker in one step.
 4. Runs infra/join-worker.sh inside Ubuntu to join the cluster over WireGuard,
    then starts the sensor and WSL tasks.
 
-Get wg0.conf and agent-token from /etc/wireguard/peers/<name>/ on the hub,
-after member 1 runs `add-peer.sh worker <name>`. The token lasts 10 minutes,
-so run this soon after. Running it again skips the join if the K3s agent is
-already active (use -Rejoin to force it) and refreshes the sensor, tasks and
-node agent.
+The easiest way: download the PC's setup zip from the admin pages (Workers,
+Add worker) and pass it with -Bundle. It holds the node name, wg0.conf, the
+join token and the node agent's kubeconfig. Once the admin pages show the PC
+as joined, download its agent credentials and run this again with
+-AgentCredentials, which only installs the heartbeat token.
+
+Or pass the files from /etc/wireguard/peers/<name>/ on the hub, after
+`add-peer.sh worker <name>`, with -WgConfig and -TokenFile.
+
+The join token expires: 24 hours for a setup zip (request a new one on the
+admin pages), 10 minutes from add-peer.sh. Running this again skips the join if the K3s agent is already
+active (use -Rejoin to force it) and refreshes the sensor, tasks and node agent.
 
 Run in Windows PowerShell from the repo, as the PC's normal user:
+
+  powershell -ExecutionPolicy Bypass -File .\agent\install-worker.ps1 `
+      -Bundle .\pc1-setup.zip
+
+  powershell -ExecutionPolicy Bypass -File .\agent\install-worker.ps1 `
+      -AgentCredentials .\pc1-agent-credentials.zip
 
   powershell -ExecutionPolicy Bypass -File .\agent\install-worker.ps1 `
       -NodeName pc1 -WgConfig .\wg0.conf -TokenFile .\agent-token `
       -CoordinatorUrl http://<cluster-ip>:8001
 #>
+[CmdletBinding(DefaultParameterSetName = 'Files')]
 param(
-    [Parameter(Mandatory)] [string] $NodeName,
-    [string] $WgConfig,
-    [string] $TokenFile,
-    [string] $CoordinatorUrl,
+    [Parameter(Mandatory, ParameterSetName = 'Files')] [string] $NodeName,
+    [Parameter(ParameterSetName = 'Files')] [string] $WgConfig,
+    [Parameter(ParameterSetName = 'Files')] [string] $TokenFile,
+    [Parameter(ParameterSetName = 'Files')] [string] $CoordinatorUrl,
+    [Parameter(Mandatory, ParameterSetName = 'Bundle')] [string] $Bundle,
+    [Parameter(Mandatory, ParameterSetName = 'Credentials')] [string] $AgentCredentials,
     [string] $Distro = 'Ubuntu-24.04',
-    [string] $SensorExe,
-    [switch] $Rejoin
+    [Parameter(ParameterSetName = 'Files')]
+    [Parameter(ParameterSetName = 'Bundle')] [string] $SensorExe,
+    [Parameter(ParameterSetName = 'Files')]
+    [Parameter(ParameterSetName = 'Bundle')] [switch] $Rejoin
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,19 +82,82 @@ function Initialize-Stage {
     Invoke-Wsl install -d -m 700 -o $user $Stage
 }
 
-function Copy-ToStage([string] $Source, [string] $Name) {
+function Write-ToStage([string] $Name, [string] $Text) {
     # Drop CRLF, so a Windows checkout or editor cannot break bash or the token.
-    $text = [IO.File]::ReadAllText((Resolve-Path $Source).Path) -replace "`r`n", "`n"
-    [IO.File]::WriteAllText("$StageUnc\$Name", $text, (New-Object Text.UTF8Encoding $false))
+    [IO.File]::WriteAllText("$StageUnc\$Name", ($Text -replace "`r`n", "`n"),
+        (New-Object Text.UTF8Encoding $false))
 }
 
-foreach ($path in @($JoinScript, $SensorExe, (Join-Path $AgentDir 'install-service.sh'))) {
-    if (-not (Test-Path $path -PathType Leaf)) { throw "File not found: $path" }
+function Copy-ToStage([string] $Source, [string] $Name) {
+    Write-ToStage $Name ([IO.File]::ReadAllText((Resolve-Path $Source).Path))
+}
+
+function Read-Zip([string] $Path) {
+    # A zip from the admin pages: manifest.json names the files beside it. They
+    # are read into memory only, since they hold the WireGuard key and tokens.
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $Path).Path)
+    try {
+        function Read-Entry([string] $Name) {
+            if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "Bad file name in ${Path}: $Name" }
+            $entry = $zip.GetEntry($Name)
+            if (-not $entry) { throw "$Path has no $Name." }
+            $reader = New-Object IO.StreamReader($entry.Open(), (New-Object Text.UTF8Encoding $false))
+            try { $reader.ReadToEnd() } finally { $reader.Dispose() }
+        }
+        $manifest = (Read-Entry 'manifest.json') | ConvertFrom-Json
+        if ($manifest.version -ne 1) { throw "$Path is not a setup zip this installer knows (version $($manifest.version))." }
+        if ($manifest.node_name -notmatch '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$') { throw "Bad node name in $Path." }
+        $files = @{}
+        foreach ($key in 'wg_config', 'join_token', 'kubeconfig', 'coordinator_token') {
+            $name = $manifest.files.$key
+            if ($name) { $files[$key] = Read-Entry $name }
+        }
+        @{ NodeName = $manifest.node_name; CoordinatorUrl = $manifest.coordinator_url; Files = $files }
+    } finally {
+        $zip.Dispose()
+    }
 }
 
 $distros = (& wsl.exe -l -q) | ForEach-Object { ($_ -replace "`0", '').Trim() }
 if ($distros -notcontains $Distro) {
     throw "$Distro is not installed. Run 'wsl --install -d $Distro', create the user, then run this again."
+}
+
+# Agent credentials only: the heartbeat token once the PC has joined
+if ($PSCmdlet.ParameterSetName -eq 'Credentials') {
+    $creds = Read-Zip $AgentCredentials
+    if (-not $creds.Files.coordinator_token) { throw "$AgentCredentials has no coordinator token." }
+    $installed = (Get-WslOutput sed -n 's/^NODE_NAME=//p' /etc/idlecloud/node-agent.env)
+    if ($installed -ne $creds.NodeName) {
+        throw "These credentials are for $($creds.NodeName), but this PC's node agent is '$installed'."
+    }
+    Write-Host "Installing the agent credentials for $($creds.NodeName)..."
+    Initialize-Stage
+    try {
+        Write-ToStage 'coordinator.token' $creds.Files.coordinator_token
+        Invoke-Wsl install -m 600 "$Stage/coordinator.token" /etc/idlecloud/coordinator.token
+        if ($creds.Files.kubeconfig) {
+            Write-ToStage 'node-agent.kubeconfig' $creds.Files.kubeconfig
+            Invoke-Wsl install -m 600 "$Stage/node-agent.kubeconfig" /etc/idlecloud/node-agent.kubeconfig
+        }
+        Invoke-Wsl systemctl restart idlecloud-node-agent
+    } finally {
+        & wsl.exe -d $Distro -u root --exec rm -rf $Stage
+    }
+    Write-Host "Done. The node agent restarted and now sends heartbeats."
+    return
+}
+
+$setup = $null
+if ($PSCmdlet.ParameterSetName -eq 'Bundle') {
+    $setup = Read-Zip $Bundle
+    $NodeName = $setup.NodeName
+    $CoordinatorUrl = $setup.CoordinatorUrl
+}
+
+foreach ($path in @($JoinScript, $SensorExe, (Join-Path $AgentDir 'install-service.sh'))) {
+    if (-not (Test-Path $path -PathType Leaf)) { throw "File not found: $path" }
 }
 
 # 1. systemd in WSL2
@@ -145,6 +226,14 @@ try {
     foreach ($file in $agentFiles) { Copy-ToStage $file.FullName $file.Name }
     $agentArgs = @($NodeName)
     if ($CoordinatorUrl) { $agentArgs += $CoordinatorUrl }
+    if ($setup -and $setup.Files.kubeconfig) {
+        Write-ToStage 'node-agent.kubeconfig' $setup.Files.kubeconfig
+        $agentArgs += '--kubeconfig', "$Stage/node-agent.kubeconfig"
+    }
+    if ($setup -and $setup.Files.coordinator_token) {
+        Write-ToStage 'coordinator.token' $setup.Files.coordinator_token
+        $agentArgs += '--coordinator-token', "$Stage/coordinator.token"
+    }
     Invoke-Wsl bash "$Stage/install-service.sh" @agentArgs
 } finally {
     & wsl.exe -d $Distro -u root --exec rm -rf $Stage
@@ -154,15 +243,24 @@ try {
 if ((Get-WslOutput systemctl is-active k3s-agent) -eq 'active' -and -not $Rejoin) {
     Write-Host 'K3s agent is already running, skipping the join (use -Rejoin to force it).'
 } else {
-    if (-not $WgConfig -or -not $TokenFile) {
-        throw 'Joining needs -WgConfig and -TokenFile from add-peer.sh on the hub.'
+    if ($setup) {
+        if (-not $setup.Files.wg_config -or -not $setup.Files.join_token) {
+            throw "$Bundle has no wg0.conf or join token. If $NodeName already joined, use -Rejoin only with a new setup zip."
+        }
+    } elseif (-not $WgConfig -or -not $TokenFile) {
+        throw 'Joining needs -Bundle, or -WgConfig and -TokenFile from add-peer.sh on the hub.'
     }
     Write-Host "Joining the cluster as $NodeName..."
     Initialize-Stage
     try {
         Copy-ToStage $JoinScript 'join-worker.sh'
-        Copy-ToStage $WgConfig 'wg0.conf'
-        Copy-ToStage $TokenFile 'agent-token'
+        if ($setup) {
+            Write-ToStage 'wg0.conf' $setup.Files.wg_config
+            Write-ToStage 'agent-token' $setup.Files.join_token
+        } else {
+            Copy-ToStage $WgConfig 'wg0.conf'
+            Copy-ToStage $TokenFile 'agent-token'
+        }
         Invoke-Wsl bash "$Stage/join-worker.sh" $NodeName "$Stage/wg0.conf" "$Stage/agent-token"
     } finally {
         # The stage holds the WireGuard private key and join token.
@@ -173,11 +271,21 @@ if ((Get-WslOutput systemctl is-active k3s-agent) -eq 'active' -and -not $Rejoin
 Start-ScheduledTask -TaskPath $TaskPath -TaskName 'WSL'
 Start-ScheduledTask -TaskPath $TaskPath -TaskName 'Sensor'
 
-Write-Host @"
+if ($setup -and $setup.Files.kubeconfig) {
+    Write-Host @"
+
+Done. $NodeName should show as joined on the admin pages within a minute.
+Then download its agent credentials there and run this again with
+-AgentCredentials. Until then the coordinator gets no heartbeats from it and
+treats it as offline, so it runs no tasks.
+"@
+} else {
+    Write-Host @"
 
 Done. $NodeName should show as Ready in 'kubectl get nodes' within a minute.
 The node gets no tasks until the node agent runs and sees the PC is idle. On an
 admin machine, run agent/node-agent/make-kubeconfig.sh $NodeName and copy its
-two files to /etc/idlecloud/ (see agent/README.md). The node agent then starts
-by itself within 10 seconds, and at every boot after that.
+two files to /etc/idlecloud/ (see agent/README.md). The node agent then starts by itself
+within 10 seconds, and at every boot after that.
 "@
+}

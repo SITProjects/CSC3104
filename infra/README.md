@@ -12,6 +12,28 @@ Member 1 also owns the root `docker-compose.yml` application stack and
 image/deployment workflows. The existing dev-container Compose file remains the
 development environment configuration.
 
+## Enrollment helper
+
+`infra/enroll/` is a small root service on the hub, `idlecloud-enroll`. The
+web admin pages add and remove campus workers through it: it adds their
+WireGuard peers and issues K3s join tokens and node-agent credentials, so
+nobody needs a shell on the hub for that. Only the coordinator talks to it, on
+`/run/idlecloud/enroll.sock`, which only root and the `idlecloud-enroll` group
+(GID 10050, given to the coordinator Pod) may use. `infra/k8s/deploy.sh`
+installs and updates it with `infra/enroll/install.sh`.
+
+`infra/wireguard/add-peer.sh` stays for laptops and burst slots. It takes the
+same lock and uses the same peer table, so the two never hand out one address
+twice.
+
+- Settings: `/etc/idlecloud/enroll.env` (`HUB_ENDPOINT`, `JOIN_TOKEN_TTL`, ...;
+  `infra/enroll/config.py` lists them). The first install reads the hub's public
+  IP from EC2 instance metadata, or pass `--endpoint <ip>:<port>`.
+- Peer files stay where `add-peer.sh` always kept them,
+  `/etc/wireguard/peers/<name>/`. The peer table moves to
+  `/etc/wireguard/peers.md`.
+- Logs: `journalctl -u idlecloud-enroll`.
+
 ## Local stack
 
 The root `docker-compose.yml` runs the whole system on one machine, jobs included:

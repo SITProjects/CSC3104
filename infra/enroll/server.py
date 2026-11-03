@@ -1,4 +1,5 @@
-"""The helper's HTTP API on a Unix socket, for the coordinator and enrollctl.
+"""The helper's HTTP API on a Unix socket, for the coordinator (the web admin
+pages). There is no command-line client.
 
     GET    /healthz
     GET    /peers                     every peer
