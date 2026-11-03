@@ -5,7 +5,10 @@ umask 077
 HUB_ENDPOINT="13.215.16.236:51820"
 HUB_CONFIG="/etc/wireguard/wg0.conf"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PEERS_FILE="$SCRIPT_DIR/peers.md"
+# Shared with the enrollment helper (infra/enroll), which adds workers from the
+# web admin pages. It used to live next to this script; copied over once.
+PEERS_FILE="/etc/wireguard/peers.md"
+OLD_PEERS_FILE="$SCRIPT_DIR/peers.md"
 
 die() {
     echo "Error: $*" >&2
@@ -57,6 +60,10 @@ for COMMAND in wg flock; do
 done
 
 [[ -f "$HUB_CONFIG" ]] || die "Hub configuration is missing."
+
+if [[ -f "$OLD_PEERS_FILE" && ! -f "$PEERS_FILE" ]]; then
+    install -m 644 "$OLD_PEERS_FILE" "$PEERS_FILE"
+fi
 
 # Lock before reading allocations or changing peer state.
 exec 9>/run/wireguard-add-peer.lock

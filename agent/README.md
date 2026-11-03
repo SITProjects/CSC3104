@@ -20,19 +20,30 @@ in [`eval/eviction/`](../eval/eviction/README.md).
 
 - Ubuntu 24.04 in WSL2: `wsl --install -d Ubuntu-24.04`, then open it once and
   create the user.
-- `wg0.conf` and `agent-token` for this PC, from
-  `/etc/wireguard/peers/<name>/` on the hub after member 1 runs
-  `add-peer.sh worker <name>`. The token lasts 10 minutes, so run the installer
-  soon after.
-- The sensor .exe. It is not in Git, so build it once on any Windows machine
-  (see the
-  [sensor README](windows-sensor/README.md#build-the-exe-developers-only)) and
-  copy it to each PC. The installer looks in `windows-sensor\dist\`, or pass
-  its path with `-SensorExe`.
+- This PC's setup files, either:
+  - a setup zip from the admin pages, which holds the node name, `wg0.conf`,
+    the join token and the node agent's kubeconfig; or
+  - `wg0.conf` and `agent-token` from `/etc/wireguard/peers/<name>/` on the hub,
+    after `sudo bash infra/wireguard/add-peer.sh worker <name>`.
+
+  The setup zip's join token lasts 24 hours; request a new one on the admin
+  pages if it has expired. `add-peer.sh`'s lasts 10 minutes.
+- The sensor .exe. It is not in Git: download `idlecloud-sensor.exe` from the
+  repo's `sensor-latest` release (CI builds it), or build it yourself (see the
+  [sensor README](windows-sensor/README.md#build-the-exe-developers-only)).
+  The installer looks in `windows-sensor\dist\`, or pass its path with
+  `-SensorExe`.
 
 ### 1. Run the installer (Windows)
 
 In Windows PowerShell, from the repo, as the PC's normal user (not admin):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\agent\install-worker.ps1 `
+    -Bundle .\pc1-setup.zip
+```
+
+Or, with the files from the hub:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\agent\install-worker.ps1 `
@@ -73,11 +84,21 @@ Check on an admin machine that the node is `Ready`:
 kubectl get nodes
 ```
 
-### 2. Give the node agent its credentials (admin machine)
+### 2. Give the node agent its credentials
 
 The node joins with the `idlecloud/owner-active` taint, so it gets no tasks
 until the node agent runs and sees the PC is idle. The agent needs its own
-Kubernetes identity. On a machine with admin kubectl:
+Kubernetes identity, and a heartbeat token for the coordinator.
+
+With a setup zip, the identity is already installed. Once the admin pages show
+the PC as joined, download its agent credentials and run the installer again:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\agent\install-worker.ps1 `
+    -AgentCredentials .\pc1-agent-credentials.zip
+```
+
+Otherwise, on a machine with admin kubectl:
 
 ```bash
 agent/node-agent/make-kubeconfig.sh pc1

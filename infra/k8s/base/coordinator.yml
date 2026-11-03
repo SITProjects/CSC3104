@@ -39,6 +39,9 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
+        # idlecloud-enroll on the hub, so it may use the enrollment helper's socket
+        # (infra/enroll/install.sh creates the group with this GID)
+        supplementalGroups: [10050]
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -109,9 +112,18 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: enroll
+              mountPath: /run/idlecloud
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
+        # The enrollment helper's socket (infra/enroll), which adds workers. The
+        # helper keeps this folder across restarts, so the mount stays valid.
+        - name: enroll
+          hostPath:
+            path: /run/idlecloud
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service

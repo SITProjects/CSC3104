@@ -85,6 +85,10 @@ else
   echo "  export HMAC_SECRET=\$(kubectl -n $NS get secret idlecloud-web -o jsonpath='{.data.hmac-secret}' | base64 -d)"
 fi
 
+step "Enrollment helper"
+# Before the coordinator starts, so its socket mount finds the helper's folder
+sudo bash infra/enroll/install.sh
+
 step "Applying $OVERLAY"
 kubectl apply -k "$OVERLAY"
 

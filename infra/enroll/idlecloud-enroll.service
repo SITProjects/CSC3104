@@ -1,0 +1,37 @@
+[Unit]
+Description=IdleCloud enrollment helper (WireGuard peers and K3s join tokens)
+After=network-online.target wg-quick@wg0.service k3s.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# python3 -m puts the working directory on the path, so `enroll` is found there
+WorkingDirectory=/opt/idlecloud/enroll
+ExecStart=/usr/bin/python3 -m enroll.server
+Restart=on-failure
+RestartSec=2
+
+# Root for wg and the hub's wg0.conf. The group owns /run/idlecloud and the
+# socket, and the coordinator Pod gets it as a supplemental group.
+User=root
+Group=idlecloud-enroll
+RuntimeDirectory=idlecloud
+RuntimeDirectoryMode=0750
+# The coordinator mounts /run/idlecloud: keep the same folder across restarts,
+# or the Pod would keep a deleted one and never see the new socket
+RuntimeDirectoryPreserve=yes
+# kubectl and k3s keep a cache under HOME
+CacheDirectory=idlecloud-enroll
+Environment=HOME=/var/cache/idlecloud-enroll
+Environment=KUBECACHEDIR=/var/cache/idlecloud-enroll
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# The peer folders, the hub's wg0.conf and peers.md, and the add-peer.sh lock
+ReadWritePaths=/etc/wireguard /run
+
+[Install]
+WantedBy=multi-user.target

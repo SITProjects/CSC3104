@@ -45,8 +45,11 @@ Start-ScheduledTask -TaskPath \IdleCloud\ -TaskName Sensor
 
 ## Build the .exe (developers only)
 
-Lab PCs don't run these steps. `dist/` is not in Git, so build the .exe once
-on a Windows machine and copy it to each PC. Give `install-worker.ps1` either
+Lab PCs don't run these steps. `dist/` is not in Git. The Build Windows sensor
+workflow builds the .exe whenever this folder changes on `main` and publishes it
+to the `sensor-latest` release, with its SHA-256, so usually you only download
+it from there. To build it yourself, do it once on a Windows machine and copy
+it to each PC. Give `install-worker.ps1` either
 this checkout or the built file (`-SensorExe <path>`). Rebuild it after any
 change to `sensor.py` or `requirements.txt`, or workers keep running the old
 code.
