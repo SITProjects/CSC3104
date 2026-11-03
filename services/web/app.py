@@ -1568,12 +1568,22 @@ async def _workers_page(
         request, {"workers": coordinator.admin_workers(_token(request))}
     )
     now = datetime.now(UTC)
+    rows = [admintools.worker_row(w, now) for w in results["workers"] or []]
+    # ?q= and ?status= from the filter form; anything unknown filters nothing
+    query = request.query_params.get("q", "")[:63].strip()
+    status_filter = request.query_params.get("status", "")
+    if status_filter not in admintools.WORKER_FILTERS:
+        status_filter = ""
     return _admin_page(
         request,
         "admin_workers.html",
         errors,
         status if error else load_status,
-        workers=[admintools.worker_row(w, now) for w in results["workers"] or []],
+        workers=admintools.filter_workers(rows, query, status_filter),
+        worker_total=len(rows),
+        filters=[(v, label) for v, (label, _) in admintools.WORKER_FILTERS.items()],
+        filter_query=query,
+        filter_status=status_filter,
         notice=WORKER_NOTICES.get(request.query_params.get("done", "")),
         form_error=error,
         form_name=name,
@@ -1669,14 +1679,19 @@ async def admin_worker_credentials(request: Request, name: str):
 async def _worker_action(
     request: Request, name: str, action: Callable[[str, str], Awaitable], done: str
 ):
-    """Runs one change, then shows the worker's page with its notice or error."""
+    """
+    Runs one change, then shows the worker's page with its notice, or the list
+    if the form came from there (back=list). An error is always shown on the
+    worker's page, next to what it is about.
+    """
     name = _worker_name(name)
     try:
         await action(_token(request), name)
     except httpx.HTTPError as exc:
         return await _worker_failed(request, name, exc)
-    if done == "removed":
-        return RedirectResponse("/admin/workers?done=removed", status_code=303)
+    back_to_list = (await request.form()).get("back") == "list"
+    if done == "removed" or back_to_list:
+        return RedirectResponse(f"/admin/workers?done={done}", status_code=303)
     return RedirectResponse(f"/admin/workers/{name}?done={done}", status_code=303)
 
 

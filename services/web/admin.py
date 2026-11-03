@@ -132,4 +132,57 @@ def worker_row(worker: dict[str, Any], now: datetime) -> dict[str, Any]:
         "heartbeat_until": sg_time(beat_expires, "%d %b %Y"),
         "heartbeat_soon": beat_expires is not None
         and beat_expires - now <= HEARTBEAT_WARN,
+        # The list's actions. Downloads: the setup zip before joining (only
+        # while its join token works), the agent credentials after. Refresh:
+        # the join token before joining, the heartbeat token once there is one
+        # (the first comes with the first credentials download). Neither while
+        # the join state is unknown.
+        "download": None if joined is None else "credentials" if joined else "setup",
+        "download_ready": joined is True or joined is False and not join_expired,
+        "refresh": None
+        if joined is None
+        else "join-token"
+        if not joined
+        else "heartbeat-token"
+        if beat_expires is not None
+        else None,
     }
+
+
+# The workers list's status filter: value -> (label, test on a worker_row)
+WORKER_FILTERS = {
+    "waiting": ("Waiting to join", lambda w: w["joined"] is False),
+    "joined": ("Joined", lambda w: w["joined"] is True),
+    "IDLE": ("Idle", lambda w: w["joined"] is True and w.get("state") == "IDLE"),
+    "BUSY": ("Busy", lambda w: w["joined"] is True and w.get("state") == "BUSY"),
+    "OFFLINE": (
+        "Offline or no heartbeats",
+        lambda w: w["joined"] is True and w.get("state") in (None, "OFFLINE"),
+    ),
+    "attention": (
+        "Needs attention",
+        lambda w: (
+            w["joined"] is None
+            or w["join_expired"]
+            or w["needs_credentials"]
+            or w["heartbeat_soon"]
+        ),
+    ),
+}
+
+
+def filter_workers(
+    rows: list[dict[str, Any]], query: str | None, status: str | None
+) -> list[dict[str, Any]]:
+    """
+    The worker rows whose name or VPN address contains query (any case) and
+    that pass the status filter. An unknown status filters nothing.
+    """
+    query = (query or "").strip().lower()
+    _, test = WORKER_FILTERS.get(status or "", (None, None))
+    return [
+        row
+        for row in rows
+        if (not query or query in row["name"].lower() or query in row["ip"])
+        and (test is None or test(row))
+    ]

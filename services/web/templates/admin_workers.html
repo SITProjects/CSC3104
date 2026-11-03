@@ -26,37 +26,78 @@
   {% if form_error %}<div class="mt-3">{{ error_alert(form_error) }}</div>{% endif %}
 </section>
 
-<div class="mt-6">
+<form method="get" action="/admin/workers" class="mt-6 flex flex-wrap items-end gap-2" role="search" aria-label="Filter workers">
+  <div class="grid w-full gap-1 sm:w-auto">
+    <label class="label" for="filter-q">Name or address</label>
+    <input class="input w-full font-mono sm:w-56" id="filter-q" name="q" value="{{ filter_query }}" placeholder="Any worker" maxlength="63">
+  </div>
+  <div class="grid w-full gap-1 sm:w-auto">
+    <label class="label" for="filter-status">Status</label>
+    <select class="select w-full sm:w-56" id="filter-status" name="status">
+      <option value="">Any status</option>
+      {% for value, label in filters %}
+      <option value="{{ value }}"{% if value == filter_status %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button type="submit" class="btn" data-size="sm">Filter</button>
+  {% if filter_query or filter_status %}<a class="btn" data-variant="ghost" data-size="sm" href="/admin/workers">Clear</a>{% endif %}
+</form>
+
+<div class="mt-4">
 {% if errors.workers %}{{ error_alert(errors.workers) }}{% else %}
 <div class="table-container" tabindex="0" role="region" aria-label="Campus workers">
   <table class="table">
-    <caption>Select a worker for its downloads and actions.</caption>
+    <caption>{% if filter_query or filter_status %}{{ workers|length }} of {{ worker_total }} workers match this filter. {% endif %}Select a worker for its details and to remove it.</caption>
     <thead><tr>
       <th scope="col">Worker</th><th scope="col">VPN address</th><th scope="col">Status</th>
-      <th scope="col">Last heartbeat</th><th scope="col">Next step</th>
+      <th scope="col">Last heartbeat</th><th scope="col">Actions</th>
     </tr></thead>
     <tbody>
     {% for w in workers %}
+      {% set worker_url = "/admin/workers/" ~ (w.name|urlencode) %}
       <tr>
-        <td><a class="font-mono font-medium underline-offset-4 hover:underline" href="/admin/workers/{{ w.name|urlencode }}">{{ w.name }}</a></td>
+        <td><a class="font-mono font-medium underline-offset-4 hover:underline" href="{{ worker_url }}">{{ w.name }}</a></td>
         <td class="font-mono">{{ w.ip }}</td>
-        <td>{{ status_badge(w.status) }}</td>
+        <td>{{ status_badge(w.status) }}
+          {% if w.join_expired %}<div class="text-xs text-muted-foreground">Join token expired</div>
+          {% elif w.needs_credentials %}<div class="text-xs text-muted-foreground">Needs agent credentials</div>
+          {% elif w.heartbeat_soon %}<div class="text-xs text-muted-foreground">Heartbeat token ends {{ w.heartbeat_until }}</div>{% endif %}</td>
         <td>{{ w.heartbeat_ago }}</td>
-        <td class="text-sm">
-          {% if w.joined is none %}<span class="text-muted-foreground">Can't tell right now</span>
-          {% elif not w.joined and w.join_expired %}Request a new join token
-          {% elif not w.joined %}Run the installer with the setup zip
-          {% elif w.needs_credentials %}Install the agent credentials
-          {% elif w.heartbeat_soon %}Renew the heartbeat token
-          {% else %}<span class="text-muted-foreground">Nothing to do</span>{% endif %}
+        <td>
+          <div class="flex flex-wrap items-center gap-2">
+          {% if w.download == "setup" %}
+            {% if w.download_ready %}
+            <a class="btn" data-variant="outline" data-size="xs" href="{{ worker_url }}/setup.zip" aria-label="Download the setup zip for {{ w.name }}">{{ icon("download") }} Setup zip</a>
+            {% else %}
+            <button type="button" class="btn" data-variant="outline" data-size="xs" disabled title="The join token has expired: refresh it first">{{ icon("download") }} Setup zip</button>
+            {% endif %}
+          {% elif w.download == "credentials" %}
+            <form method="post" action="{{ worker_url }}/agent-credentials">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="btn" data-variant="outline" data-size="xs" aria-label="Download the agent credentials for {{ w.name }}">{{ icon("download") }} Agent credentials</button>
+            </form>
+          {% endif %}
+          {% if w.refresh %}
+            <form method="post" action="{{ worker_url }}/{{ w.refresh }}"
+                  data-confirm="{% if w.refresh == 'join-token' %}Issue a new join token for {{ w.name }}? A setup zip downloaded before stops working.{% else %}Issue a new heartbeat token for {{ w.name }}? Then download and install its agent credentials again.{% endif %}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="back" value="list">
+              <button type="submit" class="btn" data-variant="ghost" data-size="xs"
+                      aria-label="Issue a new {{ 'join' if w.refresh == 'join-token' else 'heartbeat' }} token for {{ w.name }}">{{ icon("refresh") }} Refresh token</button>
+            </form>
+          {% endif %}
+          {% if not w.download and not w.refresh %}<span class="text-sm text-muted-foreground">Refresh in a moment</span>{% endif %}
+          </div>
         </td>
       </tr>
     {% else %}
-      <tr><td colspan="5" class="text-muted-foreground">No campus workers yet. Add one above.</td></tr>
+      <tr><td colspan="5" class="text-muted-foreground">{% if filter_query or filter_status %}No workers match this filter.{% else %}No campus workers yet. Add one above.{% endif %}</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
 {% endif %}
 </div>
+<script src="{{ url_for('static', path='confirm.js').path }}" defer></script>
 {% endblock %}
