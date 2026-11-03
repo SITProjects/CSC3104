@@ -84,6 +84,18 @@ def event_row(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _instant(value: str | None) -> datetime | None:
+    """An ISO timestamp as an aware time (a naive one is UTC), or None if there
+    is none or it can't be read."""
+    if not value:
+        return None
+    try:
+        then = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return then if then.tzinfo else then.replace(tzinfo=UTC)
+
+
 def worker_row(worker: dict[str, Any], now: datetime) -> dict[str, Any]:
     """
     One campus worker, as the workers pages show it: where it is in joining,
@@ -97,26 +109,27 @@ def worker_row(worker: dict[str, Any], now: datetime) -> dict[str, Any]:
     else:
         # IDLE, BUSY or OFFLINE once its node agent sends heartbeats
         status = worker.get("state") or "No heartbeats"
-    join_expires = worker.get("join_token_expires_at")
-    join_expired = bool(join_expires) and datetime.fromisoformat(join_expires) <= now
-    beat_expires = worker.get("heartbeat_token_expires_at")
-    beat_soon = (
-        bool(beat_expires)
-        and datetime.fromisoformat(beat_expires) - now <= HEARTBEAT_WARN
-    )
+    join_expires = _instant(worker.get("join_token_expires_at"))
+    beat_expires = _instant(worker.get("heartbeat_token_expires_at"))
+    # Only a PC known not to have joined needs a join token; for one whose
+    # state is unknown, "Expired" would send the admin the wrong way
+    join_expired = joined is False and (join_expires is None or join_expires <= now)
+    if joined is None:
+        join_token = "Unknown"
+    elif joined:
+        join_token = None
+    elif join_expired:
+        join_token = "Expired"
+    else:
+        join_token = f"Valid until {sg_time(join_expires)}"
     return {
         **worker,
         "status": status,
         "heartbeat_ago": ago(worker.get("last_heartbeat"), now) or "never",
-        "join_token": (
-            None
-            if joined
-            else "Expired"
-            if join_expired or not join_expires
-            else f"Valid until {sg_time(join_expires)}"
-        ),
-        "join_expired": not joined and (join_expired or not join_expires),
-        "needs_credentials": bool(joined) and not beat_expires,
+        "join_token": join_token,
+        "join_expired": join_expired,
+        "needs_credentials": joined is True and beat_expires is None,
         "heartbeat_until": sg_time(beat_expires, "%d %b %Y"),
-        "heartbeat_soon": beat_soon,
+        "heartbeat_soon": beat_expires is not None
+        and beat_expires - now <= HEARTBEAT_WARN,
     }

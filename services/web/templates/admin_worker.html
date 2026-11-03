@@ -36,6 +36,7 @@
     {% endif %}
     <form method="post" action="/admin/workers/{{ name|urlencode }}/join-token"
           data-confirm="Issue a new join token? A setup zip downloaded before stops working.">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="btn" data-variant="outline" data-size="sm">{{ icon("refresh") }} Request a new join token</button>
     </form>
   {% else %}
@@ -45,6 +46,7 @@
     <p>{{ name }} has joined and has its credentials. Download them again only to reinstall them, for example after rebuilding the PC.</p>
     {% endif %}
     <form method="post" action="/admin/workers/{{ name|urlencode }}/agent-credentials">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="btn" data-size="sm"{% if not worker.needs_credentials %} data-variant="outline"{% endif %}>{{ icon("download") }} Download agent credentials</button>
     </form>
     <pre class="overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-sm">powershell -ExecutionPolicy Bypass -File .\agent\install-worker.ps1 -AgentCredentials .\{{ name }}-agent-credentials.zip</pre>
@@ -53,6 +55,7 @@
       {% if worker.heartbeat_soon %}The heartbeat token runs out on {{ worker.heartbeat_until }}. Issue a new one, then download and install the agent credentials again.
       {% else %}The heartbeat token is valid until {{ worker.heartbeat_until }}.{% endif %}</p>
     <form method="post" action="/admin/workers/{{ name|urlencode }}/heartbeat-token">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="btn" data-variant="outline" data-size="sm">{{ icon("refresh") }} Issue a new heartbeat token</button>
     </form>
     {% endif %}
@@ -64,6 +67,7 @@
   <p class="text-sm text-muted-foreground">Moves its tasks to other PCs, then takes it out of the cluster and the VPN. To lend it again, add it again.</p>
   <form method="post" action="/admin/workers/{{ name|urlencode }}/remove"
         data-confirm="Remove {{ name }}? Its tasks move to other PCs, and the PC can no longer reach the cluster.">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <button type="submit" class="btn" data-variant="destructive" data-size="sm">Remove worker</button>
   </form>
 </section>

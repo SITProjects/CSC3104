@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -76,9 +78,21 @@ app = FastAPI(title="Idle-Compute Cloud", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 
+def csrf_token(request: Request) -> str:
+    """
+    The token forms send back so require_csrf knows they came from this site:
+    a hash of the session token. Another site can't read the session cookie,
+    so it can't make the token, and nothing has to be stored, so it works
+    whichever web replica serves the next request.
+    """
+    session = request.cookies.get(settings.session_cookie, "")
+    return hashlib.sha256(b"idlecloud-csrf:" + session.encode()).hexdigest()
+
+
 def _template_context(request: Request) -> dict:
     return {
         "signed_in": bool(request.cookies.get(settings.session_cookie)),
+        "csrf_token": csrf_token(request),
         # set by current_user; pages that don't look up the user show no email
         "user": getattr(request.state, "user", None),
     }
@@ -216,6 +230,26 @@ async def regular_user(user: Annotated[dict, Depends(current_user)]) -> dict:
 
 SignedIn = Depends(current_user)
 AdminOnly = Depends(admin_user)
+
+
+async def require_csrf(request: Request) -> None:
+    """
+    Refuses a form that didn't come from one of our pages. SameSite=Lax already
+    keeps the session cookie off most cross-site POSTs; this also covers older
+    browsers and a POST from a sibling site, which SameSite treats as the same.
+
+    raises:
+        HTTPException: 403 if the form's csrf_token is missing or wrong.
+    """
+    sent = (await request.form()).get("csrf_token")
+    if not isinstance(sent, str) or not hmac.compare_digest(sent, csrf_token(request)):
+        raise HTTPException(
+            403, "This form has expired. Reload the page and try again."
+        )
+
+
+# After AdminOnly, so a signed-out visitor is sent to log in rather than refused
+AdminForm = [AdminOnly, Depends(require_csrf)]
 
 
 async def _has_valid_session(request: Request) -> bool:
@@ -1583,7 +1617,7 @@ async def admin_workers(request: Request):
     return await _workers_page(request)
 
 
-@app.post("/admin/workers", response_class=HTMLResponse, dependencies=[AdminOnly])
+@app.post("/admin/workers", response_class=HTMLResponse, dependencies=AdminForm)
 async def admin_add_worker(request: Request, name: Annotated[str, Form()] = ""):
     """Adds a campus worker and opens its page, where its setup zip is."""
     name = name.strip().lower()
@@ -1614,7 +1648,7 @@ async def admin_worker_setup(request: Request, name: str):
     return _zip_download(data, f"{name}-setup.zip")
 
 
-@app.post("/admin/workers/{name}/agent-credentials", dependencies=[AdminOnly])
+@app.post("/admin/workers/{name}/agent-credentials", dependencies=AdminForm)
 async def admin_worker_credentials(request: Request, name: str):
     """
     The agent credentials zip for install-worker.ps1 -AgentCredentials, after
@@ -1646,13 +1680,13 @@ async def _worker_action(
     return RedirectResponse(f"/admin/workers/{name}?done={done}", status_code=303)
 
 
-@app.post("/admin/workers/{name}/join-token", dependencies=[AdminOnly])
+@app.post("/admin/workers/{name}/join-token", dependencies=AdminForm)
 async def admin_worker_join_token(request: Request, name: str):
     """Replaces the join token: the old setup zip stops working."""
     return await _worker_action(request, name, coordinator.new_join_token, "join-token")
 
 
-@app.post("/admin/workers/{name}/heartbeat-token", dependencies=[AdminOnly])
+@app.post("/admin/workers/{name}/heartbeat-token", dependencies=AdminForm)
 async def admin_worker_heartbeat_token(request: Request, name: str):
     """Issues a new heartbeat token, e.g. before the old one runs out."""
     return await _worker_action(
@@ -1660,7 +1694,7 @@ async def admin_worker_heartbeat_token(request: Request, name: str):
     )
 
 
-@app.post("/admin/workers/{name}/remove", dependencies=[AdminOnly])
+@app.post("/admin/workers/{name}/remove", dependencies=AdminForm)
 async def admin_worker_remove(request: Request, name: str):
     """Removes the worker everywhere. Its PC can't reach the cluster afterwards."""
     return await _worker_action(request, name, coordinator.remove_worker, "removed")

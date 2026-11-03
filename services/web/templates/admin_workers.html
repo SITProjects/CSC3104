@@ -13,6 +13,7 @@
 <section class="card mt-6 px-4 py-4" aria-labelledby="add-worker">
   <h2 id="add-worker" class="text-lg font-semibold">Add a worker</h2>
   <form method="post" action="/admin/workers" class="mt-3 flex flex-wrap items-end gap-2">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="grid w-full gap-1 sm:w-auto">
       <label class="label" for="worker-name">Node name</label>
       <input class="input w-full font-mono sm:w-64" id="worker-name" name="name" value="{{ form_name }}" required
