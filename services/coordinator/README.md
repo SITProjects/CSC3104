@@ -24,6 +24,31 @@ workers (Ready, not cordoned, no owner-active or quarantine taint) can take, fro
 their allocatable CPU and memory less what unfinished task Pods ask for. The web
 app sizes OCR tasks from it. It needs `list` on nodes (`coordinator-rbac.yml`).
 
+## Campus workers
+
+`workers.py` lets admins add and remove campus PCs from the web admin pages,
+under `/admin/workers` (admins only). The enrollment helper on the hub
+(`infra/enroll`, reached over the socket `coordinator.yml` mounts, client in
+`enroll.py`) adds the WireGuard peer and issues the join token and node-agent
+credentials, and keeps them; nothing about workers is stored in the database.
+Each worker's `state` and `last_heartbeat` come from the `nodes` table once its
+node agent sends heartbeats. Every change and download is recorded as an event
+(`worker_added`, `worker_setup_downloaded`, ...) with the admin's email.
+
+- `POST /admin/workers` `{"name"}` adds one; adding it again finishes any step
+  that failed before.
+- `GET /admin/workers/{name}/setup.zip`, before the PC joins, is the zip for
+  `install-worker.ps1 -Bundle`. 409 once it has joined or its join token
+  expired (`POST .../join-token` for a new one).
+- After joining, `POST .../heartbeat-token` and then
+  `GET .../agent-credentials.zip` give the zip for `-AgentCredentials`.
+- `DELETE /admin/workers/{name}` drains and deletes the node and removes its
+  access and peer.
+
+The zips name the coordinator for the node agent's heartbeats: the Service's
+ClusterIP, or `NODE_AGENT_COORDINATOR_URL`. Helper errors pass through as 400,
+404 or 409; a failed command is 502, and a helper that can't be reached 503.
+
 ## Copies of a task run on different PCs
 
 Voting only means something if the copies ran on different machines. Kubernetes'

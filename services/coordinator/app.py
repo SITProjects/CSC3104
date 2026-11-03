@@ -78,6 +78,7 @@ from services.coordinator.models import (
     TokenOut,
 )
 from services.coordinator.storage import presign
+from services.coordinator.workers import router as workers_router
 from shared.db import (
     EventView,
     Job,
@@ -140,6 +141,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Coordinator", lifespan=lifespan)
 app.include_router(burst_router)
+app.include_router(workers_router)
 
 
 async def require_token(

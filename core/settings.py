@@ -41,5 +41,16 @@ RENEW_INTERVAL = 5  # seconds
 RENEW_DEADLINE = 10  # seconds
 # Jobs one user may have unfinished (PENDING or RUNNING) at once
 MAX_ACTIVE_JOBS_PER_USER = int(os.environ.get("MAX_ACTIVE_JOBS_PER_USER", "3"))
+# The enrollment helper's socket on the hub (infra/enroll), mounted into the Pod
+ENROLL_SOCKET = os.environ.get("ENROLL_SOCKET", "/run/idlecloud/enroll.sock")
+# Where a worker's node agent sends heartbeats. It runs on the PC, not in a Pod,
+# so it can't resolve cluster DNS: by default the coordinator Service's
+# ClusterIP, which Kubernetes passes to this Pod as COORDINATOR_SERVICE_HOST.
+NODE_AGENT_COORDINATOR_URL = os.environ.get("NODE_AGENT_COORDINATOR_URL") or (
+    f"http://{os.environ['COORDINATOR_SERVICE_HOST']}:"
+    f"{os.environ.get('COORDINATOR_SERVICE_PORT', '8001')}"
+    if os.environ.get("COORDINATOR_SERVICE_HOST")
+    else None
+)
 # User logins: how long a bearer token from /auth/login lasts
 SESSION_TTL_SECONDS = 24 * 3600
