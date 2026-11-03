@@ -21,7 +21,7 @@ image_in() {
 	printf '%s\n' "$image"
 }
 
-ocr=$(image_in shared/migrations/003_seed_ocr_job_type.sql "idlecloud/ocr:")
+ocr=$(image_in shared/migrations/013_ocr_ghcr_image.sql "ghcr.io/sitprojects/idlecloud-ocr:")
 python=$(image_in shared/migrations/010_python_job_type.sql "ghcr.io/sitprojects/idlecloud-python:")
 pytorch=$(image_in shared/migrations/012_pytorch_job_type.sql "ghcr.io/sitprojects/idlecloud-pytorch:")
 

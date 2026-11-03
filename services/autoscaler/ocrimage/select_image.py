@@ -26,9 +26,10 @@ REPO = os.environ.get("OCR_IMAGE_REPO", "sitprojects/idlecloud-ocr")
 TAG = "main"
 REGISTRY = "https://ghcr.io"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
-# An image any worker can download. Anything else, such as the local
-# idlecloud/ocr:0.1.0 from the seed migration, only exists where it was loaded.
-PUBLISHED = re.compile(r"ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}")
+# An image any worker can download: a GHCR digest, or a GHCR tag such as
+# migration 013's ghcr.io/sitprojects/idlecloud-ocr:main. Anything else, such as
+# the seed's idlecloud/ocr:0.1.0, only exists where it was loaded.
+PUBLISHED = re.compile(r"ghcr\.io/[a-z0-9._/-]+(@sha256:[0-9a-f]{64}|:[\w][\w.-]*)")
 # An image index (several platforms) or a single image, in OCI or Docker format
 ACCEPT = (
     "application/vnd.oci.image.index.v1+json, "
