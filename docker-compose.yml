@@ -22,6 +22,9 @@ services:
       # WireGuard IP). Pods can't resolve compose service names.
       COORDINATOR_URL: ${COORDINATOR_URL:-http://172.29.0.10:8001}
       KUBECONFIG: /tmp/kubeconfig
+      # Worker images come from scripts/load-worker-images.sh, not a registry, so
+      # task Pods must use the loaded copy instead of pulling the published one
+      TASK_IMAGE_PULL_POLICY: IfNotPresent
       S3_ENDPOINT_URL: http://minio:9000
       # presigned URLs are signed for this host, so it must be the one workers use:
       # MinIO's fixed IP on the cluster network. Set http://localhost:9000 instead to

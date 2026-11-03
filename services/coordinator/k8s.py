@@ -18,7 +18,7 @@ from kubernetes.client import (
     V1UserInfo,
 )
 
-from core.settings import JOB_NAMESPACE
+from core.settings import JOB_NAMESPACE, TASK_IMAGE_PULL_POLICY
 from shared.db.models import JobType, Replica, Task
 
 # delete finished jobs and their pods after 10 minutes to avoid cluttering the cluster
@@ -27,6 +27,17 @@ JOB_TTL_SECONDS = 600
 TERMINATION_GRACE_SECONDS = 30
 TOLERATION_SECONDS = 30
 REPLICA_SELECTOR = "app.kubernetes.io/managed-by=idlecloud-coordinator"
+
+
+def pull_policy(image: str) -> str:
+    """
+    Always for a tag, which can move to a new build (checking costs one registry
+    request when nothing changed), IfNotPresent for a digest, which cannot.
+    TASK_IMAGE_PULL_POLICY overrides both.
+    """
+    if TASK_IMAGE_PULL_POLICY:
+        return TASK_IMAGE_PULL_POLICY
+    return "IfNotPresent" if "@sha256:" in image else "Always"
 
 
 async def list_replica_jobs(batch_api: BatchV1Api) -> list[V1Job]:
@@ -107,6 +118,7 @@ def build_replica_job_manifest(
     container = {
         "name": "worker",
         "image": job_type.image,
+        "imagePullPolicy": pull_policy(job_type.image),
         "env": [
             {"name": "COORDINATOR_URL", "value": coordinator_url},
             {"name": "REPLICA_ID", "value": str(replica.id)},
