@@ -21,9 +21,9 @@
 {% if errors.events %}{{ error_alert(errors.events) }}{% else %}
 <div class="table-container" tabindex="0" role="region" aria-label="Event log">
   <table class="table">
-    <caption>Evictions, lost and failed replicas, newest first{% if filter_job %}, for job {{ filter_job }}{% endif %}{% if filter_node %}, on node {{ filter_node }}{% endif %}.</caption>
+    <caption>Evictions, lost and failed replicas, and campus worker changes, newest first{% if filter_job %}, for job {{ filter_job }}{% endif %}{% if filter_node %}, on node {{ filter_node }}{% endif %}.</caption>
     <thead><tr>
-      <th scope="col">Time (SGT)</th><th scope="col">Replica event</th><th scope="col">Job / task</th>
+      <th scope="col">Time (SGT)</th><th scope="col">Event</th><th scope="col">Job / task</th>
       <th scope="col">Node</th><th scope="col">Details</th>
     </tr></thead>
     <tbody>
@@ -38,7 +38,7 @@
       </tr>
     {% else %}
       <tr><td colspan="5" class="text-muted-foreground">No events recorded{% if filter_job or filter_node %} for this filter{% endif %}.
-        Only evictions, lost and failed replicas are logged, so a job that hasn't hit one has none.</td></tr>
+        Only evictions, lost and failed replicas, and changes to campus workers are logged, so a job that hasn't hit one has none.</td></tr>
     {% endfor %}
     </tbody>
   </table>

@@ -35,7 +35,7 @@ from fastapi.templating import Jinja2Templates
 from services.web import admin as admintools
 from services.web import jobs as jobtools
 from services.web import storage, uploads
-from services.web.coordinator import coordinator
+from services.web.coordinator import WORKER_NAME, coordinator
 from services.web.settings import settings
 
 BASE_DIR = Path(__file__).parent
@@ -52,6 +52,7 @@ NAV_ITEMS = [
     {"label": "My jobs", "path": "/jobs", "icon": "list", "admin": False},
     {"label": "Overview", "path": "/admin", "icon": "gauge", "admin": True},
     {"label": "Jobs", "path": "/admin/jobs", "icon": "list", "admin": True},
+    {"label": "Campus workers", "path": "/admin/workers", "icon": "cpu", "admin": True},
     {"label": "Burst workers", "path": "/admin/burst", "icon": "server", "admin": True},
     {"label": "Event log", "path": "/admin/events", "icon": "activity", "admin": True},
     {"label": "Users", "path": "/admin/users", "icon": "users", "admin": True},
@@ -1211,6 +1212,8 @@ ADMIN_SECTIONS = {
     "events": "events",
     "users": "users",
     "user": "user",
+    "workers": "campus workers",
+    "worker": "worker",
 }
 
 
@@ -1365,7 +1368,8 @@ async def admin_events(
     node: Annotated[str | None, Query(max_length=253)] = None,
     offset: int = Query(0, ge=0),
 ):
-    """Evictions, lost and failed replicas, optionally for one job or node."""
+    """Evictions, lost and failed replicas, and worker changes, optionally
+    for one job or node."""
     # a blank box in the filter form means any job, like a blank node
     job_text = (job or "").strip()
     try:
@@ -1456,6 +1460,210 @@ async def admin_user_profile(
         page_size=ADMIN_JOBS_PAGE_SIZE,
         has_more=len(jobs) > ADMIN_JOBS_PAGE_SIZE,
     )
+
+
+# Shown after an action (?done=...). Only these fixed texts are ever shown, so
+# nothing from the URL reaches the page.
+WORKER_NOTICES = {
+    "added": "Worker added. Download its setup zip and run the installer on the PC.",
+    "join-token": "New join token issued. Download the setup zip again: the old "
+    "one no longer works.",
+    "heartbeat-token": "New heartbeat token issued. Download the agent credentials "
+    "and run the installer with -AgentCredentials.",
+    "removed": "Worker removed. Its PC can no longer reach the cluster.",
+}
+WORKER_NAME_HINT = (
+    "Use lowercase letters, digits and dashes, starting and ending with a letter "
+    "or digit, like lab-pc-07."
+)
+
+
+def _worker_name(name: str) -> str:
+    if not WORKER_NAME.fullmatch(name):
+        raise HTTPException(404, "Worker not found")
+    return name
+
+
+def _worker_error(request: Request, exc: httpx.HTTPError) -> tuple[int, str]:
+    """
+    A failed worker action as a status and a message for the page. The
+    coordinator's 400, 404 and 409 messages come from the enrollment helper and
+    are written to be shown.
+
+    raises:
+        LoginRequired: If the session has expired.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        if code == 401:
+            raise LoginRequired(request.url.path)
+        if code in (400, 404, 409):
+            try:
+                detail = exc.response.json().get("detail")
+            except ValueError:
+                detail = None
+            if isinstance(detail, str):
+                return code, detail
+        if code == 422:
+            return 422, WORKER_NAME_HINT
+        if code == 502:
+            return 502, (
+                "The hub could not finish that. Try again; if it keeps failing, "
+                "see the enrollment helper's log (journalctl -u idlecloud-enroll)."
+            )
+    log.warning("worker action failed: %r", exc)
+    return 503, "The hub is not reachable right now. Try again shortly."
+
+
+def _zip_download(data: bytes, filename: str) -> Response:
+    return Response(
+        data,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            # it holds keys and tokens: no copy kept along the way
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+async def _workers_page(
+    request: Request, error: str | None = None, status: int = 200, name: str = ""
+) -> HTMLResponse:
+    results, errors, load_status = await _admin_load(
+        request, {"workers": coordinator.admin_workers(_token(request))}
+    )
+    now = datetime.now(UTC)
+    return _admin_page(
+        request,
+        "admin_workers.html",
+        errors,
+        status if error else load_status,
+        workers=[admintools.worker_row(w, now) for w in results["workers"] or []],
+        notice=WORKER_NOTICES.get(request.query_params.get("done", "")),
+        form_error=error,
+        form_name=name,
+    )
+
+
+async def _worker_page(
+    request: Request, name: str, error: str | None = None, status: int = 200
+) -> HTMLResponse:
+    results, errors, load_status = await _admin_load(
+        request,
+        {"worker": coordinator.admin_worker(_token(request), name)},
+        not_found="worker",
+    )
+    worker = results["worker"]
+    return _admin_page(
+        request,
+        "admin_worker.html",
+        errors,
+        status if error else load_status,
+        name=name,
+        worker=admintools.worker_row(worker, datetime.now(UTC)) if worker else None,
+        notice=None
+        if error
+        else WORKER_NOTICES.get(request.query_params.get("done", "")),
+        action_error=error,
+    )
+
+
+async def _worker_failed(
+    request: Request, name: str, exc: httpx.HTTPError
+) -> HTMLResponse:
+    """The worker's page, with what went wrong at the top."""
+    status, message = _worker_error(request, exc)
+    return await _worker_page(request, name, message, status)
+
+
+@app.get("/admin/workers", response_class=HTMLResponse, dependencies=[AdminOnly])
+async def admin_workers(request: Request):
+    """Campus PCs lent to the cluster, and the form to add one."""
+    return await _workers_page(request)
+
+
+@app.post("/admin/workers", response_class=HTMLResponse, dependencies=[AdminOnly])
+async def admin_add_worker(request: Request, name: Annotated[str, Form()] = ""):
+    """Adds a campus worker and opens its page, where its setup zip is."""
+    name = name.strip().lower()
+    if not WORKER_NAME.fullmatch(name):
+        return await _workers_page(request, WORKER_NAME_HINT, 422, name)
+    try:
+        await coordinator.add_worker(_token(request), name)
+    except httpx.HTTPError as exc:
+        status, message = _worker_error(request, exc)
+        return await _workers_page(request, message, status, name)
+    return RedirectResponse(f"/admin/workers/{name}?done=added", status_code=303)
+
+
+@app.get("/admin/workers/{name}", response_class=HTMLResponse, dependencies=[AdminOnly])
+async def admin_worker(request: Request, name: str):
+    """One campus worker: where it is in joining, and its downloads and actions."""
+    return await _worker_page(request, _worker_name(name))
+
+
+@app.get("/admin/workers/{name}/setup.zip", dependencies=[AdminOnly])
+async def admin_worker_setup(request: Request, name: str):
+    """The setup zip for install-worker.ps1 -Bundle, before the PC joins."""
+    name = _worker_name(name)
+    try:
+        data = await coordinator.worker_zip(_token(request), name, "setup")
+    except httpx.HTTPError as exc:
+        return await _worker_failed(request, name, exc)
+    return _zip_download(data, f"{name}-setup.zip")
+
+
+@app.post("/admin/workers/{name}/agent-credentials", dependencies=[AdminOnly])
+async def admin_worker_credentials(request: Request, name: str):
+    """
+    The agent credentials zip for install-worker.ps1 -AgentCredentials, after
+    the PC joins. Issues its heartbeat token first if it has none yet.
+    """
+    name = _worker_name(name)
+    token = _token(request)
+    try:
+        worker = await coordinator.admin_worker(token, name)
+        if worker["joined"] and not worker.get("heartbeat_token_expires_at"):
+            await coordinator.new_heartbeat_token(token, name)
+        data = await coordinator.worker_zip(token, name, "agent-credentials")
+    except httpx.HTTPError as exc:
+        return await _worker_failed(request, name, exc)
+    return _zip_download(data, f"{name}-agent-credentials.zip")
+
+
+async def _worker_action(
+    request: Request, name: str, action: Callable[[str, str], Awaitable], done: str
+):
+    """Runs one change, then shows the worker's page with its notice or error."""
+    name = _worker_name(name)
+    try:
+        await action(_token(request), name)
+    except httpx.HTTPError as exc:
+        return await _worker_failed(request, name, exc)
+    if done == "removed":
+        return RedirectResponse("/admin/workers?done=removed", status_code=303)
+    return RedirectResponse(f"/admin/workers/{name}?done={done}", status_code=303)
+
+
+@app.post("/admin/workers/{name}/join-token", dependencies=[AdminOnly])
+async def admin_worker_join_token(request: Request, name: str):
+    """Replaces the join token: the old setup zip stops working."""
+    return await _worker_action(request, name, coordinator.new_join_token, "join-token")
+
+
+@app.post("/admin/workers/{name}/heartbeat-token", dependencies=[AdminOnly])
+async def admin_worker_heartbeat_token(request: Request, name: str):
+    """Issues a new heartbeat token, e.g. before the old one runs out."""
+    return await _worker_action(
+        request, name, coordinator.new_heartbeat_token, "heartbeat-token"
+    )
+
+
+@app.post("/admin/workers/{name}/remove", dependencies=[AdminOnly])
+async def admin_worker_remove(request: Request, name: str):
+    """Removes the worker everywhere. Its PC can't reach the cluster afterwards."""
+    return await _worker_action(request, name, coordinator.remove_worker, "removed")
 
 
 @app.get("/healthz")

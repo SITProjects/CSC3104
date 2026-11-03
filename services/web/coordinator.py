@@ -1,5 +1,6 @@
 """The web app's only way of talking to the coordinator service."""
 
+import re
 from datetime import datetime
 from uuid import UUID
 
@@ -10,6 +11,17 @@ from services.web.settings import settings
 
 def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+# A Kubernetes node name, as the coordinator requires for a campus worker
+WORKER_NAME = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def _worker(name: str) -> str:
+    """/admin/workers/<name>, checked so a value like "../users" can't change the path."""
+    if not WORKER_NAME.fullmatch(name):
+        raise ValueError(f"not a worker name: {name!r}")
+    return f"/admin/workers/{name}"
 
 
 class CoordinatorClient:
@@ -159,6 +171,34 @@ class CoordinatorClient:
                 "job_offset": job_offset,
             },
         )
+
+    async def admin_workers(self, token: str) -> list:
+        return await self._send("GET", "/admin/workers", token)
+
+    async def admin_worker(self, token: str, name: str) -> dict:
+        return await self._send("GET", _worker(name), token)
+
+    async def add_worker(self, token: str, name: str) -> dict:
+        return await self._send("POST", "/admin/workers", token, json={"name": name})
+
+    async def remove_worker(self, token: str, name: str) -> None:
+        await self._send("DELETE", _worker(name), token)
+
+    async def new_join_token(self, token: str, name: str) -> dict:
+        return await self._send("POST", f"{_worker(name)}/join-token", token)
+
+    async def new_heartbeat_token(self, token: str, name: str) -> dict:
+        return await self._send("POST", f"{_worker(name)}/heartbeat-token", token)
+
+    async def worker_zip(self, token: str, name: str, which: str) -> bytes:
+        """The worker's "setup" or "agent-credentials" zip, as bytes."""
+        if which not in ("setup", "agent-credentials"):
+            raise ValueError(f"no such zip: {which}")
+        resp = await self._http.get(
+            f"{_worker(name)}/{which}.zip", headers=_bearer(token)
+        )
+        resp.raise_for_status()
+        return resp.content
 
     async def aclose(self) -> None:
         await self._http.aclose()

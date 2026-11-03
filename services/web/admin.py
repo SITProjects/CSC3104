@@ -15,7 +15,11 @@ EVENT_DETAILS = (
     ("replica_id", "replica"),
     ("attempt", "attempt"),
     ("exit_code", "exit"),
+    ("worker", "worker"),
+    ("by", "by"),
 )
+# Warn this long before a worker's heartbeat token runs out
+HEARTBEAT_WARN = timedelta(days=30)
 
 
 def sg_time(when: str | datetime | None, fmt: str = "%d %b %Y %H:%M SGT") -> str:
@@ -77,4 +81,42 @@ def event_row(event: dict[str, Any]) -> dict[str, Any]:
             for key, label in EVENT_DETAILS
             if detail.get(key) is not None
         ],
+    }
+
+
+def worker_row(worker: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """
+    One campus worker, as the workers pages show it: where it is in joining,
+    and what an admin should do next.
+    """
+    joined = worker["joined"]
+    if joined is None:
+        status = "Unknown"  # the cluster could not be asked
+    elif not joined:
+        status = "Waiting to join"
+    else:
+        # IDLE, BUSY or OFFLINE once its node agent sends heartbeats
+        status = worker.get("state") or "No heartbeats"
+    join_expires = worker.get("join_token_expires_at")
+    join_expired = bool(join_expires) and datetime.fromisoformat(join_expires) <= now
+    beat_expires = worker.get("heartbeat_token_expires_at")
+    beat_soon = (
+        bool(beat_expires)
+        and datetime.fromisoformat(beat_expires) - now <= HEARTBEAT_WARN
+    )
+    return {
+        **worker,
+        "status": status,
+        "heartbeat_ago": ago(worker.get("last_heartbeat"), now) or "never",
+        "join_token": (
+            None
+            if joined
+            else "Expired"
+            if join_expired or not join_expires
+            else f"Valid until {sg_time(join_expires)}"
+        ),
+        "join_expired": not joined and (join_expired or not join_expires),
+        "needs_credentials": bool(joined) and not beat_expires,
+        "heartbeat_until": sg_time(beat_expires, "%d %b %Y"),
+        "heartbeat_soon": beat_soon,
     }
