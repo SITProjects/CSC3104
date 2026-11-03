@@ -17,6 +17,10 @@ RETRY_ATTEMPTS = 3
 HOUSEKEEPING_INTERVAL = 60  # seconds
 FILE_RETENTION_HOURS = int(os.environ.get("FILE_RETENTION_HOURS", "24"))
 PLACEMENT_TIMEOUT = int(os.environ.get("PLACEMENT_TIMEOUT_S", "300"))  # seconds
+# imagePullPolicy for task Pods. Unset: Always for a tag such as :main, so a node
+# never keeps running an old build, and IfNotPresent for a pinned @sha256 digest.
+# The local compose stack sets IfNotPresent to use the images it loads itself.
+TASK_IMAGE_PULL_POLICY = os.environ.get("TASK_IMAGE_PULL_POLICY") or None
 # Node heartbeats: a projected service-account token for this audience, checked
 # with a TokenReview. Only these service accounts may send heartbeats, and only
 # for the node their Pod runs on, or the Node their token is bound to (lab PC
