@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% from "_macros.html" import admin_header, error_alert, icon, status_badge %}
+{% block title %}Campus workers{% endblock %}
+{% block width %}max-w-6xl{% endblock %}
+{% block content %}
+{{ admin_header("Campus workers", updated) }}
+<p class="mt-1 text-muted-foreground">Lab PCs lent to the cluster when idle. Add one here, then run the installer on the PC with its setup zip.</p>
+
+{% if notice %}
+<div class="alert mt-6" role="status">{{ icon("check") }}<h2>{{ notice }}</h2></div>
+{% endif %}
+
+<section class="card mt-6 px-4 py-4" aria-labelledby="add-worker">
+  <h2 id="add-worker" class="text-lg font-semibold">Add a worker</h2>
+  <form method="post" action="/admin/workers" class="mt-3 flex flex-wrap items-end gap-2">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="grid w-full gap-1 sm:w-auto">
+      <label class="label" for="worker-name">Node name</label>
+      <input class="input w-full font-mono sm:w-64" id="worker-name" name="name" value="{{ form_name }}" required
+             maxlength="63" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" placeholder="lab-pc-07"
+             aria-describedby="worker-name-hint"{% if form_error %} aria-invalid="true"{% endif %}>
+    </div>
+    <button type="submit" class="btn" data-size="sm">{{ icon("plus") }} Add worker</button>
+  </form>
+  <p id="worker-name-hint" class="mt-2 text-sm text-muted-foreground">The name the PC will have in the cluster: lowercase letters, digits and dashes.</p>
+  {% if form_error %}<div class="mt-3">{{ error_alert(form_error) }}</div>{% endif %}
+</section>
+
+<div class="mt-6">
+{% if errors.workers %}{{ error_alert(errors.workers) }}{% else %}
+<div class="table-container" tabindex="0" role="region" aria-label="Campus workers">
+  <table class="table">
+    <caption>Select a worker for its downloads and actions.</caption>
+    <thead><tr>
+      <th scope="col">Worker</th><th scope="col">VPN address</th><th scope="col">Status</th>
+      <th scope="col">Last heartbeat</th><th scope="col">Next step</th>
+    </tr></thead>
+    <tbody>
+    {% for w in workers %}
+      <tr>
+        <td><a class="font-mono font-medium underline-offset-4 hover:underline" href="/admin/workers/{{ w.name|urlencode }}">{{ w.name }}</a></td>
+        <td class="font-mono">{{ w.ip }}</td>
+        <td>{{ status_badge(w.status) }}</td>
+        <td>{{ w.heartbeat_ago }}</td>
+        <td class="text-sm">
+          {% if w.joined is none %}<span class="text-muted-foreground">Can't tell right now</span>
+          {% elif not w.joined and w.join_expired %}Request a new join token
+          {% elif not w.joined %}Run the installer with the setup zip
+          {% elif w.needs_credentials %}Install the agent credentials
+          {% elif w.heartbeat_soon %}Renew the heartbeat token
+          {% else %}<span class="text-muted-foreground">Nothing to do</span>{% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="text-muted-foreground">No campus workers yet. Add one above.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+</div>
+{% endblock %}
