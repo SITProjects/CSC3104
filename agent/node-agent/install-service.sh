@@ -23,13 +23,20 @@ TOKEN_SRC=""
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --kubeconfig) KUBECONFIG_SRC="${2:-}"; shift 2 || die "$USAGE" ;;
-        --coordinator-token) TOKEN_SRC="${2:-}"; shift 2 || die "$USAGE" ;;
+        # An empty value is an error, not "no file": it is almost always a
+        # variable that was never set
+        --kubeconfig)
+            [[ -n "${2:-}" ]] || die "--kubeconfig needs a file."
+            KUBECONFIG_SRC="$2"; shift 2 ;;
+        --coordinator-token)
+            [[ -n "${2:-}" ]] || die "--coordinator-token needs a file."
+            TOKEN_SRC="$2"; shift 2 ;;
         --*) die "$USAGE" ;;
         *) POSITIONAL+=("$1"); shift ;;
     esac
 done
-set -- "${POSITIONAL[@]}"
+# ${a[@]+...}: bash before 4.4 treats an empty array as unset under set -u
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 [[ $# -ge 1 && $# -le 2 ]] || die "$USAGE"
 for FILE in "$KUBECONFIG_SRC" "$TOKEN_SRC"; do
     [[ -z "$FILE" || -s "$FILE" ]] || die "Credential file is missing or empty: $FILE"

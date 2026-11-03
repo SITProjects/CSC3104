@@ -15,7 +15,10 @@ pages). There is no command-line client.
                                       after: node-agent.kubeconfig and
                                       coordinator.token, for the agent credentials
 
-Requests are handled one at a time, under the same lock as add-peer.sh.
+Each connection gets its own thread, so a slow client never holds up the
+others. Every change runs under the same file lock as add-peer.sh, so changes
+still happen one at a time; reads never see half a file, since every write
+replaces its file in one step.
 Every action can be repeated: adding an existing peer returns it, and finishes
 any step a crash left undone.
 """
@@ -44,6 +47,9 @@ from enroll.run import Runner, run
 log = logging.getLogger("enroll")
 
 MAX_BODY = 16 * 1024
+# A client that stops sending has its connection dropped after this long, so
+# its thread does not wait forever
+CLIENT_TIMEOUT_S = 10
 TOKEN_FILE = "agent-token"
 EXPIRES_FILE = "agent-token.expires"
 KUBECONFIG_FILE = "node-agent.kubeconfig"
@@ -348,6 +354,8 @@ def route(service: Service, method: str, path: str, body: dict) -> tuple[int, ob
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # Applied to the socket by StreamRequestHandler
+    timeout = CLIENT_TIMEOUT_S
     service: Service  # set by serve()
 
     def do_GET(self) -> None:
@@ -372,11 +380,19 @@ class Handler(BaseHTTPRequestHandler):
         if data:
             self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        # One request per connection, so no thread lingers on an idle client
+        self.send_header("Connection", "close")
+        self.close_connection = True
         self.end_headers()
         self.wfile.write(data)
 
     def _body(self) -> dict:
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise BadRequest("Invalid Content-Length.") from None
+        if length < 0:
+            raise BadRequest("Invalid Content-Length.")
         if length > MAX_BODY:
             raise BadRequest("Request body too large.")
         if not length:
@@ -397,8 +413,9 @@ class Handler(BaseHTTPRequestHandler):
         log.info("%s", format % args)
 
 
-class UnixServer(socketserver.UnixStreamServer):
-    # One request at a time: every change edits the same files
+class UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    # A thread per connection; Service.locked() keeps changes one at a time
+    daemon_threads = True
     allow_reuse_address = False
 
 

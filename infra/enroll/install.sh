@@ -21,7 +21,9 @@ die() {
 ENDPOINT=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --endpoint) ENDPOINT="${2:-}"; shift 2 || die "--endpoint needs a value." ;;
+        --endpoint)
+            [[ -n "${2:-}" ]] || die "--endpoint needs a value."
+            ENDPOINT="$2"; shift 2 ;;
         *) die "Usage: $0 [--endpoint <public-ip>:<port>]" ;;
     esac
 done
