@@ -18,12 +18,14 @@ for every change and download.
 
 import io
 import json
+import logging
 import zipfile
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.settings import NODE_AGENT_COORDINATOR_URL
@@ -33,7 +35,9 @@ from services.coordinator.enroll import EnrollClient, get_enroll_client
 from shared.db import User, session_manager
 from shared.db.models import NodeState
 
+log = logging.getLogger("coordinator")
 router = APIRouter(prefix="/admin/workers", tags=["admin"])
+_BAD_ANSWER = "The enrollment helper sent an unexpected answer."
 DbSession = Annotated[AsyncSession, Depends(session_manager.get_session)]
 Enroll = Annotated[EnrollClient, Depends(get_enroll_client)]
 # A Kubernetes node name, as infra/enroll/names.py and join-worker.sh require
@@ -67,6 +71,16 @@ class WorkerView(BaseModel):
     last_heartbeat: datetime | None = None
 
 
+class HelperFiles(BaseModel):
+    """The helper's GET /peers/{name}/files answer."""
+
+    # Strict: "yes" or 1 must not pass for joined and hand out the wrong files
+    joined: StrictBool
+    files: dict[str, str]
+    join_token_expires_at: datetime | None = None
+    heartbeat_token_expires_at: datetime | None = None
+
+
 class JoinTokenOut(BaseModel):
     name: str
     join_token_expires_at: datetime
@@ -77,13 +91,20 @@ class HeartbeatTokenOut(BaseModel):
     heartbeat_token_expires_at: datetime
 
 
+def _valid[T: BaseModel](model: type[T], data: Any) -> T:
+    """The helper's answer as a model; a 502 if it isn't the shape expected."""
+    try:
+        return model.model_validate(data)
+    except ValidationError:
+        log.warning("enrollment helper sent an unexpected %s: %r", model.__name__, data)
+        raise HTTPException(502, _BAD_ANSWER) from None
+
+
 def _view(peer: dict, nodes: dict[str, Any]) -> WorkerView:
-    node = nodes.get(peer["name"])
-    return WorkerView(
-        **{k: peer.get(k) for k in WorkerView.model_fields if k in peer},
-        state=node.state if node else None,
-        last_heartbeat=node.last_heartbeat if node else None,
-    )
+    view = _valid(WorkerView, peer)
+    if node := nodes.get(view.name):
+        view.state, view.last_heartbeat = node.state, node.last_heartbeat
+    return view
 
 
 async def _nodes(session: AsyncSession) -> dict[str, Any]:
@@ -94,9 +115,13 @@ async def _nodes(session: AsyncSession) -> dict[str, Any]:
 async def _worker(enroll: EnrollClient, name: str) -> dict:
     """The helper's peer, if it is a campus worker (not a laptop or burst slot)."""
     peer = await enroll.peer(name)
-    if peer.get("type") != "worker":
+    if not isinstance(peer, dict) or peer.get("type") != "worker":
         raise HTTPException(404, f"No worker named {name}.")
     return peer
+
+
+async def _files(enroll: EnrollClient, name: str) -> HelperFiles:
+    return _valid(HelperFiles, await enroll.files(name))
 
 
 async def _record(
@@ -113,6 +138,29 @@ async def _record(
             None,
             {"worker": name, "by": admin.email, **detail},
         )
+
+
+async def _audited[R](
+    session: AsyncSession,
+    event_type: str,
+    admin: User,
+    name: str,
+    action: Callable[[], Awaitable[R]],
+) -> R:
+    """
+    Records the event, then runs the action on the hub. The record comes first,
+    so nothing changes on the hub unrecorded: if the database can't take it,
+    the action never runs. If the action then fails, <event_type>_failed is
+    recorded with its status.
+    """
+    await _record(session, event_type, admin, name)
+    try:
+        return await action()
+    except HTTPException as error:
+        await _record(
+            session, f"{event_type}_failed", admin, name, status=error.status_code
+        )
+        raise
 
 
 def _zip(name: str, files: dict[str, str], readme: str) -> bytes:
@@ -144,8 +192,12 @@ def _download(data: bytes, filename: str) -> Response:
     )
 
 
-def _expired(timestamp: str | None) -> bool:
-    return timestamp is None or datetime.fromisoformat(timestamp) <= datetime.now(UTC)
+def _expired(when: datetime | None) -> bool:
+    if when is None:
+        return True
+    if when.tzinfo is None:  # the helper writes UTC; a bare time is taken as UTC
+        when = when.replace(tzinfo=UTC)
+    return when <= datetime.now(UTC)
 
 
 @router.get("")
@@ -153,9 +205,15 @@ async def list_workers(
     admin: AdminUser, session: DbSession, enroll: Enroll
 ) -> list[WorkerView]:
     """Every campus worker, with its node's state once it sends heartbeats."""
-    peers = [p for p in await enroll.peers() if p.get("type") == "worker"]
+    peers = await enroll.peers()
+    if not isinstance(peers, list):
+        raise HTTPException(502, _BAD_ANSWER)
     nodes = await _nodes(session)
-    return [_view(peer, nodes) for peer in peers]
+    return [
+        _view(p, nodes)
+        for p in peers
+        if isinstance(p, dict) and p.get("type") == "worker"
+    ]
 
 
 @router.post("", status_code=201)
@@ -171,14 +229,18 @@ async def add_worker(
         HTTPException: 400 for a bad name, 409 if a laptop or burst slot has
             it, 502 or 503 if the helper failed or can't be reached.
     """
-    peer = await enroll.add_worker(body.name)
-    if peer.get("type") != "worker":
-        raise HTTPException(409, f"{body.name} is a {peer.get('type')}, not a worker.")
-    if not peer.get("joined"):
-        await enroll.issue_join_token(body.name)
-    await enroll.make_identity(body.name)
-    peer = await enroll.peer(body.name)
-    await _record(session, "worker_added", admin, body.name, ip=peer["ip"])
+
+    async def add() -> dict:
+        peer = await enroll.add_worker(body.name)
+        if not isinstance(peer, dict) or peer.get("type") != "worker":
+            kind = peer.get("type") if isinstance(peer, dict) else "different peer"
+            raise HTTPException(409, f"{body.name} is a {kind}, not a worker.")
+        if not peer.get("joined"):
+            await enroll.issue_join_token(body.name)
+        await enroll.make_identity(body.name)
+        return await enroll.peer(body.name)
+
+    peer = await _audited(session, "worker_added", admin, body.name, add)
     return _view(peer, await _nodes(session))
 
 
@@ -199,8 +261,7 @@ async def remove_worker(
     the nodes table stays, for its history.
     """
     await _worker(enroll, name)
-    await enroll.remove(name)
-    await _record(session, "worker_removed", admin, name)
+    await _audited(session, "worker_removed", admin, name, lambda: enroll.remove(name))
     return Response(status_code=204)
 
 
@@ -211,9 +272,14 @@ async def new_join_token(
     """Replaces the join token, e.g. once it expired before the PC joined, or
     to rejoin a PC (install-worker.ps1 -Rejoin). The old one stops working."""
     await _worker(enroll, name)
-    issued = await enroll.issue_join_token(name)
-    await _record(session, "worker_join_token", admin, name)
-    return JoinTokenOut(**issued)
+    issued = await _audited(
+        session,
+        "worker_join_token",
+        admin,
+        name,
+        lambda: enroll.issue_join_token(name),
+    )
+    return _valid(JoinTokenOut, issued)
 
 
 @router.post("/{name}/heartbeat-token")
@@ -228,9 +294,14 @@ async def new_heartbeat_token(
         HTTPException: 409 if the PC has not joined yet.
     """
     await _worker(enroll, name)
-    issued = await enroll.issue_heartbeat_token(name)
-    await _record(session, "worker_heartbeat_token", admin, name)
-    return HeartbeatTokenOut(**issued)
+    issued = await _audited(
+        session,
+        "worker_heartbeat_token",
+        admin,
+        name,
+        lambda: enroll.issue_heartbeat_token(name),
+    )
+    return _valid(HeartbeatTokenOut, issued)
 
 
 @router.get("/{name}/setup.zip")
@@ -239,19 +310,28 @@ async def setup_zip(
 ) -> Response:
     """
     The setup zip for install-worker.ps1 -Bundle: wg0.conf, the join token and
-    the node agent's kubeconfig.
+    the node agent's kubeconfig. The download is recorded before the zip is
+    handed out.
 
     raises:
         HTTPException: 409 if the PC already joined (its keys stay on the hub;
-            use the agent credentials), or the join token expired.
+            use the agent credentials), or the join token expired. 503 if the
+            coordinator's address for node agents is unknown.
     """
+    if not NODE_AGENT_COORDINATOR_URL:
+        # Without it the PC's node agent would never send a heartbeat
+        raise HTTPException(
+            503,
+            "The coordinator's address for node agents is unknown. Set "
+            "NODE_AGENT_COORDINATOR_URL on the coordinator.",
+        )
     await _worker(enroll, name)
-    found = await enroll.files(name)
-    if found["joined"]:
+    found = await _files(enroll, name)
+    if found.joined:
         raise HTTPException(
             409, f"{name} has already joined. Download its agent credentials."
         )
-    if _expired(found.get("join_token_expires_at")):
+    if _expired(found.join_token_expires_at):
         raise HTTPException(409, f"{name}'s join token has expired. Request a new one.")
     files = _pick(found, "wg_config", "join_token", "kubeconfig")
     if len(files) < 3:
@@ -267,15 +347,16 @@ async def agent_credentials_zip(
 ) -> Response:
     """
     The agent credentials for install-worker.ps1 -AgentCredentials: the
-    heartbeat token and the node agent's kubeconfig.
+    heartbeat token and the node agent's kubeconfig. The download is recorded
+    before the zip is handed out.
 
     raises:
         HTTPException: 409 if the PC has not joined yet, or has no heartbeat
             token (POST .../heartbeat-token first).
     """
     await _worker(enroll, name)
-    found = await enroll.files(name)
-    if not found["joined"]:
+    found = await _files(enroll, name)
+    if not found.joined:
         raise HTTPException(409, f"{name} has not joined yet.")
     files = _pick(found, "kubeconfig", "coordinator_token")
     if "coordinator_token" not in files:
@@ -285,12 +366,12 @@ async def agent_credentials_zip(
     return _download(data, f"{name}-agent-credentials.zip")
 
 
-def _pick(found: dict, *keys: str) -> dict[str, str]:
+def _pick(found: HelperFiles, *keys: str) -> dict[str, str]:
     """The helper's files by the zip's keys, leaving out any it did not send."""
     return {
-        key: found["files"][ZIP_FILES[key]]
+        key: found.files[ZIP_FILES[key]]
         for key in keys
-        if ZIP_FILES[key] in found["files"]
+        if ZIP_FILES[key] in found.files
     }
 
 

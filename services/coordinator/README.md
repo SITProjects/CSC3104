@@ -33,7 +33,9 @@ under `/admin/workers` (admins only). The enrollment helper on the hub
 credentials, and keeps them; nothing about workers is stored in the database.
 Each worker's `state` and `last_heartbeat` come from the `nodes` table once its
 node agent sends heartbeats. Every change and download is recorded as an event
-(`worker_added`, `worker_setup_downloaded`, ...) with the admin's email.
+(`worker_added`, `worker_setup_downloaded`, ...) with the admin's email, before
+the helper acts or the zip is handed out: if the event can't be written,
+nothing happens. A change that then fails adds `<event>_failed` with its status.
 
 - `POST /admin/workers` `{"name"}` adds one; adding it again finishes any step
   that failed before.
@@ -46,8 +48,11 @@ node agent sends heartbeats. Every change and download is recorded as an event
   access and peer.
 
 The zips name the coordinator for the node agent's heartbeats: the Service's
-ClusterIP, or `NODE_AGENT_COORDINATOR_URL`. Helper errors pass through as 400,
-404 or 409; a failed command is 502, and a helper that can't be reached 503.
+ClusterIP, or `NODE_AGENT_COORDINATOR_URL`. With neither, `setup.zip` answers
+503 rather than hand out a zip whose node agent could never send a heartbeat.
+Helper errors pass through as 400, 404 or 409; a failed command, or an answer
+not in the expected shape, is 502, and a helper that can't be reached 503.
+
 
 ## Copies of a task run on different PCs
 
