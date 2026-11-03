@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon %}
+{% block title %}Idle-Compute Cloud{% endblock %}
+{% block public_width %}max-w-5xl{% endblock %}
+{% block content %}
+<header class="flex items-center">
+  <a href="/" class="flex items-center gap-2 font-semibold">
+    <span class="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">{{ icon("cpu", "size-4") }}</span>
+    Idle-Compute Cloud
+  </a>
+</header>
+
+<section class="mx-auto mt-16 max-w-2xl text-center" aria-labelledby="hero-heading">
+  <h1 id="hero-heading" class="text-4xl font-semibold tracking-tight sm:text-5xl">Put idle campus PCs to work</h1>
+  <p class="mt-4 text-lg text-muted-foreground">
+    Submit a job and let computers that nobody is using run it in parallel.
+    Results are checked before you download them.
+  </p>
+  <div class="mt-8 flex flex-wrap justify-center gap-3">
+    <a class="btn" data-size="lg" href="/signup">Create an account</a>
+    <a class="btn" data-variant="outline" data-size="lg" href="/login">Log in</a>
+  </div>
+</section>
+
+<section class="mt-20" aria-labelledby="how-heading">
+  <h2 id="how-heading" class="text-center text-2xl font-semibold tracking-tight">How it works</h2>
+  <ol class="mt-8 grid gap-4 sm:grid-cols-3">
+    <li class="card px-5 py-4">
+      <span class="flex size-9 items-center justify-center rounded-lg bg-muted">{{ icon("upload", "size-4") }}</span>
+      <h3 class="mt-3 font-semibold">1. Submit a job</h3>
+      <p class="mt-1 text-sm text-muted-foreground">Upload a PDF for text recognition, or send a Python or PyTorch script with its files.</p>
+    </li>
+    <li class="card px-5 py-4">
+      <span class="flex size-9 items-center justify-center rounded-lg bg-muted">{{ icon("cpu", "size-4") }}</span>
+      <h3 class="mt-3 font-semibold">2. Idle PCs run it</h3>
+      <p class="mt-1 text-sm text-muted-foreground">The work is split into tasks that run on campus PCs while they are idle. If a PC is taken back, its task moves to another one.</p>
+    </li>
+    <li class="card px-5 py-4">
+      <span class="flex size-9 items-center justify-center rounded-lg bg-muted">{{ icon("shield-check", "size-4") }}</span>
+      <h3 class="mt-3 font-semibold">3. Results are verified</h3>
+      <p class="mt-1 text-sm text-muted-foreground">Copies of a task are compared and spot-checked before its result counts. Then you download it.</p>
+    </li>
+  </ol>
+</section>
+
+<section class="mt-16 grid gap-4 sm:grid-cols-3" aria-label="Features">
+  <div>
+    <h3 class="flex items-center gap-2 font-semibold">{{ icon("activity", "size-4") }} Live progress</h3>
+    <p class="mt-1 text-sm text-muted-foreground">Follow every task, the PC running it and the vote as it happens.</p>
+  </div>
+  <div>
+    <h3 class="flex items-center gap-2 font-semibold">{{ icon("server", "size-4") }} Extra capacity</h3>
+    <p class="mt-1 text-sm text-muted-foreground">When the campus is busy, cloud workers are added so your job still finishes.</p>
+  </div>
+  <div>
+    <h3 class="flex items-center gap-2 font-semibold">{{ icon("download", "size-4") }} Simple results</h3>
+    <p class="mt-1 text-sm text-muted-foreground">Download the recognised text, or your script's output folder and log.</p>
+  </div>
+</section>
+
+<footer class="mt-20 border-t pt-6 text-center text-sm text-muted-foreground">
+  CSC3104 Cloud and Distributed Computing project.
+</footer>
+{% endblock %}

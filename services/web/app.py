@@ -6,6 +6,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, time, timedelta
+from http import HTTPStatus
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote, urlencode, urlsplit
@@ -25,6 +26,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import (
     HTMLResponse,
     RedirectResponse,
@@ -33,6 +35,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from services.web import admin as admintools
 from services.web import jobs as jobtools
@@ -190,6 +193,63 @@ async def send_to_login(request: Request, exc: LoginRequired):
     # drop a stale or expired token so /login doesn't bounce the visitor back
     response.delete_cookie(settings.session_cookie, path="/")
     return response
+
+
+# What an error page says: (title, message, icon). 401, 403 and 503 always use
+# this wording; for a 404 or any other status the error's own message, if it has
+# one, replaces the message.
+ERROR_PAGES = {
+    401: (
+        "You've been signed out",
+        "For your security, your session ended. Log in again to pick up where you left off.",
+        "clock",
+    ),
+    403: (
+        "This page is off-limits",
+        (
+            "Looks like you're trying to visit a page you don't have access to. "
+            "If you think that's a mistake, ask an administrator to check your account."
+        ),
+        "lock",
+    ),
+    404: (
+        "We can't find that page",
+        "The link may be broken, or the page may have moved. Let's get you back on track.",
+        "search",
+    ),
+    503: (
+        "We're having trouble right now",
+        "Something we depend on isn't responding. Please try again in a moment.",
+        "triangle-alert",
+    ),
+}
+OTHER_ERROR_PAGE = (
+    "Something went wrong",
+    "Please try again, or head back to the start.",
+    "circle-alert",
+)
+FIXED_WORDING = {401, 403, 503}
+STOCK_DETAILS = {
+    status.phrase for status in HTTPStatus
+}  # Starlette's own ("Not Found")
+
+
+@app.exception_handler(StarletteHTTPException)
+async def error_page(request: Request, exc: StarletteHTTPException):
+    """Shows browsers an error page; scripts and API clients still get JSON."""
+    if "text/html" not in request.headers.get("accept", ""):
+        return await http_exception_handler(request, exc)
+    title, message, glyph = ERROR_PAGES.get(exc.status_code, OTHER_ERROR_PAGE)
+    # the app's own messages ("Job not found") are written to be shown
+    if exc.status_code not in FIXED_WORDING and exc.detail not in STOCK_DETAILS:
+        message = exc.detail
+    return templates.TemplateResponse(
+        request,
+        "error.html",
+        {"status": exc.status_code, "title": title, "message": message, "glyph": glyph},
+        status_code=exc.status_code,
+        headers=exc.headers,
+    )
 
 
 async def current_user(request: Request) -> dict:
@@ -718,9 +778,9 @@ async def _with_progress(token: str, row: dict) -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    """The signed-in user's homepage: running jobs, counts and recent jobs."""
+    """The landing page for visitors; the signed-in user's jobs dashboard."""
     if not request.cookies.get(settings.session_cookie):
-        return RedirectResponse("/login", status_code=303)
+        return templates.TemplateResponse(request, "landing.html")
     user = await current_user(request)
     if user.get("role") == "ADMIN":
         return RedirectResponse("/admin", status_code=303)  # admins have their own

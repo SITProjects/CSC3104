@@ -94,6 +94,18 @@ returns the same data once as JSON. `/jobs/{id}/result.txt` downloads the text, 
 the winning replicas' `result.json` (or `output/result.txt` if something wrote it);
 `POST /jobs/{id}/cancel` cancels.
 
+## Landing and error pages
+
+`/` shows a public landing page (`templates/landing.html`) to visitors without a
+session cookie, and the jobs dashboard (or `/admin` for admins) to everyone else.
+Browsers that get an HTTP error (`Accept: text/html`) see `templates/error.html`
+instead of JSON: "This page is off-limits" for 403 (a user opening `/admin`, an
+admin opening My jobs), "We can't find that page" for 404, "You've been signed out"
+for 401, "We're having trouble right now" for 503 and "Something went wrong" for
+the rest. The pages show no status codes. Scripts and API clients still get
+`{"detail": ...}`. The wording and icons are in `ERROR_PAGES` in `app.py`; a 404 or
+other error that carries its own message ("Job not found") shows that message.
+
 ## Deploy
 
 `infra/k8s/base/web.yml` runs the web app in `idlecloud-system` on the AWS control
