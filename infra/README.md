@@ -42,7 +42,8 @@ Open http://localhost:8000 (seeded logins: `user@example.com` / `password123`,
   network (`172.29.0.10` and `172.29.0.11`), because Pods can't resolve compose
   service names.
 - The worker nodes have their own image store: `scripts/load-worker-images.sh`
-  builds `idlecloud/ocr` and loads it into each. A recreated worker volume needs
+  builds `ghcr.io/sitprojects/idlecloud-ocr:main` and the other worker images
+  and loads them into each. A recreated worker volume needs
   it again.
 - A Test workload job (New job page) is the quickest check: its copies
   report the same fixed result, so it should reach Completed in under a minute.

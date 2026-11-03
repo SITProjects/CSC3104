@@ -1,6 +1,6 @@
 # Build from the repo root, so the shared helpers can be copied in:
-#   docker build -f worker/ocr-task/Dockerfile -t idlecloud/ocr:0.1.0 .
-# The tag must match the image in shared/migrations/003_seed_ocr_job_type.sql.
+#   docker build -f worker/ocr-task/Dockerfile -t ghcr.io/sitprojects/idlecloud-ocr:main .
+# The tag must match the image in shared/migrations/013_ocr_ghcr_image.sql.
 FROM ghcr.io/astral-sh/uv:0.13.5 AS uv
 FROM python:3.12-slim
 
