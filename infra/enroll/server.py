@@ -7,7 +7,12 @@
     DELETE /peers/{name}              remove it everywhere
     POST   /peers/{name}/join-token   replace its K3s join token
     DELETE /peers/{name}/join-token   revoke it
-    GET    /peers/{name}/files        wg0.conf and agent-token, for the setup zip
+    POST   /peers/{name}/identity     make the node agent's kubeconfig (workers)
+    POST   /peers/{name}/heartbeat-token  a new coordinator.token (joined workers)
+    GET    /peers/{name}/files        before joining: wg0.conf, agent-token and
+                                      node-agent.kubeconfig, for the setup zip;
+                                      after: node-agent.kubeconfig and
+                                      coordinator.token, for the agent credentials
 
 Requests are handled one at a time, under the same lock as add-peer.sh.
 Every action can be repeated: adding an existing peer returns it, and finishes
@@ -22,13 +27,14 @@ import re
 import signal
 import socketserver
 import sys
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
-from enroll import k3s, names, wg
+from enroll import identity, k3s, names, wg
 from enroll.config import Config, load
 from enroll.errors import BadRequest, CommandFailed, Conflict, HelperError, NotFound
 from enroll.peers import Peer, PeerStore
@@ -39,6 +45,9 @@ log = logging.getLogger("enroll")
 MAX_BODY = 16 * 1024
 TOKEN_FILE = "agent-token"
 EXPIRES_FILE = "agent-token.expires"
+KUBECONFIG_FILE = "node-agent.kubeconfig"
+HEARTBEAT_FILE = "coordinator.token"
+HEARTBEAT_EXPIRES_FILE = "coordinator.token.expires"
 
 
 class Service:
@@ -47,10 +56,12 @@ class Service:
         config: Config,
         runner: Runner = run,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        sleep: Callable[[float], None] = time.sleep,
     ):
         self.config = config
         self.run = runner
         self.clock = clock
+        self.sleep = sleep
         self.store = PeerStore(config.peers_dir, config.peers_file)
 
     @contextmanager
@@ -79,16 +90,28 @@ class Service:
 
     def files(self, name: str) -> dict:
         peer = self._peer(name)
-        if names.joins_cluster(peer.peer_type) and self._has_joined(name):
-            # Its keys are only needed to join; after that they stay on the hub
-            raise Conflict(f"{name} has already joined the cluster.")
-        files = {"wg0.conf": self.store.read(name, "wg0.conf")}
-        if names.joins_cluster(peer.peer_type):
-            files[TOKEN_FILE] = self.store.read(name, TOKEN_FILE)
+        worker = peer.peer_type == "worker"
+        joined = names.joins_cluster(peer.peer_type) and self._has_joined(name)
+        if not names.joins_cluster(peer.peer_type):
+            wanted = ["wg0.conf"]
+        elif joined:
+            if not worker:
+                raise Conflict(f"{name} has already joined the cluster.")
+            # Its keys and join token are only needed to join; after that they
+            # stay on the hub
+            wanted = [KUBECONFIG_FILE, HEARTBEAT_FILE]
+        else:
+            wanted = ["wg0.conf", TOKEN_FILE] + ([KUBECONFIG_FILE] if worker else [])
+        files = {}
+        for filename in wanted:
+            if (text := self.store.read(name, filename)) is not None:
+                files[filename] = text
         return {
             "name": name,
-            "files": {k: v for k, v in files.items() if v is not None},
+            "joined": joined,
+            "files": files,
             "join_token_expires_at": self.store.read(name, EXPIRES_FILE),
+            "heartbeat_token_expires_at": self.store.read(name, HEARTBEAT_EXPIRES_FILE),
         }
 
     # ---------- changes ----------
@@ -150,12 +173,50 @@ class Service:
             self._peer(name)
             self._revoke(name)
 
+    def make_agent_identity(self, name: str) -> dict:
+        with self.locked():
+            self._worker(name)
+            kubeconfig = identity.make_kubeconfig(
+                self.run,
+                self.config.kubeconfig,
+                self.config.node_agent_policy,
+                name,
+                self.config.api_server,
+                self.sleep,
+            )
+            self.store.write(name, KUBECONFIG_FILE, kubeconfig)
+            log.info("made the node agent's kubeconfig for %s", name)
+        return self.get_peer(name)
+
+    def issue_heartbeat_token(self, name: str) -> dict:
+        with self.locked():
+            self._worker(name)
+            if not self._has_joined(name):
+                # The token is bound to the Node, which exists only after joining
+                raise Conflict(f"{name} has not joined the cluster yet.")
+            token, expires = identity.heartbeat_token(
+                self.run,
+                self.config.kubeconfig,
+                name,
+                self.config.heartbeat_duration,
+                self.clock(),
+            )
+            self.store.write(name, HEARTBEAT_FILE, token + "\n")
+            self.store.write(name, HEARTBEAT_EXPIRES_FILE, expires.isoformat())
+            log.info("issued a heartbeat token for %s, valid until %s", name, expires)
+        return {"name": name, "heartbeat_token_expires_at": expires.isoformat()}
+
     def delete_peer(self, name: str) -> None:
         names.check_name(name)
         with self.locked():
             peer = self.store.load(name)
             if peer:
                 self._revoke(name)
+                # Node first: without the node, its heartbeat token stops working
+                if names.joins_cluster(peer.peer_type):
+                    identity.remove_node(self.run, self.config.kubeconfig, name)
+                if peer.peer_type == "worker":
+                    identity.delete_account(self.run, self.config.kubeconfig, name)
                 wg.unset_peer(self.run, self.config.wg_interface, peer.public_key)
                 hub_conf = self.config.wg_config.read_text()
                 if wg.has_peer(hub_conf, peer.public_key):
@@ -174,6 +235,13 @@ class Service:
         peer = self.store.load(names.check_name(name))
         if peer is None:
             raise NotFound(f"No peer named {name}.")
+        return peer
+
+    def _worker(self, name: str) -> Peer:
+        peer = self._peer(name)
+        if peer.peer_type != "worker":
+            # Burst workers run no node agent, and laptops never join
+            raise Conflict(f"{name} is a {peer.peer_type}, not a campus worker.")
         return peer
 
     def _check_name_free(self, name: str) -> None:
@@ -228,6 +296,10 @@ class Service:
             "public_key": peer.public_key,
             "joined": joined,
             "join_token_expires_at": self.store.read(peer.name, EXPIRES_FILE),
+            "agent_kubeconfig": self.store.read(peer.name, KUBECONFIG_FILE) is not None,
+            "heartbeat_token_expires_at": self.store.read(
+                peer.name, HEARTBEAT_EXPIRES_FILE
+            ),
         }
 
 
@@ -236,6 +308,8 @@ class Service:
 _PEER = re.compile(r"/peers/([^/]+)")
 _PEER_TOKEN = re.compile(r"/peers/([^/]+)/join-token")
 _PEER_FILES = re.compile(r"/peers/([^/]+)/files")
+_PEER_IDENTITY = re.compile(r"/peers/([^/]+)/identity")
+_PEER_HEARTBEAT = re.compile(r"/peers/([^/]+)/heartbeat-token")
 
 
 def route(service: Service, method: str, path: str, body: dict) -> tuple[int, object]:
@@ -258,6 +332,10 @@ def route(service: Service, method: str, path: str, body: dict) -> tuple[int, ob
             return 204, None
     if (match := _PEER_FILES.fullmatch(path)) and method == "GET":
         return 200, service.files(match.group(1))
+    if (match := _PEER_IDENTITY.fullmatch(path)) and method == "POST":
+        return 200, service.make_agent_identity(match.group(1))
+    if (match := _PEER_HEARTBEAT.fullmatch(path)) and method == "POST":
+        return 200, service.issue_heartbeat_token(match.group(1))
     if match := _PEER.fullmatch(path):
         if method == "GET":
             return 200, service.get_peer(match.group(1))

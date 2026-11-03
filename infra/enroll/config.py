@@ -26,6 +26,12 @@ class Config:
     kubeconfig: Path = Path("/etc/rancher/k3s/k3s.yaml")
     # How long a join token works. A joined PC keeps working after it expires.
     join_token_ttl: str = "24h"
+    # The K3s API as node agents reach it: through WireGuard, not the public IP
+    api_server: str = "https://10.10.0.1:6443"
+    # agent/node-agent/node-agent-policy.yml, copied here when the helper is installed
+    node_agent_policy: Path = Path("/opt/idlecloud/enroll/node-agent-policy.yml")
+    # How long a heartbeat token works (HEARTBEAT_DURATION in make-kubeconfig.sh)
+    heartbeat_duration: str = "8760h"
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -62,4 +68,8 @@ def load(env: Mapping[str, str] = os.environ, env_file: Path = ENV_FILE) -> Conf
         lock_path=path("LOCK_PATH", defaults.lock_path),
         kubeconfig=path("KUBECONFIG", defaults.kubeconfig),
         join_token_ttl=values.get("JOIN_TOKEN_TTL") or defaults.join_token_ttl,
+        api_server=values.get("API_SERVER") or defaults.api_server,
+        node_agent_policy=path("NODE_AGENT_POLICY", defaults.node_agent_policy),
+        heartbeat_duration=values.get("HEARTBEAT_DURATION")
+        or defaults.heartbeat_duration,
     )
