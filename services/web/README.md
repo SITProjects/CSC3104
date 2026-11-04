@@ -94,6 +94,38 @@ returns the same data once as JSON. `/jobs/{id}/result.txt` downloads the text, 
 the winning replicas' `result.json` (or `output/result.txt` if something wrote it);
 `POST /jobs/{id}/cancel` cancels.
 
+## My jobs filters
+
+Each column header on `/jobs` has a down arrow that opens its filter (`templates/jobs.html`,
+`jobfilter.py`): Job (search an ID or file name), Status (tick the statuses), Tasks and
+Time taken (a minimum and maximum, the time in minutes) and Submitted (a from and to day,
+Singapore time). The dropdowns share one form, so applying one keeps the rest. Status and
+Submitted are filtered by the coordinator across all of a user's jobs. It can't filter the
+others, so when one is set the app loads the newest 100 jobs (the most `GET /jobs`
+returns), filters them itself and pages through the matches; the page says so.
+
+## Admin table filters
+
+The admin Users, Jobs and Burst workers tables use the same header dropdowns. Their
+columns are declared in `admincolumns.py` and the matching and query-string logic is in
+`tablefilter.py`. The coordinator can't filter these lists, so when a filter is set the
+app loads the newest 200 users, 100 jobs or 100 burst workers (the most each endpoint
+returns), filters them itself and pages through the matches; the page says so. Without a
+filter the normal paging is used. On Jobs, the cost filter leaves out jobs with no burst
+cost.
+
+## Landing and error pages
+
+`/` shows a public landing page (`templates/landing.html`) to visitors without a
+session cookie, and the jobs dashboard (or `/admin` for admins) to everyone else.
+Browsers that get an HTTP error (`Accept: text/html`) see `templates/error.html`
+instead of JSON: "This page is off-limits" for 403 (a user opening `/admin`, an
+admin opening My jobs), "We can't find that page" for 404, "You've been signed out"
+for 401, "We're having trouble right now" for 503 and "Something went wrong" for
+the rest. The pages show no status codes. Scripts and API clients still get
+`{"detail": ...}`. The wording and icons are in `ERROR_PAGES` in `app.py`; a 404 or
+other error that carries its own message ("Job not found") shows that message.
+
 ## Deploy
 
 `infra/k8s/base/web.yml` runs the web app in `idlecloud-system` on the AWS control

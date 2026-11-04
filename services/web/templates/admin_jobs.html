@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import admin_header, error_alert, money, pager, status_badge %}
+{% from "_macros.html" import admin_header, error_alert, filter_notice, money, pager, status_badge, table_filter_headers %}
 {% block title %}Jobs{% endblock %}
 {% block width %}max-w-6xl{% endblock %}
 {% block content %}
@@ -7,13 +7,11 @@
 {% if errors.burst and not errors.jobs %}<div class="mt-6">{{ error_alert(errors.burst) }}</div>{% endif %}
 <div class="mt-6">
 {% if errors.jobs %}{{ error_alert(errors.jobs) }}{% else %}
-<div class="table-container" tabindex="0" role="region" aria-label="All jobs">
+<form id="table-filter" method="get" action="/admin/jobs" aria-label="Filter jobs"></form>
+<div class="table-container md:overflow-visible" tabindex="0" role="region" aria-label="All jobs">
   <table class="table">
     <caption>Every user's jobs, newest first. Burst cost is zero when no burst run was seen.</caption>
-    <thead><tr>
-      <th scope="col">Job</th><th scope="col">Owner</th><th scope="col">Status</th><th scope="col">Tasks</th>
-      <th scope="col">Submitted</th><th scope="col">Time taken</th><th scope="col">Burst cost (USD)</th><th scope="col"><span class="sr-only">Logs</span></th>
-    </tr></thead>
+    <thead>{{ table_filter_headers(flt) }}</thead>
     <tbody>
     {% for j in jobs %}
       <tr>
@@ -31,12 +29,14 @@
         <td><a class="btn" data-variant="link" data-size="sm" href="/admin/events?job={{ j.id }}">Logs</a></td>
       </tr>
     {% else %}
-      <tr><td colspan="8" class="text-muted-foreground">No jobs{% if offset %} on this page{% endif %}.</td></tr>
+      <tr><td colspan="8" class="text-muted-foreground">No jobs{% if flt.active %} match these filters{% elif offset %} on this page{% endif %}.</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
-{{ pager("jobs", offset, page_size, has_more) }}
+{{ pager("jobs", offset, page_size, has_more, query=flt.query()) }}
+{{ filter_notice(flt, scan, "jobs") }}
 {% endif %}
 </div>
+<script src="{{ url_for('static', path='filters.js').path }}" defer></script>
 {% endblock %}

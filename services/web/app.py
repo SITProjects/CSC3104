@@ -6,9 +6,10 @@ import logging
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, time, timedelta
+from http import HTTPStatus
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -25,6 +26,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import (
     HTMLResponse,
     RedirectResponse,
@@ -33,12 +35,21 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from services.web import admin as admintools
 from services.web import jobs as jobtools
 from services.web import storage, uploads
+from services.web.admincolumns import BURST_COLUMNS, JOB_COLUMNS, USER_COLUMNS
 from services.web.coordinator import WORKER_NAME, coordinator
+from services.web.jobfilter import (
+    JOB_STATUSES,
+    MAX_SEARCH_CHARS,
+    JobFilter,
+    parse_whole,
+)
 from services.web.settings import settings
+from services.web.tablefilter import TableFilter, page_of
 
 BASE_DIR = Path(__file__).parent
 log = logging.getLogger("uvicorn.error")
@@ -190,6 +201,63 @@ async def send_to_login(request: Request, exc: LoginRequired):
     # drop a stale or expired token so /login doesn't bounce the visitor back
     response.delete_cookie(settings.session_cookie, path="/")
     return response
+
+
+# What an error page says: (title, message, icon). 401, 403 and 503 always use
+# this wording; for a 404 or any other status the error's own message, if it has
+# one, replaces the message.
+ERROR_PAGES = {
+    401: (
+        "You've been signed out",
+        "For your security, your session ended. Log in again to pick up where you left off.",
+        "clock",
+    ),
+    403: (
+        "This page is off-limits",
+        (
+            "Looks like you're trying to visit a page you don't have access to. "
+            "If you think that's a mistake, ask an administrator to check your account."
+        ),
+        "lock",
+    ),
+    404: (
+        "We can't find that page",
+        "The link may be broken, or the page may have moved. Let's get you back on track.",
+        "search",
+    ),
+    503: (
+        "We're having trouble right now",
+        "Something we depend on isn't responding. Please try again in a moment.",
+        "triangle-alert",
+    ),
+}
+OTHER_ERROR_PAGE = (
+    "Something went wrong",
+    "Please try again, or head back to the start.",
+    "circle-alert",
+)
+FIXED_WORDING = {401, 403, 503}
+STOCK_DETAILS = {
+    status.phrase for status in HTTPStatus
+}  # Starlette's own ("Not Found")
+
+
+@app.exception_handler(StarletteHTTPException)
+async def error_page(request: Request, exc: StarletteHTTPException):
+    """Shows browsers an error page; scripts and API clients still get JSON."""
+    if "text/html" not in request.headers.get("accept", ""):
+        return await http_exception_handler(request, exc)
+    title, message, glyph = ERROR_PAGES.get(exc.status_code, OTHER_ERROR_PAGE)
+    # the app's own messages ("Job not found") are written to be shown
+    if exc.status_code not in FIXED_WORDING and exc.detail not in STOCK_DETAILS:
+        message = exc.detail
+    return templates.TemplateResponse(
+        request,
+        "error.html",
+        {"status": exc.status_code, "title": title, "message": message, "glyph": glyph},
+        status_code=exc.status_code,
+        headers=exc.headers,
+    )
 
 
 async def current_user(request: Request) -> dict:
@@ -628,11 +696,18 @@ def _when(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
-def _duration(start: datetime | None, end: datetime | None) -> str:
+def _seconds(start: datetime | None, end: datetime | None) -> int | None:
+    """Seconds from start to end, or to now if it hasn't ended."""
     if start is None:
+        return None
+    return max(int(((end or datetime.now(UTC)) - start).total_seconds()), 0)
+
+
+def _duration(start: datetime | None, end: datetime | None) -> str:
+    seconds = _seconds(start, end)
+    if seconds is None:
         return ""
-    seconds = int(((end or datetime.now(UTC)) - start).total_seconds())
-    minutes, seconds = divmod(max(seconds, 0), 60)
+    minutes, seconds = divmod(seconds, 60)
     hours, minutes = divmod(minutes, 60)
     if hours:
         return f"{hours}h {minutes}m"
@@ -646,6 +721,7 @@ def _job_row(job: dict) -> dict:
         **job,
         "created": admintools.sg_time(created),
         "took": _duration(created, finished),
+        "took_seconds": _seconds(created, finished),
         "running": finished is None,
     }
 
@@ -676,6 +752,7 @@ async def _pending_rows(user: dict) -> list[dict]:
                     "task_count": None,
                     "created": admintools.sg_time(created),
                     "took": "" if failed else _duration(created, None),
+                    "took_seconds": None if failed else _seconds(created, None),
                     "running": not failed,
                     "error": pending.get("error") if failed else None,
                     "filename": pending.get("filename"),
@@ -718,9 +795,9 @@ async def _with_progress(token: str, row: dict) -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    """The signed-in user's homepage: running jobs, counts and recent jobs."""
+    """The landing page for visitors; the signed-in user's jobs dashboard."""
     if not request.cookies.get(settings.session_cookie):
-        return RedirectResponse("/login", status_code=303)
+        return templates.TemplateResponse(request, "landing.html")
     user = await current_user(request)
     if user.get("role") == "ADMIN":
         return RedirectResponse("/admin", status_code=303)  # admins have their own
@@ -762,14 +839,7 @@ async def index(request: Request):
 
 # The My jobs status filter: {status: label}. PREPARING is an upload the
 # coordinator doesn't know yet; the rest are the coordinator's job statuses.
-JOB_FILTERS = {
-    "PREPARING": "Preparing",
-    "PENDING": "Queued",
-    "RUNNING": "Running",
-    "COMPLETED": "Completed",
-    "FAILED": "Failed",
-    "CANCELLED": "Cancelled",
-}
+JOB_FILTERS = {"PREPARING": "Preparing", **JOB_STATUSES}
 
 
 def _today() -> date:
@@ -794,15 +864,6 @@ def _parse_day(value: str | None) -> date | None:
     return day if day is None or day <= _today() else None
 
 
-def _filter_query(statuses: list[str], start: date | None, end: date | None) -> str:
-    """The My jobs filter as a query string, without the page offset."""
-    pairs = [("status", s) for s in statuses]
-    pairs += [
-        (name, day.isoformat()) for name, day in (("from", start), ("to", end)) if day
-    ]
-    return urlencode(pairs)
-
-
 def _created_between(row: dict, start: date | None, end: date | None) -> bool:
     """Whether a job list row was submitted on a Singapore day in [start, end]."""
     if start is None and end is None:
@@ -822,6 +883,11 @@ async def _has_any_job(token: str) -> bool:
         return True  # can't tell, so keep the filter on screen to change it
 
 
+# The coordinator filters jobs by status and date. The other columns are filtered
+# here, over the newest jobs it returns at once (its limit is 100).
+FILTER_SCAN = 100
+
+
 @app.get("/jobs", response_class=HTMLResponse)
 async def jobs(
     request: Request,
@@ -830,51 +896,65 @@ async def jobs(
     status: Annotated[list[str] | None, Query()] = None,
     date_from: Annotated[str | None, Query(alias="from")] = None,
     date_to: Annotated[str | None, Query(alias="to")] = None,
+    q: str | None = None,
+    tasks_min: str | None = None,
+    tasks_max: str | None = None,
+    took_min: str | None = None,
+    took_max: str | None = None,
 ):
     token = request.cookies[settings.session_cookie]
-    # unknown values are ignored; nothing chosen means every status
-    selected = [s for s in JOB_FILTERS if s in (status or [])]
-    wanted = [s for s in selected if s != "PREPARING"]
-    start, end = _parse_day(date_from), _parse_day(date_to)
+    # unknown or blank values are ignored; no status chosen means every status
+    flt = JobFilter(
+        statuses=[s for s in JOB_FILTERS if s in (status or [])],
+        start=_parse_day(date_from),
+        end=_parse_day(date_to),
+        text=(q or "").strip()[:MAX_SEARCH_CHARS],
+        tasks_min=parse_whole(tasks_min),
+        tasks_max=parse_whole(tasks_max),
+        took_min=parse_whole(took_min),
+        took_max=parse_whole(took_max),
+    )
+    wanted = [s for s in flt.statuses if s != "PREPARING"]
     error = None
     rows: list[dict] = []
     has_more = False
     try:
         # only "Preparing" chosen: the coordinator has none of those jobs
-        if wanted or not selected:
+        if wanted or not flt.statuses:
             listed = await coordinator.list_jobs(
                 token,
-                JOBS_PAGE_SIZE + 1,
-                offset,
+                FILTER_SCAN if flt.in_app else JOBS_PAGE_SIZE + 1,
+                0 if flt.in_app else offset,
                 wanted,
-                _day_start(start) if start else None,
+                _day_start(flt.start) if flt.start else None,
                 # end is at most today, so the next day always exists
-                _day_start(end + timedelta(days=1)) if end else None,
+                _day_start(flt.end + timedelta(days=1)) if flt.end else None,
             )
-            has_more = len(listed) > JOBS_PAGE_SIZE
-            rows = [_job_row(job) for job in listed[:JOBS_PAGE_SIZE]]
+            if not flt.in_app:
+                has_more = len(listed) > JOBS_PAGE_SIZE
+                listed = listed[:JOBS_PAGE_SIZE]
+            rows = [_job_row(job) for job in listed]
     except (httpx.HTTPStatusError, httpx.RequestError):
         error = "Your jobs can't be loaded right now. Please try again shortly."
-    filtered = bool(selected or start or end)
     has_jobs = bool(rows) or offset > 0
-    if offset == 0 and not error:
+    if not error and (offset == 0 or flt.in_app):
         pending = await _pending_rows(user)
         known = {row["id"] for row in rows}
         rows = [
             r
             for r in pending
             if r["id"] not in known
-            and (not selected or r["status"] in selected)
-            and _created_between(r, start, end)
+            and (not flt.statuses or r["status"] in flt.statuses)
+            and _created_between(r, flt.start, flt.end)
         ] + rows
-        # nothing matched: the filter is only shown if the user has any job
+        # nothing matched: the filters are only shown if the user has any job
         has_jobs = (
-            bool(rows) or bool(pending) or (filtered and await _has_any_job(token))
+            bool(rows) or bool(pending) or (flt.active and await _has_any_job(token))
         )
-
-    def url(statuses: list[str]) -> str:
-        query = _filter_query(statuses, start, end)
-        return f"/jobs?{query}" if query else "/jobs"
+    if flt.in_app and not error:
+        matched = [row for row in rows if flt.matches(row)]
+        rows = matched[offset : offset + JOBS_PAGE_SIZE]
+        has_more = len(matched) > offset + JOBS_PAGE_SIZE
 
     return templates.TemplateResponse(
         request,
@@ -885,23 +965,15 @@ async def jobs(
             "offset": offset,
             "page_size": JOBS_PAGE_SIZE,
             "has_more": has_more,
-            "selected": selected,
-            "filtered": filtered,
+            "flt": flt,
+            "status_options": JOB_FILTERS,
             "has_jobs": has_jobs,
-            "start": start.isoformat() if start else "",
-            "end": end.isoformat() if end else "",
+            "start": flt.start.isoformat() if flt.start else "",
+            "end": flt.end.isoformat() if flt.end else "",
             "today": _today().isoformat(),  # the latest day the date inputs allow
-            # statuses that can still be added to the filter
-            "options": {
-                s: label for s, label in JOB_FILTERS.items() if s not in selected
-            },
-            # one removable chip per chosen status, linking to the filter without it
-            "chips": [
-                {"label": JOB_FILTERS[s], "href": url([o for o in selected if o != s])}
-                for s in selected
-            ],
+            "scan": FILTER_SCAN,
             # keeps the filter on the Newer/Older links
-            "filter_query": _filter_query(selected, start, end),
+            "filter_query": flt.query(),
         },
         status_code=503 if error else 200,
     )
@@ -1334,64 +1406,103 @@ async def admin_overview(request: Request):
     )
 
 
+# The admin tables can't be filtered by the coordinator. With a filter on, a page
+# loads this many of the newest rows (the most each call returns) and filters them.
+ADMIN_USERS_SCAN = 200
+ADMIN_JOBS_SCAN = 100
+BURST_SCAN = 100
+
+
+def _filtered_page(
+    flt: TableFilter, rows: list, offset: int, size: int
+) -> tuple[list, bool]:
+    """
+    The rows to show and whether more follow. With a filter on, rows are the newest
+    ones loaded and the page is cut from those that match; without one, rows are
+    the page the coordinator sent plus one more row if there is a next page.
+    """
+    if flt.active:
+        return page_of([row for row in rows if flt.matches(row)], offset, size)
+    return rows[:size], len(rows) > size
+
+
 @app.get("/admin/jobs", response_class=HTMLResponse, dependencies=[AdminOnly])
 async def admin_jobs(request: Request, offset: int = Query(0, ge=0)):
     """Every user's jobs, newest first, with their burst cost."""
     token = _token(request)
+    flt = TableFilter(JOB_COLUMNS, request.query_params)
+    # with a filter on: the newest jobs, from the start; else this page and one more
+    # job, to know if a next page exists
+    start = 0 if flt.active else offset
+    costed = ADMIN_JOBS_SCAN if flt.active else ADMIN_JOBS_PAGE_SIZE
+    listed = ADMIN_JOBS_SCAN if flt.active else ADMIN_JOBS_PAGE_SIZE + 1
     results, errors, status = await _admin_load(
         request,
         {
-            "jobs": coordinator.admin_jobs(token, ADMIN_JOBS_PAGE_SIZE + 1, offset),
+            "jobs": coordinator.admin_jobs(token, listed, start),
             # the coordinator orders burst jobs like admin_jobs (newest first,
             # then id), so the same offset gives the costs of the jobs shown
             "burst": coordinator.burst_overview(
-                token,
-                machine_limit=1,
-                job_limit=ADMIN_JOBS_PAGE_SIZE,
-                job_offset=offset,
+                token, machine_limit=1, job_limit=costed, job_offset=start
             ),
         },
     )
-    jobs = results["jobs"] or []
     burst = results["burst"]
     costs = {c["job_id"]: c for c in burst["jobs"]} if burst else {}
+    rows = [
+        {**_job_row(j), "cost": costs.get(str(j["id"]))} for j in results["jobs"] or []
+    ]
+    jobs, has_more = _filtered_page(flt, rows, offset, ADMIN_JOBS_PAGE_SIZE)
     return _admin_page(
         request,
         "admin_jobs.html",
         errors,
         status,
-        jobs=[
-            {**_job_row(j), "cost": costs.get(str(j["id"]))}
-            for j in jobs[:ADMIN_JOBS_PAGE_SIZE]
-        ],
+        jobs=jobs,
+        flt=flt,
+        scan=ADMIN_JOBS_SCAN,
         offset=offset,
         page_size=ADMIN_JOBS_PAGE_SIZE,
-        has_more=len(jobs) > ADMIN_JOBS_PAGE_SIZE,
+        has_more=has_more,
     )
 
 
 @app.get("/admin/burst", response_class=HTMLResponse, dependencies=[AdminOnly])
 async def admin_burst(request: Request, offset: int = Query(0, ge=0)):
     """EC2 burst workers, active first, with their estimated cost."""
-    token = _token(request)
+    flt = TableFilter(BURST_COLUMNS, request.query_params)
     results, errors, status = await _admin_load(
         request,
         {
             "burst": coordinator.burst_overview(
-                token, machine_limit=BURST_PAGE_SIZE, machine_offset=offset, job_limit=1
+                _token(request),
+                machine_limit=BURST_SCAN if flt.active else BURST_PAGE_SIZE,
+                machine_offset=0 if flt.active else offset,
+                job_limit=1,
             )
         },
     )
     burst = results["burst"]
+    machines, has_more = [], False
+    if burst and flt.active:
+        machines, has_more = _filtered_page(
+            flt, burst["machines"], offset, BURST_PAGE_SIZE
+        )
+    elif burst:
+        machines = burst["machines"]
+        has_more = offset + BURST_PAGE_SIZE < burst["machine_count"]
     return _admin_page(
         request,
         "admin_burst.html",
         errors,
         status,
         burst=burst,
+        machines=machines,
+        flt=flt,
+        scan=BURST_SCAN,
         offset=offset,
         page_size=BURST_PAGE_SIZE,
-        has_more=bool(burst) and offset + BURST_PAGE_SIZE < burst["machine_count"],
+        has_more=has_more,
     )
 
 
@@ -1437,27 +1548,32 @@ async def admin_events(
 @app.get("/admin/users", response_class=HTMLResponse, dependencies=[AdminOnly])
 async def admin_users(request: Request, offset: int = Query(0, ge=0)):
     """Every account, newest first, with how many jobs each has submitted."""
+    flt = TableFilter(USER_COLUMNS, request.query_params)
+    listed = ADMIN_USERS_SCAN if flt.active else ADMIN_USERS_PAGE_SIZE + 1
     results, errors, status = await _admin_load(
         request,
         {
             "users": coordinator.admin_users(
-                _token(request), ADMIN_USERS_PAGE_SIZE + 1, offset
+                _token(request), listed, 0 if flt.active else offset
             )
         },
     )
-    users = results["users"] or []
+    rows = [
+        {**u, "joined": admintools.sg_time(u["created_at"])}
+        for u in results["users"] or []
+    ]
+    users, has_more = _filtered_page(flt, rows, offset, ADMIN_USERS_PAGE_SIZE)
     return _admin_page(
         request,
         "admin_users.html",
         errors,
         status,
-        users=[
-            {**u, "joined": admintools.sg_time(u["created_at"])}
-            for u in users[:ADMIN_USERS_PAGE_SIZE]
-        ],
+        users=users,
+        flt=flt,
+        scan=ADMIN_USERS_SCAN,
         offset=offset,
         page_size=ADMIN_USERS_PAGE_SIZE,
-        has_more=len(users) > ADMIN_USERS_PAGE_SIZE,
+        has_more=has_more,
     )
 
 

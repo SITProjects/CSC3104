@@ -374,3 +374,141 @@ def test_unknown_user_is_404(monkeypatch, fake_admin_api):
 def test_admin_pages_do_not_refresh_themselves(monkeypatch, fake_admin_api, path):
     html = _signed_in(monkeypatch, ADMIN).get(path).text
     assert "location.reload" not in html
+
+
+# --- filters in the column headers (all in the app: the coordinator can't filter) ---
+
+
+def _user(i: int, email: str, role="USER", jobs=0, created="2026-10-01T02:00:00+00:00"):
+    return {
+        **PROFILE,
+        "id": str(UUID(int=i)),
+        "email": email,
+        "role": role,
+        "job_count": jobs,
+        "created_at": created,
+    }
+
+
+def test_users_page_filters_by_email_role_and_jobs(monkeypatch, fake_admin_api):
+    people = [
+        _user(21, "ada@sit.edu.sg", jobs=5),
+        _user(22, "bob@sit.edu.sg", jobs=1),
+        _user(23, "root@sit.edu.sg", role="ADMIN", jobs=9),
+    ]
+
+    async def users(token, limit=50, offset=0):
+        fake_admin_api["users"] = (limit, offset)
+        return people
+
+    monkeypatch.setattr(coordinator, "admin_users", users)
+    c = _signed_in(monkeypatch, ADMIN)
+    r = c.get("/admin/users?role=USER&jobs_min=2")
+    assert fake_admin_api["users"] == (200, 0)  # the newest 200, from the start
+    assert "ada@sit.edu.sg" in r.text
+    assert "bob@sit.edu.sg" not in r.text and "root@sit.edu.sg" not in r.text
+    assert 'aria-label="Filter by email"' in r.text and 'id="table-filter"' in r.text
+    assert 'value="USER" checked' in r.text and 'name="jobs_min"' in r.text
+    assert "Filtered, from the newest 200 accounts" in r.text
+    assert 'href="?">Clear all filters' in r.text
+    assert "match these filters" not in r.text
+    r = c.get("/admin/users?email=nobody")
+    assert "No users match these filters" in r.text
+
+
+def test_users_page_without_a_filter_loads_just_a_page(monkeypatch, fake_admin_api):
+    r = _signed_in(monkeypatch, ADMIN).get("/admin/users?jobs_min=abc&role=bogus")
+    assert r.status_code == 200 and fake_admin_api["users"] == (51, 0)
+    assert "Filtered, from" not in r.text
+
+
+def test_users_page_keeps_the_filter_when_paging(monkeypatch, fake_admin_api):
+    async def users(token, limit=50, offset=0):
+        return [_user(100 + i, f"u{i}@sit.edu.sg") for i in range(60)]
+
+    monkeypatch.setattr(coordinator, "admin_users", users)
+    c = _signed_in(monkeypatch, ADMIN)
+    r = c.get("/admin/users?role=USER")
+    assert 'href="?role=USER&amp;offset=50"' in r.text and "Older accounts" in r.text
+    r = c.get("/admin/users?role=USER&offset=50")
+    assert "u59@sit.edu.sg" in r.text and "u0@sit.edu.sg" not in r.text
+    assert 'href="?role=USER"' in r.text and "Older accounts" not in r.text
+
+
+def test_jobs_page_filters_by_status_tasks_and_cost(monkeypatch, fake_admin_api):
+    listed = [
+        {**JOB, "id": str(UUID(int=31)), "status": "FAILED", "task_count": 5},
+        {**JOB, "id": str(UUID(int=32)), "status": "FAILED", "task_count": 1},
+        {**JOB, "id": str(UUID(int=33)), "status": "RUNNING", "task_count": 5},
+    ]
+
+    async def jobs(token, limit=20, offset=0, owner_id=None):
+        fake_admin_api["jobs"] = (limit, offset, owner_id)
+        return listed
+
+    async def burst(token, **kwargs):
+        fake_admin_api["burst"] = kwargs
+        cost = BURST["jobs"][0]
+        return {**BURST, "jobs": [{**cost, "job_id": str(UUID(int=31)), "usd": 0.5}]}
+
+    monkeypatch.setattr(coordinator, "admin_jobs", jobs)
+    monkeypatch.setattr(coordinator, "burst_overview", burst)
+    c = _signed_in(monkeypatch, ADMIN)
+    r = c.get("/admin/jobs?status=FAILED&tasks_min=2")
+    assert fake_admin_api["jobs"] == (100, 0, None)
+    assert fake_admin_api["burst"]["job_limit"] == 100
+    assert fake_admin_api["burst"]["job_offset"] == 0
+    assert f"/jobs/{UUID(int=31)}" in r.text
+    assert (
+        f"/jobs/{UUID(int=32)}" not in r.text and f"/jobs/{UUID(int=33)}" not in r.text
+    )
+    assert 'value="FAILED" checked' in r.text
+    # a cost filter leaves out jobs with no burst cost
+    r = c.get("/admin/jobs?cost_min=0.1")
+    assert f"/jobs/{UUID(int=31)}" in r.text and f"/jobs/{UUID(int=32)}" not in r.text
+    r = c.get("/admin/jobs?cost_max=0.1")
+    assert "No jobs match these filters" in r.text
+
+
+def test_jobs_page_searches_owner_and_date(monkeypatch, fake_admin_api):
+    c = _signed_in(monkeypatch, ADMIN)
+    owner = JOB["owner_id"]
+    assert f"/jobs/{JOB_ID}" in c.get(f"/admin/jobs?owner={owner[-6:]}").text
+    assert "No jobs match" in c.get("/admin/jobs?owner=ffffff").text
+    assert f"/jobs/{JOB_ID}" in c.get("/admin/jobs?submitted_from=2026-10-25").text
+    assert "No jobs match" in c.get("/admin/jobs?submitted_to=2026-10-24").text
+
+
+def test_burst_page_filters_workers(monkeypatch, fake_admin_api):
+    machine = BURST["machines"][0]
+    ended = {
+        **machine,
+        "node_name": "burst-201",
+        "instance_id": "i-0def",
+        "running": False,
+        "ended_at": "2026-10-25T11:30:00+00:00",
+        "usd_per_hour": 0.0416,
+    }
+
+    async def burst(token, **kwargs):
+        fake_admin_api["burst"] = kwargs
+        return {**BURST, "machine_count": 2, "machines": [machine, ended]}
+
+    monkeypatch.setattr(coordinator, "burst_overview", burst)
+    c = _signed_in(monkeypatch, ADMIN)
+    r = c.get("/admin/burst?state=ended&rate_min=0.03")
+    assert fake_admin_api["burst"]["machine_limit"] == 100
+    assert fake_admin_api["burst"]["machine_offset"] == 0
+    assert "burst-201" in r.text and "burst-200" not in r.text
+    assert "Burst workers (2)" in r.text  # still counts every worker
+    r = c.get("/admin/burst?worker=i-0abc")
+    assert "burst-200" in r.text and "burst-201" not in r.text
+    r = c.get("/admin/burst?type=spot&launched_from=2026-10-26")
+    assert "No burst workers match these filters" in r.text
+
+
+def test_filters_are_admin_only(monkeypatch, fake_admin_api):
+    for path in ("/admin/users", "/admin/jobs", "/admin/burst"):
+        assert (
+            _signed_in(monkeypatch, USER).get(f"{path}?jobs_min=1").status_code == 403
+        )

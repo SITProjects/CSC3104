@@ -4,6 +4,7 @@ from uuid import UUID
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from services.web.app import app
@@ -270,12 +271,60 @@ def test_no_navbar_when_logged_out(no_redirects):
         html = no_redirects.get(path).text
         assert "<aside" not in html and "<nav" not in html
         assert "/jobs/new" not in html and 'href="/admin"' not in html
-        assert "Campus OCR" in html and "idle campus PCs" in html
+        assert "Idle-Compute Cloud" in html and "campus PCs" in html
 
 
-def test_home_redirects_to_login_when_logged_out(no_redirects):
+def test_home_is_the_landing_page_when_logged_out(no_redirects):
     r = no_redirects.get("/")
-    assert r.status_code == 303 and r.headers["location"] == "/login"
+    assert r.status_code == 200
+    assert "Put idle campus PCs to work" in r.text
+    assert 'href="/login"' in r.text and 'href="/signup"' in r.text
+    assert "<aside" not in r.text  # no sidebar for visitors
+
+
+def test_home_with_a_stale_cookie_goes_to_login(monkeypatch):
+    async def fake_me(token):
+        raise httpx.HTTPStatusError(
+            "no", request=httpx.Request("GET", "http://x"), response=httpx.Response(401)
+        )
+
+    monkeypatch.setattr(coordinator, "me", fake_me)
+    c = TestClient(app, follow_redirects=False)
+    c.cookies.set(settings.session_cookie, "old")
+    r = c.get("/")
+    assert r.status_code == 303 and r.headers["location"].startswith("/login")
+
+
+# --- error pages ------------------------------------------------------------
+
+HTML = {"accept": "text/html"}
+
+
+def test_non_admin_sees_access_denied_page(monkeypatch):
+    r = _signed_in(monkeypatch).get("/admin", headers=HTML)
+    assert r.status_code == 403
+    assert "text/html" in r.headers["content-type"]
+    assert "This page is off-limits" in r.text
+    assert "403" not in r.text  # no status codes on the page
+    assert 'href="/"' in r.text and "<aside" in r.text
+    assert 'action="/logout"' in r.text  # switch account
+
+
+def test_admin_sees_access_denied_on_user_pages(monkeypatch):
+    r = _signed_in(monkeypatch, ADMIN).get("/jobs", headers=HTML)
+    assert r.status_code == 403 and "off-limits" in r.text
+
+
+def test_unknown_page_shows_not_found_page(no_redirects):
+    r = no_redirects.get("/no/such/page", headers=HTML)
+    assert r.status_code == 404
+    assert "find that page" in r.text and 'href="/login"' in r.text
+
+
+def test_errors_are_json_for_scripts(monkeypatch):
+    r = _signed_in(monkeypatch).get("/admin")
+    assert r.status_code == 403 and r.json() == {"detail": "Admins only"}
+    assert client.get("/no/such/page").json() == {"detail": "Not Found"}
 
 
 # Only Google Fonts may come from elsewhere; scripts and styles are served here.
@@ -284,7 +333,7 @@ ALLOWED_HOSTS = ("https://fonts.googleapis.com", "https://fonts.gstatic.com")
 
 def test_pages_load_scripts_and_styles_only_from_this_site(monkeypatch):
     signed_in = _signed_in(monkeypatch)
-    pages = [client.get("/login").text, client.get("/signup").text]
+    pages = [client.get(path).text for path in ("/", "/login", "/signup")]
     pages += [
         signed_in.get(path).text
         for path in ("/jobs/new", "/account", f"/jobs/{UUID(int=1)}")
@@ -330,3 +379,39 @@ def test_nav_shown_when_logged_in(monkeypatch):
     html = _signed_in(monkeypatch).get("/account").text
     assert 'href="/jobs/new"' in html and 'href="/jobs"' in html
     assert "Log out" in html and 'href="/signup"' not in html
+
+
+def _raising(path, status, detail):
+    """Adds a route that fails with this HTTP error, to see its error page."""
+
+    async def fail():
+        raise HTTPException(status, detail)
+
+    app.add_api_route(path, fail)
+
+
+def test_not_found_page_shows_the_apps_own_message(no_redirects):
+    _raising("/_t404", 404, "Job not found")
+    r = no_redirects.get("/_t404", headers=HTML)
+    assert r.status_code == 404 and "Job not found" in r.text
+
+
+def test_expired_session_page_asks_to_log_in(no_redirects):
+    _raising("/_t401", 401, "Your session has expired. Log in again.")
+    r = no_redirects.get("/_t401", headers=HTML)
+    assert r.status_code == 401 and "been signed out" in r.text
+    assert 'href="/login"' in r.text
+
+
+def test_other_errors_show_their_message(no_redirects):
+    _raising("/_t409", 409, "The job hasn't completed yet.")
+    r = no_redirects.get("/_t409", headers=HTML)
+    assert r.status_code == 409
+    assert "Something went wrong" in r.text and "completed yet" in r.text
+
+
+def test_service_unavailable_page_offers_a_retry(no_redirects):
+    _raising("/_t503", 503, "Sign-in service unavailable")
+    r = no_redirects.get("/_t503", headers=HTML)
+    assert r.status_code == 503 and "Try again" in r.text
+    assert "Sign-in service unavailable" not in r.text  # fixed, friendlier wording

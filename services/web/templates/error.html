@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon %}
+{% block title %}{{ title }}{% endblock %}
+{% block width %}max-w-3xl{% endblock %}
+{% block public_width %}max-w-3xl{% endblock %}
+{% block content %}
+<div class="flex overflow-hidden rounded-xl border bg-background sm:mt-12 sm:min-h-80">
+  <div class="flex min-w-0 flex-1 flex-col justify-center gap-3 p-8 sm:px-9 sm:py-10">
+    <h1 class="text-3xl font-semibold tracking-tight">{{ title }}</h1>
+    <p class="text-muted-foreground">{{ message }}</p>
+    <div class="mt-4 flex flex-wrap items-center gap-2">
+      {% if status == 401 %}
+      <a class="btn" data-size="lg" href="/login">Log in</a>
+      <a class="btn" data-variant="outline" data-size="lg" href="/">Back to home</a>
+      {% elif status == 503 %}
+      <a class="btn" data-size="lg" href="">{{ icon("refresh") }} Try again</a>
+      <a class="btn" data-variant="outline" data-size="lg" href="/">{{ "Back to dashboard" if signed_in else "Back to home" }}</a>
+      {% else %}
+      <a class="btn" data-size="lg" href="/">{{ "Back to dashboard" if signed_in else "Back to home" }}</a>
+      {% if status == 403 %}
+      {# a signed-in visitor opening /login is sent straight back, so log out first #}
+      <form method="post" action="/logout"><button type="submit" class="btn" data-variant="outline" data-size="lg">Log in as someone else</button></form>
+      {% elif not signed_in %}
+      <a class="btn" data-variant="outline" data-size="lg" href="/login">Log in</a>
+      {% endif %}
+      {% endif %}
+    </div>
+  </div>
+  {# decorative: a grid of idle PCs with the status icon over it #}
+  <div class="relative hidden w-64 shrink-0 bg-neutral-950 sm:block" aria-hidden="true">
+    <svg class="absolute inset-0 m-auto h-74 w-60" viewBox="0 0 240 296" fill="none">
+      <g class="fill-neutral-800">
+        {% for row in range(5) %}{% for col in range(3) %}
+        <rect x="{{ 20 + col * 78 }}" y="{{ 20 + row * 56 }}" width="44" height="32" rx="6"{% if (row, col) in ((1, 1), (2, 0), (3, 2)) %} class="fill-neutral-700"{% endif %}/>
+        {% endfor %}{% endfor %}
+      </g>
+      <circle cx="120" cy="148" r="46" class="fill-neutral-50"/>
+    </svg>
+    {{ icon(glyph, "absolute inset-0 m-auto size-12 text-neutral-950") }}
+  </div>
+</div>
+{% endblock %}

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import admin_header, error_alert, money, pager, status_badge %}
+{% from "_macros.html" import admin_header, error_alert, filter_notice, money, pager, status_badge, table_filter_headers %}
 {% block title %}Burst workers{% endblock %}
 {% block width %}max-w-7xl{% endblock %}
 {% block content %}
@@ -9,17 +9,13 @@
   Boot and idle time stay unattributed.</p>
 <div class="mt-6">
 {% if errors.burst %}{{ error_alert(errors.burst) }}{% else %}
-<div class="table-container" tabindex="0" role="region" aria-label="Burst workers">
+<form id="table-filter" method="get" action="/admin/burst" aria-label="Filter burst workers"></form>
+<div class="table-container md:overflow-visible" tabindex="0" role="region" aria-label="Burst workers">
   <table class="table">
     <caption>Recorded active workers first, then recent history. Costs as of {{ burst.observed_at|sg_time }}.</caption>
-    <thead><tr>
-      <th scope="col">Worker / instance</th><th scope="col">Type / market</th>
-      <th scope="col">State / trust</th><th scope="col">Lifetime</th>
-      <th scope="col">Rate / hour</th><th scope="col">Total</th>
-      <th scope="col">Jobs</th><th scope="col">Unattributed</th>
-    </tr></thead>
+    <thead>{{ table_filter_headers(flt) }}</thead>
     <tbody>
-    {% for m in burst.machines %}
+    {% for m in machines %}
       <tr>
         <td>{% if m.node_name %}<a class="font-mono underline-offset-4 hover:underline" href="/admin/events?node={{ m.node_name|urlencode }}">{{ m.node_name }}</a>{% else %}<span class="text-muted-foreground">No node</span>{% endif %}
           <div class="text-xs text-muted-foreground">{{ m.instance_id }} · slot {{ m.slot }}</div></td>
@@ -37,13 +33,15 @@
         <td class="tabular-nums">{{ money(m.unattributed_usd) }}</td>
       </tr>
     {% else %}
-      <tr><td colspan="8" class="text-muted-foreground">No burst workers{% if offset %} on this page{% else %} recorded yet{% endif %}.</td></tr>
+      <tr><td colspan="8" class="text-muted-foreground">No burst workers{% if flt.active %} match these filters{% elif offset %} on this page{% else %} recorded yet{% endif %}.</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
-{{ pager("workers", offset, page_size, has_more) }}
+{{ pager("workers", offset, page_size, has_more, query=flt.query()) }}
+{{ filter_notice(flt, scan, "workers") }}
 <p class="mt-4 text-xs text-muted-foreground">Active means no end time has been recorded yet. Unattributed cost can be negative when the estimated records disagree.</p>
 {% endif %}
 </div>
+<script src="{{ url_for('static', path='filters.js').path }}" defer></script>
 {% endblock %}

@@ -32,7 +32,7 @@
       </header>
       <section class="scrollbar-sm">
         <div role="group" aria-labelledby="nav-heading">
-          <h3 id="nav-heading">{{ "Admin dashboard" if is_admin else "Campus OCR" }}</h3>
+          <h3 id="nav-heading">{{ "Admin dashboard" if is_admin else "Workspace" }}</h3>
           <ul>
             {% for item in nav_items if item.admin is not defined or item.admin == is_admin %}
             <li>
@@ -78,7 +78,7 @@
   </main>
   {% else %}
   <main class="flex min-h-screen items-center justify-center px-4 py-12">
-    <div class="w-full max-w-sm">{{ self.content() }}</div>
+    <div class="w-full {% block public_width %}max-w-sm{% endblock %}">{{ self.content() }}</div>
   </main>
   {% endif %}
 </body>
