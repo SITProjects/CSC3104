@@ -1,57 +1,82 @@
 {% extends "base.html" %}
-{% from "_macros.html" import icon, error_alert, job_table %}
+{% from "_macros.html" import error_alert, filter_th, job_table %}
 {% block title %}My jobs{% endblock %}
 {% block width %}max-w-6xl{% endblock %}
+
 {% block content %}
 <h1 class="mb-6 text-2xl font-semibold tracking-tight">My jobs</h1>
 
 {% if has_jobs %}
-{# Two filter boxes in one form, so each keeps the other's values. Dates apply
-   with Apply (or Enter), since a half-typed date would otherwise reload the
-   page; they are Singapore days, like the Submitted column. Picking a status adds it
-   as a chip at once, a chip's x removes it, and hidden inputs keep the
-   statuses already chosen. #}
-<form method="get" action="/jobs" class="mb-4 flex flex-wrap items-center gap-2" aria-label="Filter jobs">
-  {% set box = "flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2" %}
-  <div class="{{ box }}" role="group" aria-label="Submitted between">
-    <label class="label gap-2 text-sm text-muted-foreground">From
-      <input type="date" class="input h-8 w-auto text-foreground" name="from" value="{{ start }}" max="{{ end or today }}">
-    </label>
-    <label class="label gap-2 text-sm text-muted-foreground">To
-      <input type="date" class="input h-8 w-auto text-foreground" name="to" value="{{ end }}"{% if start %} min="{{ start }}"{% endif %} max="{{ today }}">
-    </label>
-    <button type="submit" class="btn" data-variant="outline" data-size="sm">Apply</button>
-  </div>
-  <div class="{{ box }} min-h-12 flex-1" role="group" aria-label="Status">
-    {% for value in selected %}<input type="hidden" name="status" value="{{ value }}">{% endfor %}
-    {% for chip in chips %}
-    <a class="badge gap-1" data-variant="secondary" href="{{ chip.href }}" aria-label="Remove the {{ chip.label }} filter">
-      {{ chip.label }}{{ icon("x", "size-3") }}
-    </a>
-    {% endfor %}
-    {% if options %}
-    <select class="select h-8 border-0 bg-transparent text-sm text-muted-foreground shadow-none" name="status" aria-label="Add a status filter" onchange="this.form.submit()">
-      <option value="" selected disabled>{{ "Add status" if selected else "Filter by status" }}</option>
-      {% for value, label in options.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
-    </select>
-    {% endif %}
-  </div>
-  {% if filtered %}<a class="text-sm text-muted-foreground underline underline-offset-4" href="/jobs">Clear all</a>{% endif %}
-</form>
+{# The dropdowns in the table headers submit this form. The dates are Singapore
+   days, like the Submitted column. #}
+<form id="table-filter" method="get" action="/jobs" aria-label="Filter jobs"></form>
+{% if flt.active %}
+<p class="mb-3 text-sm text-muted-foreground">
+  Filtered.
+  {% if flt.in_app %}The job, tasks and time filters look through your newest {{ scan }} jobs.{% endif %}
+  <a class="text-foreground underline underline-offset-4" href="/jobs">Clear all filters</a>
+</p>
+{% endif %}
 {% endif %}
 
 {% set page_query = filter_query ~ "&" if filter_query else "" %}
 {% if error %}
 {{ error_alert(error) }}
-{% elif not rows and offset == 0 and has_jobs %}
-<p class="text-muted-foreground">No jobs match this filter. <a class="text-foreground underline underline-offset-4" href="/jobs">Show all jobs</a>.</p>
-{% elif not rows and offset == 0 %}
+{% elif not rows and offset == 0 and not has_jobs %}
 <p class="text-muted-foreground">You haven't submitted anything yet. <a class="text-foreground underline underline-offset-4" href="/jobs/new">Create a job</a> to get started.</p>
 {% else %}
-{{ job_table(rows, "My jobs", "Newest first. Select a job to follow its progress.") }}
+{% call job_table(rows, "My jobs", "Newest first. Select a job to follow its progress.", overflow_visible=true, empty="No jobs match these filters." if flt.active else "No more jobs.") %}
+<tr>
+  {% call filter_th("Job", flt.text) %}
+  <label class="label flex-col items-start gap-1.5 text-sm">ID or file name
+    <input type="search" class="input" name="q" form="table-filter" value="{{ flt.text }}" maxlength="100">
+  </label>
+  {% endcall %}
+  {% call filter_th("Status", flt.statuses) %}
+  <fieldset class="grid gap-1.5">
+    <legend class="mb-1.5 text-sm font-medium">Show jobs that are</legend>
+    {% for value, name in status_options.items() %}
+    <label class="label gap-2 text-sm">
+      <input type="checkbox" class="input" name="status" form="table-filter" value="{{ value }}"{% if value in flt.statuses %} checked{% endif %}>
+      {{ name }}
+    </label>
+    {% endfor %}
+  </fieldset>
+  {% endcall %}
+  {% call filter_th("Tasks", flt.tasks_min is not none or flt.tasks_max is not none) %}
+  <div class="grid grid-cols-2 gap-2">
+    <label class="label flex-col items-start gap-1.5 text-sm">At least
+      <input type="number" class="input" name="tasks_min" form="table-filter" min="0" value="{{ flt.tasks_min if flt.tasks_min is not none }}">
+    </label>
+    <label class="label flex-col items-start gap-1.5 text-sm">At most
+      <input type="number" class="input" name="tasks_max" form="table-filter" min="0" value="{{ flt.tasks_max if flt.tasks_max is not none }}">
+    </label>
+  </div>
+  {% endcall %}
+  {% call filter_th("Submitted", flt.start or flt.end) %}
+  <label class="label flex-col items-start gap-1.5 text-sm">From
+    <input type="date" class="input" name="from" form="table-filter" value="{{ start }}" max="{{ end or today }}">
+  </label>
+  <label class="label flex-col items-start gap-1.5 text-sm">To
+    <input type="date" class="input" name="to" form="table-filter" value="{{ end }}"{% if start %} min="{{ start }}"{% endif %} max="{{ today }}">
+  </label>
+  {% endcall %}
+  {% call filter_th("Time taken", flt.took_min is not none or flt.took_max is not none, "right") %}
+  <div class="grid grid-cols-2 gap-2">
+    <label class="label flex-col items-start gap-1.5 text-sm">Min minutes
+      <input type="number" class="input" name="took_min" form="table-filter" min="0" value="{{ flt.took_min if flt.took_min is not none }}">
+    </label>
+    <label class="label flex-col items-start gap-1.5 text-sm">Max minutes
+      <input type="number" class="input" name="took_max" form="table-filter" min="0" value="{{ flt.took_max if flt.took_max is not none }}">
+    </label>
+  </div>
+  {% endcall %}
+</tr>
+{% endcall %}
 <nav class="mt-4 flex gap-2" aria-label="Job pages">
   {% if offset > 0 %}<a class="btn" data-variant="outline" data-size="sm" href="?{{ page_query }}offset={{ [0, offset - page_size]|max }}">Newer jobs</a>{% endif %}
   {% if has_more %}<a class="btn" data-variant="outline" data-size="sm" href="?{{ page_query }}offset={{ offset + page_size }}">Older jobs</a>{% endif %}
 </nav>
 {% endif %}
+<script src="{{ url_for('static', path='filters.js').path }}" defer></script>
 {% endblock %}

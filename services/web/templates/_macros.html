@@ -23,6 +23,7 @@
   "refresh": '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
   "lock": '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
   "shield-check": '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+  "chevron-down": '<path d="m6 9 6 6 6-6"/>',
   "search": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
   "clock": '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
   "triangle-alert": '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
@@ -65,24 +66,104 @@
 <p class="mt-2 text-sm text-muted-foreground">Updated {{ updated }}.</p>
 {%- endmacro %}
 
-{# Newer/older links for a list paged by ?offset=, keeping params (e.g. filters). #}
-{% macro pager(what, offset, page_size, has_more, params={}) -%}
+{# Newer/older links for a list paged by ?offset=, keeping params (e.g. a job id) and
+   query, a ready-made query string (a table filter's, see tablefilter.py). #}
+{% macro pager(what, offset, page_size, has_more, params={}, query="") -%}
+{% set keep = (query ~ "&") if query else "" %}
 <nav class="mt-4 flex gap-2" aria-label="{{ what|capitalize }} pages">
-  {% if offset > 0 %}<a class="btn" data-variant="outline" data-size="sm" href="?{{ dict(params, offset=[0, offset - page_size]|max)|dictsort|selectattr(1)|list|urlencode }}">Newer {{ what }}</a>{% endif %}
-  {% if has_more %}<a class="btn" data-variant="outline" data-size="sm" href="?{{ dict(params, offset=offset + page_size)|dictsort|selectattr(1)|list|urlencode }}">Older {{ what }}</a>{% endif %}
+  {% if offset > 0 %}<a class="btn" data-variant="outline" data-size="sm" href="?{{ (keep ~ (dict(params, offset=[0, offset - page_size]|max)|dictsort|selectattr(1)|list|urlencode))|trim("&") }}">Newer {{ what }}</a>{% endif %}
+  {% if has_more %}<a class="btn" data-variant="outline" data-size="sm" href="?{{ (keep ~ (dict(params, offset=offset + page_size)|dictsort|selectattr(1)|list|urlencode))|trim("&") }}">Older {{ what }}</a>{% endif %}
 </nav>
 {%- endmacro %}
 
+{# A column header with a filter in a dropdown. The dropdown's inputs belong to the
+   one form with id="table-filter" on the page (form="table-filter"), so applying any
+   filter keeps the others. align is the side of the header the dropdown lines up
+   with. static/filters.js closes the dropdowns. #}
+{% macro filter_th(label, active, align="left") %}
+<th scope="col">
+  <details class="header-filter relative">
+    <summary class="inline-flex w-auto cursor-pointer items-center justify-start gap-1" aria-label="Filter by {{ label|lower }}">
+      {{ label }}
+      {% if active %}<span class="size-1.5 rounded-full bg-primary" title="Filter on"></span>{% endif %}
+      {{ icon("chevron-down", "size-3.5 text-muted-foreground") }}
+    </summary>
+    <div class="absolute {{ 'right-0' if align == 'right' else 'left-0' }} z-20 mt-2 grid w-60 gap-3 rounded-lg border bg-background p-3 font-normal shadow-md">
+      {{ caller() }}
+      <button type="submit" form="table-filter" class="btn" data-size="sm">Apply</button>
+    </div>
+  </details>
+</th>
+{% endmacro %}
+
+{# The header row of a table with a filter dropdown on each column; flt is a
+   TableFilter (tablefilter.py). Needs <form id="table-filter" method="get"></form>. #}
+{% macro table_filter_headers(flt) -%}
+<tr>
+{% for col in flt.columns %}
+{% if not col.kind %}
+  <th scope="col">{% if col.hidden_label %}<span class="sr-only">{{ col.label }}</span>{% else %}{{ col.label }}{% endif %}</th>
+{% else %}
+  {% set v = flt.values[col.key] %}
+  {% call filter_th(col.label, flt.is_active(col), col.align) %}
+    {% if col.kind == "text" %}
+    <label class="label flex-col items-start gap-1.5 text-sm">{{ col.search_label }}
+      <input type="search" class="input" name="{{ col.key }}" form="table-filter" value="{{ v }}" maxlength="100">
+    </label>
+    {% elif col.kind == "choice" %}
+    <fieldset class="grid gap-1.5">
+      <legend class="mb-1.5 text-sm font-medium">Show only</legend>
+      {% for value, name in col.choices.items() %}
+      <label class="label gap-2 text-sm">
+        <input type="checkbox" class="input" name="{{ col.key }}" form="table-filter" value="{{ value }}"{% if value in v %} checked{% endif %}>
+        {{ name }}
+      </label>
+      {% endfor %}
+    </fieldset>
+    {% elif col.kind == "range" %}
+    <div class="grid grid-cols-2 gap-2">
+      {% for suffix, word, i in (("_min", "At least", 0), ("_max", "At most", 1)) %}
+      <label class="label flex-col items-start gap-1.5 text-sm">{{ word }}
+        <input type="number" class="input" name="{{ col.key }}{{ suffix }}" form="table-filter" min="0" step="{{ 'any' if col.decimal else 1 }}" value="{{ v[i] if v[i] is not none }}">
+      </label>
+      {% endfor %}
+    </div>
+    {% else %}
+    {% for suffix, word, i in (("_from", "From", 0), ("_to", "To", 1)) %}
+    <label class="label flex-col items-start gap-1.5 text-sm">{{ word }}
+      <input type="date" class="input" name="{{ col.key }}{{ suffix }}" form="table-filter" value="{{ v[i] or '' }}">
+    </label>
+    {% endfor %}
+    {% endif %}
+    {% set note = col.note or ("Singapore days." if col.kind == "date" else "") %}
+    {% if note %}<p class="-mt-1 text-xs text-muted-foreground">{{ note }}</p>{% endif %}
+  {% endcall %}
+{% endif %}
+{% endfor %}
+</tr>
+{%- endmacro %}
+
+{# Under a table while a filter is on: what it searched, and a way to clear it. #}
+{% macro filter_notice(flt, scan, what) -%}
+{% if flt.active %}
+<p class="mt-4 text-sm text-muted-foreground">Filtered, from the newest {{ scan }} {{ what }}.
+  <a class="text-foreground underline underline-offset-4" href="?">Clear all filters</a></p>
+{% endif %}
+{%- endmacro %}
+
 {# A user's jobs as a table, used by My jobs and the home page. Rows come from
-   _job_row or _pending_rows in app.py. #}
-{% macro job_table(rows, label, caption) -%}
-<div class="table-container" tabindex="0" role="region" aria-label="{{ label }}">
+   _job_row or _pending_rows in app.py. A {% call %} block supplies the header row
+   (My jobs puts a filter in each header); without one the headers are plain. The
+   table scrolls sideways on phones; with overflow_visible it doesn't from md up,
+   so a dropdown in a header isn't clipped by the table's box. #}
+{% macro job_table(rows, label, caption, overflow_visible=false, empty="No more jobs.") -%}
+<div class="table-container{% if overflow_visible %} md:overflow-visible{% endif %}" tabindex="0" role="region" aria-label="{{ label }}">
   <table class="table">
     <caption>{{ caption }}</caption>
-    <thead><tr>
+    <thead>{% if caller is defined %}{{ caller() }}{% else %}<tr>
       <th scope="col">Job</th><th scope="col">Status</th><th scope="col">Tasks</th>
       <th scope="col">Submitted</th><th scope="col">Time taken</th>
-    </tr></thead>
+    </tr>{% endif %}</thead>
     <tbody>
     {% for job in rows %}
       <tr>
@@ -96,7 +177,7 @@
         <td>{{ job.took }}{% if job.running %} <span class="text-xs text-muted-foreground">so far</span>{% endif %}</td>
       </tr>
     {% else %}
-      <tr><td colspan="5" class="text-muted-foreground">No more jobs.</td></tr>
+      <tr><td colspan="5" class="text-muted-foreground">{{ empty }}</td></tr>
     {% endfor %}
     </tbody>
   </table>

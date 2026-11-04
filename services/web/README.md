@@ -94,6 +94,26 @@ returns the same data once as JSON. `/jobs/{id}/result.txt` downloads the text, 
 the winning replicas' `result.json` (or `output/result.txt` if something wrote it);
 `POST /jobs/{id}/cancel` cancels.
 
+## My jobs filters
+
+Each column header on `/jobs` has a down arrow that opens its filter (`templates/jobs.html`,
+`jobfilter.py`): Job (search an ID or file name), Status (tick the statuses), Tasks and
+Time taken (a minimum and maximum, the time in minutes) and Submitted (a from and to day,
+Singapore time). The dropdowns share one form, so applying one keeps the rest. Status and
+Submitted are filtered by the coordinator across all of a user's jobs. It can't filter the
+others, so when one is set the app loads the newest 100 jobs (the most `GET /jobs`
+returns), filters them itself and pages through the matches; the page says so.
+
+## Admin table filters
+
+The admin Users, Jobs and Burst workers tables use the same header dropdowns. Their
+columns are declared in `admincolumns.py` and the matching and query-string logic is in
+`tablefilter.py`. The coordinator can't filter these lists, so when a filter is set the
+app loads the newest 200 users, 100 jobs or 100 burst workers (the most each endpoint
+returns), filters them itself and pages through the matches; the page says so. Without a
+filter the normal paging is used. On Jobs, the cost filter leaves out jobs with no burst
+cost.
+
 ## Landing and error pages
 
 `/` shows a public landing page (`templates/landing.html`) to visitors without a

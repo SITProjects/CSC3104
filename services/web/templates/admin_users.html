@@ -1,17 +1,15 @@
 {% extends "base.html" %}
-{% from "_macros.html" import error_alert, pager, status_badge %}
+{% from "_macros.html" import error_alert, filter_notice, pager, status_badge, table_filter_headers %}
 {% block title %}Users{% endblock %}
 {% block width %}max-w-5xl{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-semibold tracking-tight">Users</h1>
 <p class="mt-2 text-muted-foreground">Every account, newest first. Select one to see its profile and jobs.</p>
 {% if errors.users %}<div class="mt-6">{{ error_alert(errors.users) }}</div>{% else %}
-<div class="table-container mt-6" tabindex="0" role="region" aria-label="Users">
+<form id="table-filter" method="get" action="/admin/users" aria-label="Filter users"></form>
+<div class="table-container mt-6 md:overflow-visible" tabindex="0" role="region" aria-label="Users">
   <table class="table">
-    <thead><tr>
-      <th scope="col">Account ID</th><th scope="col">Email</th><th scope="col">Role</th>
-      <th scope="col">Jobs</th><th scope="col">Joined</th>
-    </tr></thead>
+    <thead>{{ table_filter_headers(flt) }}</thead>
     <tbody>
     {% for u in users %}
       <tr>
@@ -22,11 +20,13 @@
         <td>{{ u.joined }}</td>
       </tr>
     {% else %}
-      <tr><td colspan="5" class="text-muted-foreground">No users{% if offset %} on this page{% endif %}.</td></tr>
+      <tr><td colspan="5" class="text-muted-foreground">No users{% if flt.active %} match these filters{% elif offset %} on this page{% endif %}.</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
-{{ pager("accounts", offset, page_size, has_more) }}
+{{ pager("accounts", offset, page_size, has_more, query=flt.query()) }}
+{{ filter_notice(flt, scan, "accounts") }}
 {% endif %}
+<script src="{{ url_for('static', path='filters.js').path }}" defer></script>
 {% endblock %}

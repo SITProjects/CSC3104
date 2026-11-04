@@ -773,7 +773,7 @@ def test_job_list_empty_and_error_states(client, monkeypatch):
     assert r.status_code == 503 and "be loaded right now" in r.text
 
 
-# --- My jobs status filter -----------------------------------------------------
+# --- My jobs filters (the dropdowns in the column headers) -----------------------
 
 
 def test_job_list_filters_by_status_and_keeps_it_when_paging(client, monkeypatch, s3):
@@ -801,16 +801,12 @@ def test_job_list_filters_by_status_and_keeps_it_when_paging(client, monkeypatch
     r = client.get("/jobs?status=FAILED&status=PENDING&status=bogus")
     assert r.status_code == 200
     assert calls == [["PENDING", "FAILED"]]  # unknown values are dropped
-    # a chip per status, each linking to the filter without it
-    assert 'href="/jobs?status=FAILED" aria-label="Remove the Queued filter"' in r.text
-    assert 'href="/jobs?status=PENDING" aria-label="Remove the Failed filter"' in r.text
-    # only statuses not yet chosen can be added
-    assert (
-        '<option value="RUNNING">' in r.text and '<option value="FAILED">' not in r.text
-    )
+    # the Status dropdown has a box per status, the chosen ones ticked
+    assert 'value="PENDING" checked' in r.text and 'value="FAILED" checked' in r.text
+    assert 'value="RUNNING" checked' not in r.text and "bogus" not in r.text
     assert "thesis.pdf" not in r.text
     assert "?status=PENDING&amp;status=FAILED&amp;offset=20" in r.text
-    assert 'href="/jobs">Clear all' in r.text
+    assert 'href="/jobs">Clear all filters' in r.text
 
 
 def test_job_list_preparing_filter_skips_the_coordinator(client, monkeypatch, s3):
@@ -832,8 +828,9 @@ def test_job_list_says_when_nothing_matches(client, monkeypatch, s3):
 
     monkeypatch.setattr(coordinator, "list_jobs", fake_list)
     r = client.get("/jobs?status=CANCELLED")
-    assert "No jobs match this filter" in r.text and "Create a job" not in r.text
-    assert 'href="/jobs" aria-label="Remove the Cancelled filter"' in r.text
+    assert "No jobs match these filters" in r.text and "Create a job" not in r.text
+    assert "<thead>" in r.text and 'aria-label="Filter by status"' in r.text  # headers stay
+    assert 'href="/jobs">Clear all filters' in r.text
 
 
 def test_job_list_filters_by_date_and_keeps_it_everywhere(client, monkeypatch, s3):
@@ -867,13 +864,11 @@ def test_job_list_filters_by_date_and_keeps_it_everywhere(client, monkeypatch, s
             datetime(2026, 10, 26, tzinfo=SGT),
         )
     ]
-    assert 'name="from" value="2026-10-20" max="2026-10-25"' in r.text
-    assert 'name="to" value="2026-10-25" min="2026-10-20"' in r.text
-    # removing the status chip keeps the dates, and so does paging
     assert (
-        'href="/jobs?from=2026-10-20&amp;to=2026-10-25" aria-label="Remove the Completed filter"'
-        in r.text
+        'name="from" form="table-filter" value="2026-10-20" max="2026-10-25"' in r.text
     )
+    assert 'name="to" form="table-filter" value="2026-10-25" min="2026-10-20"' in r.text
+    # paging keeps the dates
     assert (
         "?status=COMPLETED&amp;from=2026-10-20&amp;to=2026-10-25&amp;offset=20"
         in r.text
@@ -895,8 +890,8 @@ def test_job_list_does_not_allow_future_dates(client, monkeypatch, s3):
     r = client.get(f"/jobs?from={tomorrow}&to=9999-12-31")
     assert r.status_code == 200 and calls == [(None, None)]  # both ignored
     # the pickers stop at today too
-    assert f'name="from" value="" max="{today}"' in r.text
-    assert f'name="to" value="" max="{today}"' in r.text
+    assert f'name="from" form="table-filter" value="" max="{today}"' in r.text
+    assert f'name="to" form="table-filter" value="" max="{today}"' in r.text
     r = client.get(f"/jobs?to={today}")
     # today itself is allowed: up to the start of tomorrow
     tomorrow = today + timedelta(days=1)
@@ -924,6 +919,72 @@ def test_job_list_ignores_a_bad_date(client, monkeypatch, s3):
     r = client.get("/jobs?from=not-a-date&to=")
     assert r.status_code == 200 and calls == [(None, None)]
     assert "Create a job" in r.text  # not filtered, so the usual empty state
+
+
+def _timed(i: int, tasks: int, minutes: int) -> dict:
+    """A finished job with this many tasks that took this many minutes."""
+    return {
+        **summary(i, "COMPLETED"),
+        "task_count": tasks,
+        "finished_at": f"2026-10-24T10:{minutes:02d}:00+00:00",
+    }
+
+
+def test_job_list_filters_by_tasks_and_time_taken_in_the_app(client, monkeypatch, s3):
+    calls = []
+
+    async def fake_list(
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
+    ):
+        calls.append((limit, offset))
+        return [_timed(11, 1, 1), _timed(12, 3, 2), _timed(13, 5, 10)]
+
+    monkeypatch.setattr(coordinator, "list_jobs", fake_list)
+    r = client.get("/jobs?tasks_min=2&took_max=5")
+    assert r.status_code == 200
+    # the coordinator can't filter these, so the app takes the newest 100 and filters
+    assert calls == [(100, 0)]
+    assert str(UUID(int=12)) in r.text
+    assert str(UUID(int=11)) not in r.text and str(UUID(int=13)) not in r.text
+    assert 'name="tasks_min" form="table-filter" min="0" value="2"' in r.text
+    assert 'name="took_max" form="table-filter" min="0" value="5"' in r.text
+    assert "look through your newest 100 jobs" in r.text
+
+
+def test_job_list_searches_job_ids_and_file_names(client, monkeypatch, s3):
+    stub_list(monkeypatch, [summary(11, "COMPLETED")])
+    mark_pending(s3)  # thesis.pdf
+    r = client.get("/jobs?q=THESIS")
+    assert "thesis.pdf" in r.text and str(UUID(int=11)) not in r.text
+    r = client.get(f"/jobs?q={UUID(int=11)}")
+    assert str(UUID(int=11)) in r.text and "thesis.pdf" not in r.text
+    r = client.get("/jobs?q=nothing-like-this")
+    assert "No jobs match these filters" in r.text
+
+
+def test_job_list_pages_through_in_app_matches(client, monkeypatch, s3):
+    stub_list(monkeypatch, [summary(i, "COMPLETED") for i in range(11, 36)])  # 25 jobs
+    first = client.get("/jobs?tasks_min=1")
+    assert "?tasks_min=1&amp;offset=20" in first.text
+    assert str(UUID(int=30)) in first.text and str(UUID(int=31)) not in first.text
+    second = client.get("/jobs?tasks_min=1&offset=20")
+    assert str(UUID(int=31)) in second.text and str(UUID(int=35)) in second.text
+    assert "Older jobs" not in second.text and "Newer jobs" in second.text
+
+
+def test_job_list_ignores_bad_numbers(client, monkeypatch, s3):
+    calls = []
+
+    async def fake_list(
+        token, limit=20, offset=0, statuses=(), created_after=None, created_before=None
+    ):
+        calls.append(limit)
+        return [summary(11, "COMPLETED")]
+
+    monkeypatch.setattr(coordinator, "list_jobs", fake_list)
+    r = client.get("/jobs?tasks_min=abc&tasks_max=-1&took_min=1.5&took_max=")
+    assert r.status_code == 200 and calls == [21]  # no filter, so the usual page
+    assert "Clear all filters" not in r.text
 
 
 def test_job_list_date_filter_applies_to_uploads_being_prepared(
