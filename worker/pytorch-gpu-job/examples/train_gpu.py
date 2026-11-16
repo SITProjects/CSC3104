@@ -12,8 +12,9 @@ Upload this file as a "Python with PyTorch (GPU)" job and run, for example:
     python train_gpu.py --epochs 40 --save-seconds 30
 
 It stops with an error when there is no CUDA device, so a broken GPU setup is
-never mistaken for slow training. The output folder gets model.pt and
-metrics.json.
+never mistaken for slow training. The output folder gets model.pt,
+metrics.json and model.onnx, which the platform scores when the job has an
+evaluation file (make one with make_eval_digits.py).
 """
 
 import argparse
@@ -36,6 +37,27 @@ def accuracy(model: nn.Module, x: torch.Tensor, y: torch.Tensor) -> float:
     model.eval()
     with torch.no_grad():
         return float((model(x).argmax(dim=1) == y).float().mean())
+
+
+def export_onnx(model: nn.Module, example: torch.Tensor) -> None:
+    """
+    Saves output/model.onnx for the platform's checker: one float input with
+    any batch size, and class logits out. A model that can't be exported is
+    still returned as model.pt; the job is then "not scored".
+    """
+    try:
+        torch.onnx.export(
+            model,
+            (example,),
+            OUTPUT / "model.onnx",
+            input_names=["x"],
+            output_names=["logits"],
+            dynamo=True,
+            external_data=False,  # one file: the checker reads only model.onnx
+            dynamic_shapes=({0: torch.export.Dim("batch")},),
+        )
+    except Exception as exc:  # noqa: BLE001 - the export is optional
+        print(f"Couldn't export model.onnx, so it won't be scored: {exc}", flush=True)
 
 
 def main() -> None:
@@ -141,6 +163,7 @@ def main() -> None:
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), OUTPUT / "model.pt")
+    export_onnx(model.cpu().eval(), x_test[:2].cpu())
     metrics = {
         "epochs": epoch,
         "accuracy": accuracy(model, x_test, y_test),

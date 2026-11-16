@@ -349,3 +349,85 @@ async def review_token(
     ):
         return None
     return status.user
+
+
+# Check copies (GPU plan phase 3): they score a trained model on a node the
+# platform controls, never on a lending PC
+CHECKER_NODE_LABEL = "idlecloud/checker"
+CHECK_CPU = 1  # cores
+CHECK_MEM_MIB = 1024
+CHECK_TIMEOUT_SECONDS = 600
+
+
+def build_check_job_manifest(
+    replica: Replica,
+    task: Task,
+    job_type: JobType,
+    token: str,
+    coordinator_url: str,
+    avoid_nodes: Collection[str] = (),
+):
+    """
+    The Kubernetes Job for a check copy: the job type's check_image, 1 core,
+    1 GiB and 10 minutes, only on nodes labelled idlecloud/checker=true (the hub
+    or a CPU burst worker). avoid_nodes is ignored: the checker is never one of
+    the PCs that trained the model.
+    """
+    del avoid_nodes
+    if not job_type.check_image:
+        raise ValueError(f"job type {job_type.name} has no check_image")
+    labels = {
+        "app.kubernetes.io/managed-by": "idlecloud-coordinator",
+        "idlecloud/job-id": str(task.job_id),
+        "idlecloud/task-id": str(task.id),
+        "idlecloud/replica-id": str(replica.id),
+        "idlecloud/attempt": str(replica.attempt),
+        "idlecloud/check": "true",
+    }
+    resources = {"cpu": str(CHECK_CPU), "memory": f"{CHECK_MEM_MIB}Mi"}
+    container = {
+        "name": "worker",
+        "image": job_type.check_image,
+        "imagePullPolicy": pull_policy(job_type.check_image),
+        "env": [
+            {"name": "COORDINATOR_URL", "value": coordinator_url},
+            {"name": "REPLICA_ID", "value": str(replica.id)},
+            {"name": "REPLICA_TOKEN", "value": token},
+        ],
+        "resources": {"requests": resources, "limits": resources},
+        "securityContext": {
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+            "readOnlyRootFilesystem": True,
+        },
+    }
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": f"replica-{replica.id}-a{replica.attempt}",
+            "namespace": JOB_NAMESPACE,
+            "labels": labels,
+        },
+        "spec": {
+            "backoffLimit": 0,
+            "ttlSecondsAfterFinished": JOB_TTL_SECONDS,
+            "template": {
+                "metadata": {"labels": labels},
+                "spec": {
+                    "activeDeadlineSeconds": CHECK_TIMEOUT_SECONDS,
+                    "restartPolicy": "Never",
+                    "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
+                    "terminationGracePeriodSeconds": TERMINATION_GRACE_SECONDS,
+                    "nodeSelector": {CHECKER_NODE_LABEL: "true"},
+                    "securityContext": {
+                        "runAsNonRoot": True,
+                        "runAsUser": 65534,
+                        "seccompProfile": {"type": "RuntimeDefault"},
+                    },
+                    "containers": [container],
+                },
+            },
+        },
+    }

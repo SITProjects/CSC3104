@@ -89,6 +89,11 @@ step "Enrollment helper"
 # Before the coordinator starts, so its socket mount finds the helper's folder
 sudo bash infra/enroll/install.sh
 
+step "Checker node"
+# Trained GPU models are scored on a node the platform controls (check copies
+# select idlecloud/checker=true), never on a lending PC: the hub by default
+kubectl label nodes -l idlecloud/role=control idlecloud/checker=true --overwrite
+
 step "Applying $OVERLAY"
 kubectl apply -k "$OVERLAY"
 

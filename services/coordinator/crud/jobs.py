@@ -46,6 +46,7 @@ async def create_job(
         status=JobStatus.PENDING,
         task_count=req.task_count or len(req.tasks),
         replicas_per_task=req.replicas_per_task,
+        min_score=req.min_score,
     )
     session.add(job)
     try:
@@ -215,6 +216,7 @@ async def cancel_job(session: AsyncSession, job_id: uuid.UUID) -> list[tuple[int
                     TaskStatus.RUNNING,
                     TaskStatus.VOTING,
                     TaskStatus.DISPUTED,
+                    TaskStatus.SCORING,
                 ]
             ),
         )
@@ -239,7 +241,9 @@ async def expire_old_jobs(session: AsyncSession, now: datetime) -> list[uuid.UUI
     Owner evictions don't use up a copy's retries, so without a limit a job
     that keeps losing its PC could wait for ever. Like a failed vote, the job's
     unfinished copies become CANCELLED without their tokens (housekeeping
-    deletes their Pods) and its unfinished tasks FAILED.
+    deletes their Pods) and its unfinished tasks FAILED. A job whose training
+    is done and only waits for its model to be scored (SCORING) is left alone:
+    that wait is the platform's, not the job's.
 
     args:
         session: Housekeeping's transaction.
@@ -254,6 +258,19 @@ async def expire_old_jobs(session: AsyncSession, now: datetime) -> list[uuid.UUI
                 JobType.max_age_hours.is_not(None),
                 Job.created_at
                 < now - func.make_interval(0, 0, 0, 0, JobType.max_age_hours),
+                select(Task.id)
+                .where(
+                    Task.job_id == Job.id,
+                    Task.status.in_(
+                        [
+                            TaskStatus.PENDING,
+                            TaskStatus.RUNNING,
+                            TaskStatus.VOTING,
+                            TaskStatus.DISPUTED,
+                        ]
+                    ),
+                )
+                .exists(),
             )
             .with_for_update(of=Job, skip_locked=True)
         )
@@ -285,6 +302,7 @@ async def expire_old_jobs(session: AsyncSession, now: datetime) -> list[uuid.UUI
                         TaskStatus.RUNNING,
                         TaskStatus.VOTING,
                         TaskStatus.DISPUTED,
+                        TaskStatus.SCORING,
                     ]
                 ),
             )

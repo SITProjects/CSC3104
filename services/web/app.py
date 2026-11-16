@@ -436,6 +436,8 @@ def _new_job_page(
             "max_pages": settings.max_pages,
             "max_input_files": settings.max_input_files,
             "max_command_chars": settings.max_command_chars,
+            "scored_types": jobtools.SCORED_TYPES,
+            "max_eval_samples": jobtools.MAX_EVAL_SAMPLES,
             "at_limit": at_limit,
         },
         status_code=status,
@@ -529,8 +531,16 @@ async def new_job_submit(
     file: Annotated[UploadFile | None, File()] = None,
     command: Annotated[str | None, Form()] = None,
     inputs: Annotated[list[UploadFile] | None, File()] = None,
+    eval_file: Annotated[UploadFile | None, File()] = None,
+    min_accuracy: Annotated[str | None, Form()] = None,
 ):
-    form = {"job_type": job_type, "cpu": cpu, "mem": mem, "command": command}
+    form = {
+        "job_type": job_type,
+        "cpu": cpu,
+        "mem": mem,
+        "command": command,
+        "min_accuracy": min_accuracy,
+    }
     try:
         kind = jobtools.parse_job_type(job_type)
         cpu_cores, mem_mib = jobtools.parse_resources(kind, cpu, mem)
@@ -541,7 +551,15 @@ async def new_job_submit(
         return _new_job_page(request, limit, 429, form, at_limit=limit)
     if kind.runs_command:
         return await _create_command_job(
-            request, form, kind.name, cpu_cores, mem_mib, command, inputs or []
+            request,
+            form,
+            kind.name,
+            cpu_cores,
+            mem_mib,
+            command,
+            inputs or [],
+            eval_file if kind.name in jobtools.SCORED_TYPES else None,
+            min_accuracy if kind.name in jobtools.SCORED_TYPES else None,
         )
     if not kind.needs_pdf:
         return await _create_job_now(request, form, kind.name, cpu_cores, mem_mib)
@@ -591,19 +609,28 @@ async def _create_command_job(
     mem: int,
     command: str | None,
     files: list[UploadFile],
+    eval_file: UploadFile | None = None,
+    min_accuracy: str | None = None,
 ) -> Response:
     """
     Creates a generic job: stores its files under jobs/{id}/inputs/, then asks
     the coordinator for one task that runs the command (worker/runner). The
     files are removed again only if the coordinator refused the job.
+
+    For a scored type, eval_file is stored apart at jobs/{id}/eval/eval.npz,
+    where only the platform's checker reads it, and min_accuracy (a percentage)
+    becomes the job's min_score.
     """
     files = [f for f in files if f.filename]  # browsers send an empty part for none
+    if eval_file is not None and not eval_file.filename:
+        eval_file = None
     limit = settings.max_upload_mb * MIB
     try:
         argv = jobtools.parse_command(command)
         names = jobtools.input_names([f.filename for f in files])
+        min_score = jobtools.parse_min_score(min_accuracy, eval_file is not None)
         contents, total = [], 0
-        for upload in files:
+        for upload in [*files, *([eval_file] if eval_file else [])]:
             data = await upload.read(limit + 1 - total)
             total += len(data)
             if total > limit:
@@ -616,6 +643,8 @@ async def _create_command_job(
 
     job_id = uuid4()
     keys = [storage.input_file_key(job_id, name) for name in names]
+    if eval_file is not None:
+        keys.append(storage.eval_file_key(job_id))
     try:
         for key, data in zip(keys, contents):
             await asyncio.to_thread(
@@ -628,12 +657,14 @@ async def _create_command_job(
             request, "Couldn't store the files. Please try again.", 503, form
         )
     task_input = {"command": argv, "files": [f"inputs/{name}" for name in names]}
+    if eval_file is not None:
+        task_input["eval_file"] = storage.EVAL_FILE
 
     async def remove_files() -> None:
         await _delete_quietly(keys)
 
     return await _create_job_now(
-        request, form, job_type, cpu, mem, task_input, job_id, remove_files
+        request, form, job_type, cpu, mem, task_input, job_id, remove_files, min_score
     )
 
 
@@ -655,6 +686,7 @@ async def _create_job_now(
     task_input: dict | None = None,
     job_id: UUID | None = None,
     on_refused: Callable[[], Awaitable[None]] | None = None,
+    min_score: float | None = None,
 ) -> Response:
     """
     Creates a job whose input is ready now (no PDF to render) and opens its page.
@@ -667,7 +699,9 @@ async def _create_job_now(
     try:
         await coordinator.create_job(
             request.cookies[settings.session_cookie],
-            jobtools.job_spec(job_id, job_type, cpu, mem, task_input=task_input),
+            jobtools.job_spec(
+                job_id, job_type, cpu, mem, task_input=task_input, min_score=min_score
+            ),
         )
     except httpx.HTTPStatusError as exc:
         if on_refused and 400 <= exc.response.status_code < 500:
@@ -1203,6 +1237,29 @@ async def job_result(
     )
 
 
+def _archive_matches(job: dict, job_id: UUID, replica_id: int, archive: bytes) -> bool:
+    """
+    Whether output.tar.gz is the one the copy reported: its SHA-256 must be
+    the archive_sha256 in result.json, and result.json's own SHA-256 the
+    result hash the coordinator stored. The platform's score names the same
+    archive, so the download is the model that was scored. A copy with no
+    result.json (an older job) is served as it is.
+    """
+    replica = jobtools.find_replica(job, replica_id)
+    result = storage.get_first(
+        storage.replica_result_keys(job_id, replica_id, replica["attempt"])
+    )
+    if result is None or not replica.get("result_hash"):
+        return True
+    if hashlib.sha256(result).hexdigest() != replica["result_hash"]:
+        return False
+    try:
+        expected = json.loads(result)["archive_sha256"]
+    except (ValueError, KeyError, TypeError):
+        return False
+    return hashlib.sha256(archive).hexdigest() == expected
+
+
 @app.get("/jobs/{job_id}/output.tar.gz")
 async def job_output(
     request: Request, job_id: UUID, user: Annotated[dict, Depends(current_user)]
@@ -1230,6 +1287,14 @@ async def job_output(
             if replica_id is not None
             else None
         )
+        if data is not None and not await asyncio.to_thread(
+            _archive_matches, job, job_id, replica_id, data
+        ):
+            raise HTTPException(
+                409,
+                "This output changed after the job reported it, so it isn't "
+                "served. Ask an administrator to check the job.",
+            )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise HTTPException(404, "Job not found") from exc
