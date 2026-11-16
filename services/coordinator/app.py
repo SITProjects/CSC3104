@@ -571,6 +571,8 @@ async def free_capacity(
     core_api: CoreAPI,
     cpu: int = Query(1, ge=1, le=16),
     mem: int = Query(256, ge=64, le=4096),
+    gpu: bool = Query(False),
+    gpu_vram: int | None = Query(None, ge=1, le=1024),
 ) -> CapacityOut:
     """
     How many more task copies of this size the usable worker nodes can take now.
@@ -581,11 +583,15 @@ async def free_capacity(
     args:
         cpu: Cores one copy asks for.
         mem: MiB one copy asks for.
+        gpu: Count copies that need a GPU node: at most one per free GPU node.
+        gpu_vram: With gpu, the smallest GPU memory in GiB a copy accepts.
     raises:
         HTTPException: 503 if the cluster can't be read.
     """
     try:
-        slots, nodes = await current_free_slots(core_api, cpu, mem)
+        slots, nodes = await current_free_slots(
+            core_api, cpu, mem, gpu, gpu_vram if gpu else None
+        )
     except Exception as exc:
         log.warning("reading free capacity failed: %r", exc)
         raise HTTPException(503, "cluster capacity is unavailable") from exc

@@ -31,6 +31,8 @@ echo "== Building $python"
 docker build -f worker/python-job/Dockerfile -t "$python" .
 echo "== Building $pytorch"
 docker build -f worker/pytorch-job/Dockerfile -t "$pytorch" .
+# The pytorch-gpu image (migration 014) is left out: the local k3s workers have
+# no GPU, so its copies never start here, and the image is several GB.
 
 workers=$(docker compose ps --services --status running | grep '^k3-worker-' || true)
 [ -n "$workers" ] || { echo "no k3-worker containers are running; start the stack first" >&2; exit 1; }

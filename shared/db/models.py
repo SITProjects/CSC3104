@@ -314,6 +314,19 @@ class JobType(Base):
         server_default=text("true"),
     )
 
+    # Whether copies need an NVIDIA GPU node (migration 014), and the smallest
+    # GPU memory in GiB they accept, if any
+    gpu: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+
+    min_gpu_vram_gib: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
     jobs: Mapped[list["Job"]] = relationship(
         back_populates="job_type_obj",
     )
@@ -326,6 +339,10 @@ class JobType(Base):
         CheckConstraint(
             "default_mem > 0",
             name="job_types_default_mem_check",
+        ),
+        CheckConstraint(
+            "min_gpu_vram_gib IS NULL OR (gpu AND min_gpu_vram_gib > 0)",
+            name="job_types_min_gpu_vram_gib_check",
         ),
     )
 

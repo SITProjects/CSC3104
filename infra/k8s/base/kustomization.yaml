@@ -8,3 +8,4 @@ resources:
   - web.yml
   - verifier-rbac.yml
   - verifier.yml
+  - jobs-networkpolicy.yml

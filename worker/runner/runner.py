@@ -55,6 +55,18 @@ EXIT_EVICTED = 143
 # exit codes for problems before the command starts, like a shell's
 EXIT_BAD_INPUT = 2
 EXIT_NOT_FOUND = 127
+# a GPU job type's copy landed where CUDA doesn't work (sysexits EX_UNAVAILABLE)
+EXIT_NO_CUDA = 69
+CUDA_CHECK_TIMEOUT_SECONDS = 120
+CUDA_CHECK = (
+    "import torch, sys\n"
+    "if not torch.cuda.is_available():\n"
+    "    sys.exit('torch ' + torch.__version__ + ' sees no CUDA device')\n"
+    "x = torch.ones(1024, device='cuda')\n"
+    "print('CUDA ' + str(torch.version.cuda) + ' on ' + torch.cuda.get_device_name(0) + ', '\n"
+    "      + str(torch.cuda.get_device_properties(0).total_memory // 2**20) + ' MiB, check sum '\n"
+    "      + str(int((x * 2).sum().item())))\n"
+)
 HIDDEN_FROM_COMMAND = ("REPLICA_TOKEN", "REPLICA_ID", "COORDINATOR_URL", "TASK_INDEX")
 # the runner's own folders in the work folder; the web app refuses these file names
 OUTPUT_NAME = "output"
@@ -194,6 +206,40 @@ def command_env(work: Path) -> dict[str, str]:
         PYTHONUNBUFFERED="1",
     )
     return env
+
+
+def check_cuda(log: Log) -> bool:
+    """
+    For GPU job types (the coordinator sets IDLECLOUD_REQUIRE_CUDA=1): checks
+    PyTorch can use a CUDA device here before the command starts, and logs the
+    device. A script that falls back to the CPU would otherwise run for hours
+    without anyone noticing that the node's GPU setup is broken.
+    """
+    if os.environ.get("IDLECLOUD_REQUIRE_CUDA") != "1":
+        return True
+    try:
+        check = subprocess.run(
+            [sys.executable, "-c", CUDA_CHECK],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=CUDA_CHECK_TIMEOUT_SECONDS,
+            text=True,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.note(f"This job type needs a GPU, but the CUDA check couldn't run: {exc}")
+        return False
+    if check.returncode != 0:
+        detail = (check.stderr or check.stdout).strip().splitlines()[-1:] or [
+            "no output"
+        ]
+        log.note(
+            "This job type needs a GPU, but CUDA isn't available on this node "
+            f"({detail[0]}). The command was not started."
+        )
+        return False
+    log.note(check.stdout.strip())
+    return True
 
 
 def run_command(
@@ -434,6 +480,8 @@ def main() -> int:
             # a stop during the download means the command never starts
             if stopping.is_set():
                 code = EXIT_EVICTED
+            elif not check_cuda(log):
+                code = EXIT_NO_CUDA
             else:
                 done = threading.Event()
                 saver = threading.Thread(

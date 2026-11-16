@@ -115,4 +115,41 @@ if (( OCTET < 200 )); then
     AGENT_ARGS+=(--node-taint idlecloud/owner-active=true:NoExecute)
 fi
 
+# NVIDIA GPU workers take GPU job types (job_types.gpu): the coordinator keeps
+# those copies on nodes labelled idlecloud/gpu=nvidia. The NVIDIA container
+# toolkit must be installed before the agent starts, or K3s doesn't register
+# the nvidia runtime and every GPU copy would fail its CUDA check.
+GPU_IMAGE="ghcr.io/sitprojects/idlecloud-pytorch-gpu:main" # migration 014
+GPU=0
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+    if command -v nvidia-container-runtime >/dev/null 2>&1; then
+        # the smallest GPU's memory, in whole GiB
+        VRAM_MIB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits |
+            tr -d ' ' | sort -n | head -1)"
+        [[ "$VRAM_MIB" =~ ^[0-9]+$ ]] || die "Couldn't read the GPU's memory from nvidia-smi."
+        AGENT_ARGS+=(
+            --node-label idlecloud/gpu=nvidia
+            --node-label "idlecloud/gpu-vram-gib=$(( VRAM_MIB / 1024 ))"
+        )
+        GPU=1
+        echo "NVIDIA GPU found ($(( VRAM_MIB / 1024 )) GiB): joining as a GPU worker."
+    else
+        echo "Warning: nvidia-smi works but the NVIDIA container toolkit is missing," >&2
+        echo "so this PC joins without GPU jobs. Install nvidia-container-toolkit" >&2
+        echo "and run this script again to take them." >&2
+    fi
+fi
+
 INSTALL_K3S_VERSION="$VERSION" sh "$INSTALLER" agent "${AGENT_ARGS[@]}"
+
+# Pull the GPU image now: it is several GB, and pulling it at the first job
+# would count against that job's time limit. A failure here is not fatal.
+if (( GPU )); then
+    for _ in $(seq 1 30); do
+        k3s ctr version >/dev/null 2>&1 && break
+        sleep 2
+    done
+    echo "Pulling $GPU_IMAGE (several GB)..."
+    k3s ctr --namespace k8s.io images pull "$GPU_IMAGE" ||
+        echo "Warning: couldn't pull $GPU_IMAGE now; the first GPU job will pull it." >&2
+fi

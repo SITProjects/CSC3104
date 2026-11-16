@@ -1,0 +1,64 @@
+# Network rules for task Pods (users' own code, on lab PCs and burst workers).
+#
+# A task Pod may only reach cluster DNS, the coordinator's API, and addresses on
+# the public internet (S3 presigned URLs, and anything a user's script
+# downloads). Everything private is blocked: the Kubernetes API server,
+# Postgres and the other Pods in idlecloud-system, the WireGuard network
+# (10.10.0.0/24: the hub and other workers), a campus LAN on private
+# addresses, and the cloud metadata address. Nothing may connect in.
+#
+# Only the AWS deployment applies it (infra/k8s/base via overlays/aws). The
+# local compose stack leaves it out: there, task Pods reach the coordinator and
+# MinIO at private 172.29.0.x addresses.
+#
+# K3s enforces NetworkPolicy with its built-in controller on every node (it is
+# on unless K3s runs with --disable-network-policy). Policies only add allowed
+# traffic, so keep no other policy in idlecloud-jobs that allows more.
+# infra/README.md ("Task Pod network rules") has the commands that check it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: task-pods
+  namespace: idlecloud-jobs
+spec:
+  podSelector: {} # every Pod in the namespace
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: [] # nothing connects in
+  egress:
+    # Cluster DNS, to resolve the coordinator's name and S3's
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The coordinator's API (COORDINATOR_URL): manifest, progress, result
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: idlecloud-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: idlecloud-coordinator
+      ports:
+        - protocol: TCP
+          port: 8001
+    # The public internet only
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8 # Pods, Services, WireGuard, AWS VPC
+              - 172.16.0.0/12 # AWS default VPC, private networks
+              - 192.168.0.0/16 # private networks
+              - 100.64.0.0/10 # carrier-grade NAT
+              - 169.254.0.0/16 # link-local, including EC2 instance metadata
+              - 127.0.0.0/8

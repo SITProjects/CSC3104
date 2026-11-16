@@ -173,6 +173,9 @@ ROLE_LABEL = "idlecloud/role"
 POOL_LABEL = "idlecloud/pool"
 TASK_LABEL = "idlecloud/task-id"
 REPLICA_LABEL = "idlecloud/replica-id"  # set by the coordinator on each pod
+# Set by the coordinator on copies of GPU job types (services/coordinator/k8s.py).
+# Burst workers have no GPU, so the autoscaler leaves these pods alone.
+GPU_JOB_LABEL = "idlecloud/gpu-job"
 TYPE_LABEL = "idlecloud/instance-type"
 # The EC2 instance id a burst node runs on, set by the node itself at join
 INSTANCE_ID_LABEL = "idlecloud/instance-id"

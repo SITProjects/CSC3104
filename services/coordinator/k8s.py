@@ -27,6 +27,16 @@ JOB_TTL_SECONDS = 600
 TERMINATION_GRACE_SECONDS = 30
 TOLERATION_SECONDS = 30
 REPLICA_SELECTOR = "app.kubernetes.io/managed-by=idlecloud-coordinator"
+# GPU job types (job_types.gpu, migration 014). infra/join-worker.sh labels a
+# worker whose NVIDIA GPU works; K3s ships the nvidia RuntimeClass and picks up
+# the NVIDIA container runtime when it is installed before the agent starts.
+GPU_NODE_LABEL = "idlecloud/gpu"
+GPU_NODE_VALUE = "nvidia"
+GPU_VRAM_LABEL = "idlecloud/gpu-vram-gib"
+GPU_RUNTIME_CLASS = "nvidia"
+# On every GPU copy's Pod, so a node runs at most one of them: the copy gets all
+# of the node's GPUs (NVIDIA_VISIBLE_DEVICES=all), so a second one would share
+GPU_JOB_LABEL = "idlecloud/gpu-job"
 
 
 def pull_policy(image: str) -> str:
@@ -66,27 +76,49 @@ async def list_replica_pods(core_api: CoreV1Api) -> list[V1Pod]:
     return pods.items or []
 
 
-def _avoid(nodes: Collection[str]) -> dict:
+def _required_nodes(avoid: Collection[str], min_gpu_vram_gib: int | None) -> dict:
     """
-    A hard node rule keeping a Pod off these nodes (by name), or nothing.
+    The hard node rules for a copy, or nothing: off these nodes (by name), and
+    on a node with at least this much GPU memory.
 
     A node-name field selector takes one value per NotIn, so each node gets its
     own requirement; requirements in one term must all hold.
     """
-    if not nodes:
+    term: dict = {}
+    if avoid:
+        term["matchFields"] = [
+            {"key": "metadata.name", "operator": "NotIn", "values": [name]}
+            for name in sorted(avoid)
+        ]
+    if min_gpu_vram_gib:
+        # Gt compares the label as an integer: more than n - 1 is at least n
+        term["matchExpressions"] = [
+            {
+                "key": GPU_VRAM_LABEL,
+                "operator": "Gt",
+                "values": [str(min_gpu_vram_gib - 1)],
+            }
+        ]
+    if not term:
         return {}
     return {
-        "requiredDuringSchedulingIgnoredDuringExecution": {
-            "nodeSelectorTerms": [
-                {
-                    "matchFields": [
-                        {"key": "metadata.name", "operator": "NotIn", "values": [name]}
-                        for name in sorted(nodes)
-                    ]
-                }
-            ]
-        }
+        "requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [term]}
     }
+
+
+def _gpu_env(job_type: JobType) -> list[dict]:
+    """
+    What a GPU copy's container needs: the NVIDIA runtime exposes every GPU on
+    the node to it, and the runner refuses to start the command without CUDA
+    rather than let it train on the CPU unnoticed.
+    """
+    if not job_type.gpu:
+        return []
+    return [
+        {"name": "NVIDIA_VISIBLE_DEVICES", "value": "all"},
+        {"name": "NVIDIA_DRIVER_CAPABILITIES", "value": "compute,utility"},
+        {"name": "IDLECLOUD_REQUIRE_CUDA", "value": "1"},
+    ]
 
 
 def build_replica_job_manifest(
@@ -111,6 +143,8 @@ def build_replica_job_manifest(
         "idlecloud/replica-id": str(replica.id),
         "idlecloud/attempt": str(replica.attempt),
     }
+    if job_type.gpu:
+        labels[GPU_JOB_LABEL] = "true"
 
     # cpu_request is whole cores (a bare number in Kubernetes), mem_request is MiB
     resources = {"cpu": str(task.cpu_request), "memory": f"{task.mem_request}Mi"}
@@ -124,6 +158,7 @@ def build_replica_job_manifest(
             {"name": "REPLICA_ID", "value": str(replica.id)},
             {"name": "TASK_INDEX", "value": str(task.task_index)},
             {"name": "REPLICA_TOKEN", "value": token},
+            *_gpu_env(job_type),
         ],
         "resources": {"requests": resources, "limits": resources},
         "securityContext": {
@@ -134,6 +169,25 @@ def build_replica_job_manifest(
 
     if job_type.command:
         container["command"] = job_type.command
+
+    # copies of a task never share a node; GPU copies never share one at all
+    anti_affinity = [
+        {
+            "topologyKey": "kubernetes.io/hostname",
+            "labelSelector": {"matchLabels": {"idlecloud/task-id": str(task.id)}},
+        }
+    ]
+    node_selector = {"idlecloud/role": "worker"}
+    gpu_spec = {}
+    if job_type.gpu:
+        anti_affinity.append(
+            {
+                "topologyKey": "kubernetes.io/hostname",
+                "labelSelector": {"matchLabels": {GPU_JOB_LABEL: "true"}},
+            }
+        )
+        node_selector[GPU_NODE_LABEL] = GPU_NODE_VALUE
+        gpu_spec["runtimeClassName"] = GPU_RUNTIME_CLASS
 
     return {
         "apiVersion": "batch/v1",
@@ -170,24 +224,19 @@ def build_replica_job_manifest(
                         },
                     ],
                     "terminationGracePeriodSeconds": TERMINATION_GRACE_SECONDS,
-                    # campus PCs and burst workers only, never the control plane
-                    "nodeSelector": {"idlecloud/role": "worker"},
-                    # replicas of the same task must land on different nodes for voting
+                    # campus PCs and burst workers only, never the control plane;
+                    # GPU copies only on workers with a working NVIDIA GPU
+                    "nodeSelector": node_selector,
+                    **gpu_spec,
                     "affinity": {
                         "podAntiAffinity": {
-                            "requiredDuringSchedulingIgnoredDuringExecution": [
-                                {
-                                    "topologyKey": "kubernetes.io/hostname",
-                                    "labelSelector": {
-                                        "matchLabels": {
-                                            "idlecloud/task-id": str(task.id)
-                                        }
-                                    },
-                                }
-                            ]
+                            "requiredDuringSchedulingIgnoredDuringExecution": anti_affinity
                         },
                         "nodeAffinity": {
-                            **_avoid(avoid_nodes),
+                            **_required_nodes(
+                                avoid_nodes,
+                                job_type.min_gpu_vram_gib if job_type.gpu else None,
+                            ),
                             "preferredDuringSchedulingIgnoredDuringExecution": [
                                 {
                                     "weight": 100,
