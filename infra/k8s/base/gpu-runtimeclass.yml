@@ -1,0 +1,11 @@
+# The container runtime for GPU task copies, whatever the GPU's vendor
+# (services/coordinator/k8s.py GPU_RUNTIME_CLASS). Each GPU worker defines the
+# idlecloud-gpu handler in its own containerd config, pointing at its vendor's
+# runtime: nvidia-container-runtime on NVIDIA workers, amd-container-runtime on
+# AMD workers (infra/join-worker.sh). A node without the handler can't start
+# these Pods, which is why copies only go to nodes labelled idlecloud/gpu.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: idlecloud-gpu
+handler: idlecloud-gpu

@@ -9,3 +9,4 @@ resources:
   - verifier-rbac.yml
   - verifier.yml
   - jobs-networkpolicy.yml
+  - gpu-runtimeclass.yml

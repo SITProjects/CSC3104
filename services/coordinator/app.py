@@ -5,7 +5,7 @@ import logging
 import os
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
@@ -56,7 +56,7 @@ from services.coordinator.crud import (
     update_node_state,
 )
 from services.coordinator.crud.jobs import delete_job_files
-from services.coordinator.k8s import cancel_k3_job, review_token
+from services.coordinator.k8s import GPU_VENDORS, cancel_k3_job, review_token
 from services.coordinator.loops import (
     LeaderLoop,
     LeaseLock,
@@ -108,6 +108,8 @@ AuthAPI = Annotated[
     client.AuthenticationV1Api, Depends(lambda: client.AuthenticationV1Api())
 ]
 CoreAPI = Annotated[client.CoreV1Api, Depends(lambda: client.CoreV1Api())]
+# The values of a GPU node's idlecloud/gpu label (k8s.GPU_VENDORS)
+GpuVendor = Literal["nvidia", "amd"]
 
 
 @asynccontextmanager
@@ -573,6 +575,7 @@ async def free_capacity(
     mem: int = Query(256, ge=64, le=4096),
     gpu: bool = Query(False),
     gpu_vram: int | None = Query(None, ge=1, le=1024),
+    gpu_vendor: Annotated[list[GpuVendor] | None, Query()] = None,
 ) -> CapacityOut:
     """
     How many more task copies of this size the usable worker nodes can take now.
@@ -585,12 +588,19 @@ async def free_capacity(
         mem: MiB one copy asks for.
         gpu: Count copies that need a GPU node: at most one per free GPU node.
         gpu_vram: With gpu, the smallest GPU memory in GiB a copy accepts.
+        gpu_vendor: With gpu, the GPU vendors a copy accepts (repeat the
+            parameter for several); every vendor if left out.
     raises:
         HTTPException: 503 if the cluster can't be read.
     """
     try:
         slots, nodes = await current_free_slots(
-            core_api, cpu, mem, gpu, gpu_vram if gpu else None
+            core_api,
+            cpu,
+            mem,
+            gpu,
+            gpu_vram if gpu else None,
+            gpu_vendor or GPU_VENDORS,
         )
     except Exception as exc:
         log.warning("reading free capacity failed: %r", exc)

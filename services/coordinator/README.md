@@ -26,24 +26,41 @@ app sizes OCR tasks from it. It needs `list` on nodes (`coordinator-rbac.yml`).
 
 ## GPU job types
 
-A job type with `gpu` set (`pytorch-gpu`, migration 014) needs an NVIDIA GPU
-node. `k8s.build_replica_job_manifest` gives its copies:
+A job type with `gpu` set (`pytorch-gpu`, migration 014) needs a GPU node of a
+vendor in its `gpu_vendors` (migration 015): `nvidia`, `amd` or both.
+`pytorch-gpu` takes both, so users pick one GPU type whatever the PC has.
+`k8s.build_replica_job_manifest` gives every copy the same Pod, whichever
+vendor's node then takes it:
 
-- the `nvidia` runtime class and `NVIDIA_VISIBLE_DEVICES=all`, so the copy sees
-  the node's GPUs, and `IDLECLOUD_REQUIRE_CUDA=1`, so the runner refuses to
-  start the command without CUDA (`worker/runner/README.md`);
-- a node selector on `idlecloud/gpu=nvidia`, which `infra/join-worker.sh` sets
-  when the worker's GPU and NVIDIA container toolkit work, and, if the type sets
-  `min_gpu_vram_gib`, a hard rule on `idlecloud/gpu-vram-gib`;
+- the `idlecloud-gpu` runtime class (`infra/k8s/base/gpu-runtimeclass.yml`).
+  Each GPU node maps its handler to its own vendor's container runtime
+  (`nvidia-container-runtime` or `amd-container-runtime`), and the copy gets
+  `NVIDIA_VISIBLE_DEVICES=all` and/or `AMD_VISIBLE_DEVICES=all` (each runtime
+  reads its own) and `IDLECLOUD_REQUIRE_CUDA=1`, so the runner refuses to start
+  the command unless PyTorch sees a GPU (`worker/runner/README.md`; ROCm builds
+  answer through the same `torch.cuda` API);
+- one image name. Each worker pulls its own vendor's build under that name: an
+  AMD node's K3s rewrites the `idlecloud-pytorch-gpu` image to
+  `idlecloud-pytorch-rocm` with the same tag (`registries.yaml`). So a GPU type's
+  image is always a tag, never a digest (a check constraint enforces it);
+- a hard node rule `idlecloud/gpu In (<its vendors>)`, which
+  `infra/join-worker.sh` sets when the worker's GPU and container toolkit work,
+  and, if the type sets `min_gpu_vram_gib`, `idlecloud/gpu-vram-gib` at least
+  that much, in the same term as the nodes it must avoid;
 - the Pod label `idlecloud/gpu-job=true` and a hard anti-affinity on it per
   node, so a node runs one GPU copy at a time. The copy gets all of the node's
   GPUs, so the unit is the node, not the card.
 
 Without a free GPU node a copy waits in Pending; the time limit counts from
 when a node starts it, so waiting costs nothing. `GET /capacity?gpu=true`
-counts free GPU nodes the same way (`&gpu_vram=<GiB>` for a minimum). No
-NVIDIA device plugin is needed: the labels and the runtime class are enough
-for one GPU copy per node.
+counts free GPU nodes the same way (`&gpu_vram=<GiB>` for a minimum,
+`&gpu_vendor=amd` once or more to count only some vendors). No device plugin is
+needed: the labels and the runtime class are enough for one GPU copy per node.
+
+A GPU node must define the `idlecloud-gpu` handler before it gets the
+`idlecloud/gpu` label, or its GPU copies can't start. Workers joined with the
+`join-worker.sh` from migration 014 only have K3s's own `nvidia` handler and
+must join again once `join-worker.sh` sets up `idlecloud-gpu`.
 
 ## Campus workers
 
