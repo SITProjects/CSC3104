@@ -24,6 +24,27 @@ workers (Ready, not cordoned, no owner-active or quarantine taint) can take, fro
 their allocatable CPU and memory less what unfinished task Pods ask for. The web
 app sizes OCR tasks from it. It needs `list` on nodes (`coordinator-rbac.yml`).
 
+## GPU job types
+
+A job type with `gpu` set (`pytorch-gpu`, migration 014) needs an NVIDIA GPU
+node. `k8s.build_replica_job_manifest` gives its copies:
+
+- the `nvidia` runtime class and `NVIDIA_VISIBLE_DEVICES=all`, so the copy sees
+  the node's GPUs, and `IDLECLOUD_REQUIRE_CUDA=1`, so the runner refuses to
+  start the command without CUDA (`worker/runner/README.md`);
+- a node selector on `idlecloud/gpu=nvidia`, which `infra/join-worker.sh` sets
+  when the worker's GPU and NVIDIA container toolkit work, and, if the type sets
+  `min_gpu_vram_gib`, a hard rule on `idlecloud/gpu-vram-gib`;
+- the Pod label `idlecloud/gpu-job=true` and a hard anti-affinity on it per
+  node, so a node runs one GPU copy at a time. The copy gets all of the node's
+  GPUs, so the unit is the node, not the card.
+
+Without a free GPU node a copy waits in Pending; the time limit counts from
+when a node starts it, so waiting costs nothing. `GET /capacity?gpu=true`
+counts free GPU nodes the same way (`&gpu_vram=<GiB>` for a minimum). No
+NVIDIA device plugin is needed: the labels and the runtime class are enough
+for one GPU copy per node.
+
 ## Campus workers
 
 `workers.py` lets admins add and remove campus PCs from the web admin pages,

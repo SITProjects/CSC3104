@@ -77,10 +77,15 @@ def unscheduled_pods(pods, now: datetime) -> tuple[int, list[StuckPod]]:
     at all. The second case happens when the scheduler cannot run, for example
     K3s holds its scheduler back until a usable worker node exists. A pod held by
     a scheduling gate (reason SchedulingGated) is waiting on purpose and skipped.
+    So is a copy of a GPU job: only a campus PC with an NVIDIA GPU can run it and
+    a burst worker never could, so it neither asks for burst workers nor keeps
+    them from draining.
     """
     waiting, unschedulable = 0, []
     for pod in pods:
         if pod.status.phase != "Pending" or pod.spec.node_name:
+            continue
+        if (pod.metadata.labels or {}).get(settings.GPU_JOB_LABEL) == "true":
             continue
         waiting += 1
         condition = next(

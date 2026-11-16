@@ -47,7 +47,7 @@ class JobType:
     example: str = ""
 
 
-# Mirrors the job types seeded in shared/migrations (002, 003, 010 and 012).
+# Mirrors the job types seeded in shared/migrations (002, 003, 010, 012 and 014).
 # The coordinator has no endpoint to list them, and it refuses an unknown job_type.
 JOB_TYPES = {
     t.name: t
@@ -101,6 +101,21 @@ JOB_TYPES = {
             runs_command=True,
             voting=False,
             example="python train_digits.py --epochs 30",
+        ),
+        JobType(
+            "pytorch-gpu",
+            "Python with PyTorch (GPU)",
+            "Trains your own PyTorch script on the NVIDIA GPU of an idle PC. Save "
+            "progress in the checkpoint folder every few minutes so it can carry on "
+            "if the PC's owner comes back, and save results in the output folder. "
+            "Use public or non-sensitive data only: the PC's administrator can see it.",
+            needs_pdf=False,
+            default_cpu=2,
+            default_mem=4096,
+            custom_resources=True,
+            runs_command=True,
+            voting=False,
+            example="python train_gpu.py --epochs 40 --save-seconds 300",
         ),
     )
 }

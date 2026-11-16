@@ -4,7 +4,7 @@ Owner: member 6.
 
 `runner.py` runs a user's own command for a generic job type and reports back
 like any worker. Each approved image copies it in and uses it as the entrypoint
-(see `worker/python-job` and `worker/pytorch-job`). It uses only the Python
+(see `worker/python-job`, `worker/pytorch-job` and `worker/pytorch-gpu-job`). It uses only the Python
 standard library, so any image with Python 3.12 or newer can include it.
 
 ## What it does
@@ -25,6 +25,15 @@ standard library, so any image with Python 3.12 or newer can include it.
 A job type with `verify = false` (migration 010) is decided by that exit code:
 0 completes the job, anything else fails it, and the download still holds the
 log.
+
+## GPU job types
+
+For a job type with `gpu` set (migration 014) the coordinator sets
+`IDLECLOUD_REQUIRE_CUDA=1`. Before the command starts, the runner then runs a
+short PyTorch check on a CUDA device and logs the device's name and memory. If
+PyTorch sees no CUDA device, the command is not started: the log says why and
+the copy reports exit code 69, so the task fails with that log instead of a
+script quietly training on the CPU. The image must have PyTorch.
 
 ## Checkpoints: carrying on after the PC's owner returns
 

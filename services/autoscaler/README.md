@@ -115,6 +115,9 @@ How many workers run, and which size, follows the workload. Nothing is fixed.
 can take it right now. One such pod waits 2 minutes, in case a campus PC frees
 up. A bigger backlog will not be absorbed by campus PCs, so the wait shrinks
 with it (120 s divided by the number of stuck pods, at least 30 s).
+Copies of GPU job types (pod label `idlecloud/gpu-job=true`) are left out:
+burst workers have no GPU, so a GPU copy waits for a campus GPU PC and never
+starts a launch or holds back a drain.
 
 **How many, and which size.** The stuck pods are packed onto machines with
 first-fit decreasing bin packing, using each pod's CPU and memory requests.

@@ -74,3 +74,62 @@ Open http://localhost:8000 (seeded logins: `user@example.com` / `password123`,
   (or `get pods -n idlecloud-jobs`).
 - `docker compose down` stops everything; `down -v` also deletes the database,
   MinIO data and the k3s state.
+
+## GPU workers
+
+A worker with an NVIDIA GPU takes GPU job types (`pytorch-gpu`, migration 014)
+as well as ordinary ones. Before running `join-worker.sh` on it:
+
+1. Install an NVIDIA driver that supports CUDA 13 (580 or later) and check that
+   `nvidia-smi` lists the GPU. On EC2, an AWS Deep Learning Base GPU AMI
+   (Ubuntu) comes with one.
+2. Install the NVIDIA container toolkit (`nvidia-container-toolkit`). It must
+   be there before the K3s agent starts, or K3s won't register the `nvidia`
+   runtime. If the agent is already running, restart it with
+   `sudo systemctl restart k3s-agent`.
+
+`join-worker.sh` then labels the node `idlecloud/gpu=nvidia` and
+`idlecloud/gpu-vram-gib=<GiB>`, and pulls the GPU worker image (several GB)
+so the first job doesn't wait for it. Without the toolkit it joins without the
+labels and says so. K3s already ships the `nvidia` RuntimeClass the
+coordinator uses; check with `kubectl get runtimeclass nvidia`.
+
+The coordinator runs at most one GPU copy per node, so a node counts as one
+GPU slot however many GPUs it has (`GET /capacity?gpu=true`). A GPU copy with
+no free GPU node waits in Pending; it doesn't fail. A copy that lands where
+PyTorch sees no CUDA device ends at once with exit code 69 and a log line
+saying so (`worker/runner/README.md`).
+
+An EC2 GPU instance standing in for a lab PC joins like a laptop
+(`add-peer.sh` with an address below .200), not in a burst slot: the
+autoscaler ends empty burst workers, and an address below .200 gives it the
+owner-active taint, so it only takes work while its node agent says idle.
+
+## Task Pod network rules
+
+`k8s/base/jobs-networkpolicy.yml` lets task Pods reach only cluster DNS, the
+coordinator's API and the public internet (S3 and anything a user's script
+downloads). It blocks the API server, Postgres, the WireGuard network, private
+LAN addresses and the EC2 metadata address, and lets nothing connect in. It is
+part of the AWS deployment only; the local stack leaves it out.
+
+Policies only add allowed traffic, so test it on the real cluster after a
+deploy. The first two checks must print a status code; every other one must
+print "blocked" (curl exit code 28 is a timeout, anything else means the
+connection got through):
+
+```sh
+kubectl -n idlecloud-jobs run netcheck --rm -it --restart=Never \
+  --image=curlimages/curl:8.11.1 \
+  --overrides='{"spec":{"nodeSelector":{"idlecloud/role":"worker"},"tolerations":[{"operator":"Exists"}]}}' \
+  -- sh -c '
+  curl -sS -m 5 -o /dev/null -w "coordinator %{http_code}\n" http://coordinator.idlecloud-system.svc.cluster.local:8001/healthz
+  curl -sS -m 5 -o /dev/null -w "s3 %{http_code}\n" https://s3.amazonaws.com
+  check() { curl -s -k -m 5 -o /dev/null "$2"; [ $? -eq 28 ] && echo "$1 blocked" || echo "$1 REACHABLE"; }
+  check "API server" https://kubernetes.default.svc
+  check "metadata" http://169.254.169.254/latest/meta-data/
+  check "hub" https://10.10.0.1:6443
+  check "Postgres" http://postgres.idlecloud-system.svc.cluster.local:5432'
+```
+
+Any line printing REACHABLE means the policy isn't enforced on that worker.
