@@ -66,10 +66,25 @@
     return r.status;
   }
 
+  // "just now", "4 min ago", "2 h ago"
+  function ago(iso) {
+    const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 60) return "just now";
+    if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+    return `${Math.floor(s / 3600)} h ago`;
+  }
+
   function copyItem(r) {
     const item = el("li", "flex flex-wrap items-center gap-1.5");
     item.append(el("span", "font-medium", r.node || "–"), " · ", badge(copyState(r)));
     if (r.status === "RUNNING" && r.node) item.append(` ${r.progress}%`);
+    if (r.saved_at && (r.status === "RUNNING" || r.status === "SCHEDULED")) {
+      // a moved copy carries on from here; older work is redone
+      const step = r.saved_step != null ? `, step ${r.saved_step}` : "";
+      const saved = el("span", "text-xs text-muted-foreground", `saved ${ago(r.saved_at)}${step}`);
+      saved.title = new Date(r.saved_at).toLocaleString();
+      item.append(saved);
+    }
     if (r.restarts > 0) {
       // counts every relaunch: an eviction, a lost pod or a failed launch
       const n = r.restarts;

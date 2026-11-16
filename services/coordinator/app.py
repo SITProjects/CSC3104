@@ -52,6 +52,8 @@ from services.coordinator.crud import (
     list_nodes,
     list_users,
     mark_replica_done,
+    record_checkpoint,
+    requeue_without_gpu,
     set_voting,
     update_node_state,
 )
@@ -68,6 +70,7 @@ from services.coordinator.models import (
     AddTasksIn,
     AddTasksResponse,
     CapacityOut,
+    CheckpointIn,
     CreateJobResponse,
     Credentials,
     HeartbeatIn,
@@ -108,6 +111,19 @@ AuthAPI = Annotated[
     client.AuthenticationV1Api, Depends(lambda: client.AuthenticationV1Api())
 ]
 CoreAPI = Annotated[client.CoreV1Api, Depends(lambda: client.CoreV1Api())]
+# worker/runner exits with this when a GPU job finds no usable GPU on its node
+EXIT_NO_GPU = 69
+
+
+def checkpoint_detail(replica: Replica) -> dict:
+    """The replica's last reported checkpoint, for an event's detail."""
+    if replica.checkpoint_at is None:
+        return {}
+    return {
+        "checkpoint_attempt": replica.checkpoint_attempt,
+        "checkpoint_step": replica.checkpoint_step,
+        "checkpoint_at": replica.checkpoint_at.isoformat(),
+    }
 
 
 @asynccontextmanager
@@ -261,6 +277,7 @@ async def get_replica_manifest(
     """
     replica, task, job_type = await require_token(session, id, authorization)
     prefix = f"jobs/{task.job_id}/replicas/{replica.id}"
+    attempt_prefix = f"{prefix}/attempts/{replica.attempt}"
     ttl = min(job_type.timeout_seconds + 300, 7 * 24 * 3600)
     return Manifest(
         replica_id=replica.id,
@@ -271,20 +288,37 @@ async def get_replica_manifest(
             f: presign("get_object", f"jobs/{task.job_id}/{f}", ttl)
             for f in task.input.get("files", [])
         },
-        output_upload_url=presign("put_object", f"{prefix}/result.json", ttl),
-        output_archive_url=presign("put_object", f"{prefix}/output.tar.gz", ttl),
+        output_upload_url=presign("put_object", f"{attempt_prefix}/result.json", ttl),
+        output_archive_url=presign(
+            "put_object", f"{attempt_prefix}/output.tar.gz", ttl
+        ),
         checkpoint_get_url=presign("get_object", f"{prefix}/checkpoint.json", ttl)
         if replica.attempt > 1
         else None,
         checkpoint_put_url=presign("put_object", f"{prefix}/checkpoint.json", ttl),
         checkpoint_archive_get_urls=[
             presign("get_object", f"{prefix}/attempts/{attempt}/checkpoint.tar.gz", ttl)
-            for attempt in range(replica.attempt - 1, 0, -1)
+            for attempt in restore_order(replica)
         ],
         checkpoint_archive_put_url=presign(
-            "put_object", f"{prefix}/attempts/{replica.attempt}/checkpoint.tar.gz", ttl
+            "put_object", f"{attempt_prefix}/checkpoint.tar.gz", ttl
         ),
+        checkpoint_max_bytes=job_type.checkpoint_max_mib * 1024 * 1024,
     )
+
+
+def restore_order(replica: Replica) -> list[int]:
+    """
+    Earlier attempts whose checkpoint archive a new attempt should try: the one
+    last reported to /checkpoint first, as it is the newest progress known,
+    then the rest newest first, in case that one is unreadable.
+    """
+    earlier = list(range(replica.attempt - 1, 0, -1))
+    last = replica.checkpoint_attempt
+    if last in earlier:
+        earlier.remove(last)
+        earlier.insert(0, last)
+    return earlier
 
 
 @app.post("/internal/replicas/{id}/progress")
@@ -314,6 +348,41 @@ async def report_progress(
     return Ack()
 
 
+@app.post("/internal/replicas/{id}/checkpoint")
+async def report_checkpoint(
+    id: int,
+    body: CheckpointIn,
+    session: DbSession,
+    authorization: str | None = Header(None),
+) -> Ack:
+    """
+    Records a checkpoint archive the runner has just published.
+
+    args:
+        id: The id of the replica that saved it.
+        body: Which attempt's key holds it, its SHA-256, size and training step.
+        session: The database session for this request.
+        authorization: The value of the Authorization header, "Bearer <REPLICA_TOKEN>".
+    returns:
+        Ack: An acknowledgment of the report.
+    raises:
+        HTTPException: 409 if the replica isn't RUNNING that attempt.
+    """
+    async with session.begin():
+        replica, _, _ = await require_token(session, id, authorization, True)
+        if replica.status != ReplicaStatus.RUNNING or body.attempt != replica.attempt:
+            raise HTTPException(
+                409,
+                f"replica {id} is {replica.status.value} at attempt "
+                f"{replica.attempt}, cannot record a checkpoint for attempt "
+                f"{body.attempt}",
+            )
+        await record_checkpoint(
+            session, replica, body.attempt, body.sha256, body.bytes, body.step
+        )
+    return Ack()
+
+
 @app.post("/internal/replicas/{id}/result")
 async def report_result(
     id: int,
@@ -333,11 +402,32 @@ async def report_result(
         Ack: An acknowledgment of the result report.
     """
     async with session.begin():
-        replica, task, _ = await require_token(session, id, authorization, True)
+        replica, task, job_type = await require_token(session, id, authorization, True)
         if replica.status != ReplicaStatus.RUNNING:
             raise HTTPException(
                 409,
                 f"replica {id} status is {replica.status.value}, cannot report result",
+            )
+        node_name, attempt = replica.node_name, replica.attempt
+        # The node, not the program, is at fault: run the copy elsewhere
+        if (
+            job_type.gpu
+            and body.exit_code == EXIT_NO_GPU
+            and await requeue_without_gpu(session, replica)
+        ):
+            await create_event(
+                session,
+                "replica_no_gpu",
+                task.job_id,
+                task.id,
+                node_name,
+                {
+                    "replica_id": replica.id,
+                    "attempt": attempt,
+                    "node_name": node_name,
+                    "failures": replica.failures,
+                    "message": "NoUsableGpu",
+                },
             )
         else:
             await mark_replica_done(
@@ -384,6 +474,7 @@ async def report_evicted(
                 "attempt": replica.attempt,
                 "node_name": node_name,
                 "message": "replica was evicted from its node",
+                **checkpoint_detail(replica),
             },
         )
         await set_voting(session, task)

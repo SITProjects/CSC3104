@@ -1176,12 +1176,13 @@ async def job_result(
         if text is None:
             if job["status"] != "COMPLETED":
                 raise HTTPException(409, "The job hasn't completed yet.")
+            attempts = jobtools.replica_attempts(job)
             text = (
                 await asyncio.to_thread(
                     jobtools.assemble_text,
                     job,
-                    lambda rid: storage.get_bytes(
-                        storage.replica_result_key(job_id, rid)
+                    lambda rid: storage.get_first(
+                        storage.replica_result_keys(job_id, rid, attempts[rid])
                     ),
                 )
             ).encode()
@@ -1221,7 +1222,10 @@ async def job_output(
         replica_id = jobtools.output_replica(job)
         data = (
             await asyncio.to_thread(
-                storage.get_bytes, storage.output_archive_key(job_id, replica_id)
+                storage.get_first,
+                storage.output_archive_keys(
+                    job_id, replica_id, jobtools.replica_attempts(job)[replica_id]
+                ),
             )
             if replica_id is not None
             else None

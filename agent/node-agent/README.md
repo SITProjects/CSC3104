@@ -106,6 +106,16 @@ A failed change is retried every 2 seconds, and the taint is re-checked every
 60 seconds. Other taints on the node, such as the verifier's quarantine, are
 kept.
 
+If the taint isn't confirmed within 5 seconds of the owner coming back
+(`NODE_AGENT_LOCAL_STOP_AFTER_S`), most likely because the WireGuard link or
+the hub is down, the agent stops the task containers itself with
+`k3s crictl stop --timeout 30` (`localstop.py`). Each gets SIGTERM, so the
+runner saves its checkpoint and exits with 143, and the coordinator counts the
+copy as evicted once it sees the Pod again. The event log gets a `local_stop`
+line. `NODE_AGENT_LOCAL_STOP=0` turns this off; `NODE_AGENT_CRICTL` changes the
+command. The service unit allows writing under `/run/k3s` for the containerd
+socket.
+
 The agent needs its own Kubernetes identity. The K3s join token is not enough,
 and K3s does not let a node change its own taints. Workers added from the admin
 pages get it in their setup zip (made by the enrollment helper, `infra/enroll`).

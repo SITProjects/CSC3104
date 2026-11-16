@@ -22,6 +22,9 @@ TimeoutStopSec=15
 LogsDirectory=idlecloud
 NoNewPrivileges=yes
 ProtectSystem=strict
+# K3s's containerd socket, for stopping task containers when the hub can't be
+# reached (localstop.py)
+ReadWritePaths=-/run/k3s
 ProtectHome=yes
 PrivateTmp=yes
 

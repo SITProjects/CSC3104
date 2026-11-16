@@ -51,11 +51,13 @@ shows the pattern: save after each step, and load the saved state at start.
   within a 25 s shutdown budget, reserving up to 5 s for one eviction report.
   An upload still in progress cannot hold up the report. The Pod has 30 s in
   all, so the last save and report remain best effort.
-- The coordinator runs the copy again on another PC, up to the usual attempt
-  limit (3). Each attempt uploads to its own
+- The coordinator runs the copy again on another PC. Evictions don't use up
+  its 3 retries (see "Long jobs" in `services/coordinator/README.md`). Each
+  attempt uploads to its own
   `jobs/{job}/replicas/{replica}/attempts/{attempt}/checkpoint.tar.gz` key, so a
   lost copy's late upload cannot replace a newer copy's progress. The manifest
-  lists earlier attempts newest first; the runner tries them in that order,
+  lists the last reported archive first, then the other earlier attempts
+  newest first; the runner tries them in that order,
   skipping missing or unusable archives. If none is usable, it starts fresh
   and the log says so.
 - A program without checkpoints just starts again from the beginning.
@@ -65,8 +67,22 @@ A program that changes the folder all the time may never give a stable snapshot,
 The runner checks file metadata before and after packing and discards a
 changed snapshot instead of publishing potentially torn state. A failed scan
 or upload is logged and tried again later; the last good upload stays in S3.
-The folder is limited to
-100 MB. Unpacking refuses paths outside the folder and links that leave it.
+The folder is limited to the job type's `checkpoint_max_mib` (100 MB, or
+500 MB for `pytorch-gpu`), sent as `checkpoint_max_bytes` in the manifest.
+
+After each upload the runner reports it to `POST /internal/replicas/{id}/checkpoint`
+with its SHA-256 and size, and with the training step if the program wrote
+`{"step": N}` to `$CHECKPOINT_DIR/idlecloud.json` (the GPU image's
+`idlecloud_ckpt` helper does). A failed report is only logged: S3 has the
+archive anyway.
+
+Presigned URLs can stop working during a long job, when the hub's AWS
+credentials rotate. An upload refused with 403 fetches the manifest again and
+is retried once with the new URL.
+
+A Pod stopped on its own node because the hub couldn't be reached (the node
+agent's local stop) exits 143 like an eviction, and the coordinator counts it
+as one when it sees the Pod. Unpacking refuses paths outside the folder and links that leave it.
 
 Deploy the updated coordinator and worker image together: the coordinator
 provides `checkpoint_archive_get_urls` and the attempt-specific upload URL.

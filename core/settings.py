@@ -13,7 +13,12 @@ JOB_NAMESPACE = "idlecloud-jobs"
 S3_PUBLIC_ENDPOINT_URL = os.environ.get("S3_PUBLIC_ENDPOINT_URL") or None
 S3_BUCKET = os.environ.get("S3_BUCKET", "csc3104-local")
 S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "http://localhost:9000")
+# A copy fails after this many failures that weren't owner evictions (a lost
+# node, a launch error, a node without a working GPU). Evictions don't count.
 RETRY_ATTEMPTS = 3
+# Backstop for job types with no max_age_hours: a copy evicted this many times
+# fails anyway, so it can't be rerun for ever
+MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "50"))
 HOUSEKEEPING_INTERVAL = 60  # seconds
 FILE_RETENTION_HOURS = int(os.environ.get("FILE_RETENTION_HOURS", "24"))
 PLACEMENT_TIMEOUT = int(os.environ.get("PLACEMENT_TIMEOUT_S", "300"))  # seconds

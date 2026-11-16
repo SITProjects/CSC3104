@@ -44,6 +44,15 @@ TAINT_RETRY_S = _float("NODE_AGENT_TAINT_RETRY_S", 2)
 # Re-check the taint this often even with no state change, in case someone
 # removed or added it by hand
 TAINT_RESYNC_S = _float("NODE_AGENT_TAINT_RESYNC_S", 60)
+# If the taint isn't confirmed this long after the owner comes back (the hub
+# can't be reached), stop the task containers here (localstop.py).
+# NODE_AGENT_LOCAL_STOP=0 turns that off.
+LOCAL_STOP_ENABLED = os.environ.get("NODE_AGENT_LOCAL_STOP", "1") != "0"
+LOCAL_STOP_AFTER_S = _float("NODE_AGENT_LOCAL_STOP_AFTER_S", 5)
+# Seconds between SIGTERM and SIGKILL, the same as the task Pods' grace period
+LOCAL_STOP_GRACE_S = int(os.environ.get("NODE_AGENT_LOCAL_STOP_GRACE_S", "30"))
+# How to reach K3s's container runtime
+CRICTL = os.environ.get("NODE_AGENT_CRICTL", "k3s crictl")
 
 # ---------- coordinator heartbeats ----------
 
