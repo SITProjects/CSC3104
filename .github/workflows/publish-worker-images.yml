@@ -16,6 +16,7 @@ on:
       - worker/pytorch-gpu-job/Dockerfile
       - worker/pytorch-gpu-job/requirements.txt
       - worker/pytorch-gpu-job/idlecloud_ckpt.py
+      - worker/pytorch-rocm-job/Dockerfile
       - worker/model-check/Dockerfile
       - worker/model-check/requirements.txt
       - worker/model-check/evaluate.py
@@ -37,6 +38,7 @@ on:
       - worker/pytorch-gpu-job/Dockerfile
       - worker/pytorch-gpu-job/requirements.txt
       - worker/pytorch-gpu-job/idlecloud_ckpt.py
+      - worker/pytorch-rocm-job/Dockerfile
       - worker/model-check/Dockerfile
       - worker/model-check/requirements.txt
       - worker/model-check/evaluate.py
@@ -57,7 +59,7 @@ jobs:
   build-check:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.large && 90 || 20 }}
     strategy:
       fail-fast: false
       matrix:
@@ -70,6 +72,10 @@ jobs:
             dockerfile: worker/pytorch-job/Dockerfile
           - name: pytorch-gpu
             dockerfile: worker/pytorch-gpu-job/Dockerfile
+          # several GB: more disk and time, and no full pull to check access
+          - name: pytorch-rocm
+            dockerfile: worker/pytorch-rocm-job/Dockerfile
+            large: true
           - name: model-check
             dockerfile: worker/model-check/Dockerfile
     steps:
@@ -77,6 +83,16 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - name: Free disk space for a large image
+        if: matrix.large
+        shell: bash
+        run: |
+          # the runner's preinstalled SDKs take ~30 GB the ROCm image needs
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force >/dev/null
+          df -h /
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -93,7 +109,7 @@ jobs:
     # Manual runs from other branches must not replace the production image.
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.large && 90 || 20 }}
     strategy:
       fail-fast: false
       matrix:
@@ -106,6 +122,10 @@ jobs:
             dockerfile: worker/pytorch-job/Dockerfile
           - name: pytorch-gpu
             dockerfile: worker/pytorch-gpu-job/Dockerfile
+          # several GB: more disk and time, and no full pull to check access
+          - name: pytorch-rocm
+            dockerfile: worker/pytorch-rocm-job/Dockerfile
+            large: true
           - name: model-check
             dockerfile: worker/model-check/Dockerfile
     permissions:
@@ -124,6 +144,16 @@ jobs:
           NAME: ${{ matrix.name }}
         shell: bash
         run: echo "name=ghcr.io/${OWNER,,}/idlecloud-${NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Free disk space for a large image
+        if: matrix.large
+        shell: bash
+        run: |
+          # the runner's preinstalled SDKs take ~30 GB the ROCm image needs
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force >/dev/null
+          df -h /
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -181,6 +211,7 @@ jobs:
           IMAGE: ${{ steps.image.outputs.name }}
           DIGEST: ${{ steps.publish.outputs.digest }}
           NAME: ${{ matrix.name }}
+          LARGE: ${{ matrix.large && 'true' || 'false' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -189,7 +220,14 @@ jobs:
           anonymous_config=$(mktemp -d)
           trap 'rm -rf -- "$anonymous_config"' EXIT
           image_ref="$IMAGE@$DIGEST"
-          if ! docker --config "$anonymous_config" pull --platform linux/amd64 "$image_ref"; then
+          # a large image is only resolved: the same anonymous access, without
+          # downloading several GB again
+          if [[ "$LARGE" == true ]]; then
+            check=(docker --config "$anonymous_config" manifest inspect "$image_ref")
+          else
+            check=(docker --config "$anonymous_config" pull --platform linux/amd64 "$image_ref")
+          fi
+          if ! "${check[@]}" >/dev/null; then
             echo "::error::The $NAME image was published but anonymous pull failed. New GHCR packages are private by default. Open the idlecloud-$NAME package settings, change visibility to Public, and rerun this workflow from main. Also check the pull error above for network or registry failures."
             {
               echo
@@ -201,7 +239,9 @@ jobs:
           fi
           {
             echo
-            if [[ "$NAME" == ocr ]]; then
+            if [[ "$NAME" == pytorch-rocm ]]; then
+              echo 'Anonymous access passed. AMD GPU workers pull this image in place of idlecloud-pytorch-gpu with the same tag:'
+            elif [[ "$NAME" == ocr ]]; then
               echo 'Anonymous pull passed. On the hub, run `bash services/autoscaler/deploy.sh --no-build` to switch OCR to this image:'
             else
               echo "Anonymous pull passed. The $NAME job type uses the :main tag, so new workers pull this image:"

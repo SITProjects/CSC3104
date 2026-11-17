@@ -22,17 +22,22 @@ It is several GB, so pull it on a GPU worker when it joins
 - An NVIDIA GPU of compute capability 7.5 or later (T4, any RTX card) and a
   driver new enough for CUDA 13 (580 or later). The image brings the CUDA
   libraries; the driver comes from the worker.
-- The NVIDIA container toolkit, installed before the K3s agent starts, so K3s
-  registers the `nvidia` runtime. K3s already ships the `nvidia` RuntimeClass.
-- The node label `idlecloud/gpu=nvidia` (and `idlecloud/gpu-vram-gib`), which
-  `infra/join-worker.sh` sets when `nvidia-smi` works.
+- The NVIDIA container toolkit, installed before `infra/join-worker.sh` runs.
+  The script points the node's `idlecloud-gpu` runtime handler at
+  `nvidia-container-runtime` and labels the node `idlecloud/gpu=nvidia` (and
+  `idlecloud/gpu-vram-gib`).
 
-The coordinator gives GPU copies the `nvidia` runtime class and
-`NVIDIA_VISIBLE_DEVICES=all`, keeps them on labelled nodes, and runs at most
-one GPU copy per node. Before the user's command starts, the runner checks that
-PyTorch can use a CUDA device and logs which one. If it can't, the command is
-not started and the copy ends with exit code 69, so a broken GPU setup shows up
-at once instead of as training that quietly runs on the CPU.
+AMD GPU workers run the same jobs from the ROCm build of this image,
+`worker/pytorch-rocm-job`: their K3s pulls it in place of this one with the
+same tag. A job never says which it gets.
+
+The coordinator gives GPU copies the `idlecloud-gpu` runtime class and
+`NVIDIA_VISIBLE_DEVICES=all` (and `AMD_VISIBLE_DEVICES=all`), keeps them on
+labelled nodes, and runs at most one GPU copy per node. Before the user's
+command starts, the runner checks that PyTorch can use a GPU and logs which
+one. If it can't, the command is not started and the copy ends with exit code
+69, so a broken GPU setup shows up at once instead of as training that quietly
+runs on the CPU.
 
 ## Writing a script for it
 

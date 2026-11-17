@@ -115,41 +115,202 @@ if (( OCTET < 200 )); then
     AGENT_ARGS+=(--node-taint idlecloud/owner-active=true:NoExecute)
 fi
 
-# NVIDIA GPU workers take GPU job types (job_types.gpu): the coordinator keeps
-# those copies on nodes labelled idlecloud/gpu=nvidia. The NVIDIA container
-# toolkit must be installed before the agent starts, or K3s doesn't register
-# the nvidia runtime and every GPU copy would fail its CUDA check.
+# ---------- GPU workers ----------
+# GPU job types (job_types.gpu) run only on nodes labelled idlecloud/gpu=<vendor>,
+# in the idlecloud-gpu runtime class (infra/k8s/base/gpu-runtimeclass.yml).
+# This PC defines that runtime handler in K3s's containerd config, pointing at
+# its vendor's container runtime, so the vendor's container toolkit must be
+# installed before the agent starts. Only discrete GPUs count: integrated
+# graphics (AMD APUs such as the Radeon 780M) leave the PC a CPU worker.
+#
+#   IDLECLOUD_GPU_VENDOR=nvidia|amd|none   pick a vendor when both are found,
+#                                           or join without GPU jobs
+#   IDLECLOUD_ALLOW_INTEGRATED_GPU=1        accept an AMD APU (testing only)
 GPU_IMAGE="ghcr.io/sitprojects/idlecloud-pytorch-gpu:main" # migration 014
-GPU=0
-if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
-    if command -v nvidia-container-runtime >/dev/null 2>&1; then
-        # the smallest GPU's memory, in whole GiB
-        VRAM_MIB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits |
-            tr -d ' ' | sort -n | head -1)"
-        [[ "$VRAM_MIB" =~ ^[0-9]+$ ]] || die "Couldn't read the GPU's memory from nvidia-smi."
-        AGENT_ARGS+=(
-            --node-label idlecloud/gpu=nvidia
-            --node-label "idlecloud/gpu-vram-gib=$(( VRAM_MIB / 1024 ))"
-        )
-        GPU=1
-        echo "NVIDIA GPU found ($(( VRAM_MIB / 1024 )) GiB): joining as a GPU worker."
-    else
-        echo "Warning: nvidia-smi works but the NVIDIA container toolkit is missing," >&2
-        echo "so this PC joins without GPU jobs. Install nvidia-container-toolkit" >&2
-        echo "and run this script again to take them." >&2
+GPU_RUNTIME_HANDLER="idlecloud-gpu"
+CONTAINERD_TEMPLATE=/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl
+REGISTRIES=/etc/rancher/k3s/registries.yaml
+AMD_UDEV_RULES=/etc/udev/rules.d/70-idlecloud-amd-gpu.rules
+WRITTEN_BY="# Written by infra/join-worker.sh for idlecloud. Running it again replaces this file."
+WANT_VENDOR="${IDLECLOUD_GPU_VENDOR:-auto}"
+[[ "$WANT_VENDOR" =~ ^(auto|nvidia|amd|none)$ ]] ||
+    die "IDLECLOUD_GPU_VENDOR must be auto, nvidia, amd or none."
+
+# KFD gfx_target_version of AMD APUs (integrated graphics): gfx801, gfx810,
+# gfx902, gfx909, gfx90c, gfx1033, gfx1035, gfx1036, gfx1037, gfx1103,
+# gfx1150-gfx1153. Datacenter APUs (MI300A) are not expected on campus PCs.
+AMD_APU_TARGETS=" 80001 81000 90002 90009 90012 100303 100305 100306 100307 110003 110500 110501 110502 110503 "
+
+# Our own files only: a file someone else wrote is left alone.
+ours() {
+    [[ -f "$1" ]] && grep -qxF "$WRITTEN_BY" "$1"
+}
+
+refuse_foreign() {
+    if [[ -e "$1" ]] && ! ours "$1"; then
+        die "$1 exists and wasn't written by this script. Add the idlecloud GPU settings to it by hand, or move it away and run this script again."
     fi
+}
+
+kfd_value() { # <properties file> <key>
+    awk -v key="$2" '$1 == key { print $2 }' "$1"
+}
+
+# NVIDIA: sets NVIDIA_VRAM_GIB (the smallest GPU's memory) if nvidia-smi lists one
+find_nvidia() {
+    command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1 || return 1
+    local mib
+    mib="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits |
+        tr -d ' ' | sort -n | head -1)"
+    [[ "$mib" =~ ^[0-9]+$ ]] || die "Couldn't read the GPU's memory from nvidia-smi."
+    NVIDIA_VRAM_GIB=$(( mib / 1024 ))
+}
+
+# AMD: sets AMD_VRAM_GIB (the smallest discrete GPU's memory) if the amdgpu
+# driver's KFD lists a discrete GPU. Integrated ones are skipped with a note.
+find_amd() {
+    local props simds target cpus minor device bytes gib found=0
+    AMD_VRAM_GIB=0
+    [[ -e /dev/kfd ]] || return 1
+    for props in /sys/class/kfd/kfd/topology/nodes/*/properties; do
+        [[ -r "$props" ]] || continue
+        simds="$(kfd_value "$props" simd_count)"
+        (( ${simds:-0} > 0 )) || continue # a CPU node
+        target="$(kfd_value "$props" gfx_target_version)"
+        cpus="$(kfd_value "$props" cpu_cores_count)"
+        minor="$(kfd_value "$props" drm_render_minor)"
+        device="/sys/class/drm/renderD$minor/device"
+        bytes="$(cat "$device/mem_info_vram_total" 2>/dev/null || echo 0)"
+        if (( ${cpus:-0} > 0 )) || [[ "$AMD_APU_TARGETS" == *" $target "* ]]; then
+            if [[ "${IDLECLOUD_ALLOW_INTEGRATED_GPU:-0}" != 1 ]]; then
+                echo "Integrated AMD GPU on renderD$minor (gfx target $target): not a GPU worker for it."
+                continue
+            fi
+            # an APU's own VRAM is a small carve-out; it computes in shared memory
+            local gtt
+            gtt="$(cat "$device/mem_info_gtt_total" 2>/dev/null || echo 0)"
+            (( gtt > bytes )) && bytes=$gtt
+            echo "Integrated AMD GPU on renderD$minor accepted (IDLECLOUD_ALLOW_INTEGRATED_GPU=1)."
+        fi
+        gib=$(( bytes / 1024 / 1024 / 1024 ))
+        if (( ! found || gib < AMD_VRAM_GIB )); then
+            AMD_VRAM_GIB=$gib
+        fi
+        found=1
+    done
+    (( found ))
+}
+
+GPU_VENDOR=""
+GPU_RUNTIME=""
+GPU_VRAM_GIB=0
+if [[ "$WANT_VENDOR" == auto || "$WANT_VENDOR" == nvidia ]] && find_nvidia; then
+    if GPU_RUNTIME="$(command -v nvidia-container-runtime)"; then
+        GPU_VENDOR=nvidia
+        GPU_VRAM_GIB=$NVIDIA_VRAM_GIB
+    else
+        echo "Warning: nvidia-smi works but the NVIDIA container toolkit is missing." >&2
+        echo "Install nvidia-container-toolkit and run this script again to take GPU jobs." >&2
+    fi
+fi
+if [[ -z "$GPU_VENDOR" ]] && [[ "$WANT_VENDOR" == auto || "$WANT_VENDOR" == amd ]] && find_amd; then
+    if GPU_RUNTIME="$(command -v amd-container-runtime)"; then
+        GPU_VENDOR=amd
+        GPU_VRAM_GIB=$AMD_VRAM_GIB
+    else
+        echo "Warning: this PC has a discrete AMD GPU but the AMD container toolkit is missing." >&2
+        echo "Install amd-container-toolkit and run this script again to take GPU jobs." >&2
+    fi
+fi
+if [[ "$WANT_VENDOR" =~ ^(nvidia|amd)$ && "$GPU_VENDOR" != "$WANT_VENDOR" ]]; then
+    die "IDLECLOUD_GPU_VENDOR=$WANT_VENDOR, but no usable $WANT_VENDOR GPU was found."
+fi
+
+if [[ -n "$GPU_VENDOR" ]]; then
+    refuse_foreign "$CONTAINERD_TEMPLATE"
+    [[ "$GPU_VENDOR" == amd ]] && refuse_foreign "$REGISTRIES"
+
+    AGENT_ARGS+=(
+        --node-label "idlecloud/gpu=$GPU_VENDOR"
+        --node-label "idlecloud/gpu-vram-gib=$GPU_VRAM_GIB"
+    )
+
+    # The idlecloud-gpu handler: runc through the vendor's runtime, which adds
+    # the GPU devices and driver files to the container. K3s fills in the rest
+    # of its own config ("base"); its version 3 template is the one K3s reads
+    # first (pkg/agent/containerd/config.go in K3s v1.34).
+    install -d -m 755 "$(dirname "$CONTAINERD_TEMPLATE")"
+    cat > "$CONTAINERD_TEMPLATE" <<EOF
+$WRITTEN_BY
+{{ template "base" . }}
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.'$GPU_RUNTIME_HANDLER']
+  runtime_type = "io.containerd.runc.v2"
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.'$GPU_RUNTIME_HANDLER'.options]
+  BinaryName = "$GPU_RUNTIME"
+  SystemdCgroup = {{ .SystemdCgroup }}
+EOF
+    chmod 644 "$CONTAINERD_TEMPLATE"
+else
+    # a PC joining again without its GPU stops advertising one
+    ours "$CONTAINERD_TEMPLATE" && rm -f -- "$CONTAINERD_TEMPLATE"
+fi
+
+if [[ "$GPU_VENDOR" == amd ]]; then
+    # The coordinator names idlecloud-pytorch-gpu for every GPU copy. On this
+    # node K3s pulls the ROCm build, idlecloud-pytorch-rocm, with the same tag
+    # instead (the rewrite matches the repository, never the tag). K3s applies
+    # rewrites only to a mirror endpoint that differs from the registry's own
+    # default endpoint, hence ghcr.io:443, which is the same registry. With
+    # --disable-default-registry-endpoint a failed ROCm pull fails instead of
+    # quietly falling back to the CUDA image.
+    install -d -m 700 "$(dirname "$REGISTRIES")"
+    cat > "$REGISTRIES" <<EOF
+$WRITTEN_BY
+mirrors:
+  ghcr.io:
+    endpoint:
+      - "https://ghcr.io:443"
+    rewrite:
+      "^sitprojects/idlecloud-pytorch-gpu\$": "sitprojects/idlecloud-pytorch-rocm"
+EOF
+    chmod 600 "$REGISTRIES"
+    AGENT_ARGS+=(--disable-default-registry-endpoint)
+
+    # Task Pods run as uid 65534, and the runtime passes /dev/kfd and the
+    # render node in with their host owner and mode (root:render 0660 on
+    # Ubuntu). Let any user open them, as render nodes are meant to be.
+    cat > "$AMD_UDEV_RULES" <<EOF
+$WRITTEN_BY
+# idlecloud GPU task Pods (uid 65534) reach the AMD GPU through these.
+SUBSYSTEM=="kfd", KERNEL=="kfd", MODE="0666"
+SUBSYSTEM=="drm", KERNEL=="renderD*", DRIVERS=="amdgpu", MODE="0666"
+EOF
+    chmod 644 "$AMD_UDEV_RULES"
+    udevadm control --reload-rules
+    udevadm trigger --action=change --subsystem-match=kfd --subsystem-match=drm
+    udevadm settle || true
+else
+    ours "$REGISTRIES" && rm -f -- "$REGISTRIES"
+    ours "$AMD_UDEV_RULES" && rm -f -- "$AMD_UDEV_RULES"
+fi
+
+if [[ -n "$GPU_VENDOR" ]]; then
+    echo "$GPU_VENDOR GPU found ($GPU_VRAM_GIB GiB): joining as a GPU worker."
 fi
 
 INSTALL_K3S_VERSION="$VERSION" sh "$INSTALLER" agent "${AGENT_ARGS[@]}"
 
 # Pull the GPU image now: it is several GB, and pulling it at the first job
-# would count against that job's time limit. A failure here is not fatal.
-if (( GPU )); then
+# would count against that job's time limit. crictl pulls the way the kubelet
+# does, so an AMD node gets the ROCm build. A failure here is not fatal.
+if [[ -n "$GPU_VENDOR" ]]; then
     for _ in $(seq 1 30); do
-        k3s ctr version >/dev/null 2>&1 && break
+        k3s crictl info >/dev/null 2>&1 && break
         sleep 2
     done
-    echo "Pulling $GPU_IMAGE (several GB)..."
-    k3s ctr --namespace k8s.io images pull "$GPU_IMAGE" ||
+    echo "Pulling $GPU_IMAGE for $GPU_VENDOR (several GB)..."
+    k3s crictl pull "$GPU_IMAGE" ||
         echo "Warning: couldn't pull $GPU_IMAGE now; the first GPU job will pull it." >&2
 fi

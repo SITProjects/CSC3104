@@ -77,28 +77,75 @@ Open http://localhost:8000 (seeded logins: `user@example.com` / `password123`,
 
 ## GPU workers
 
-A worker with an NVIDIA GPU takes GPU job types (`pytorch-gpu`, migration 014)
-as well as ordinary ones. Before running `join-worker.sh` on it:
+A worker with a discrete NVIDIA or AMD GPU takes GPU job types
+(`pytorch-gpu`, migrations 014 and 015) as well as ordinary ones. Before
+running `join-worker.sh` on it, install the vendor's driver and container
+toolkit:
 
-1. Install an NVIDIA driver that supports CUDA 13 (580 or later) and check that
-   `nvidia-smi` lists the GPU. On EC2, an AWS Deep Learning Base GPU AMI
-   (Ubuntu) comes with one.
-2. Install the NVIDIA container toolkit (`nvidia-container-toolkit`). It must
-   be there before the K3s agent starts, or K3s won't register the `nvidia`
-   runtime. If the agent is already running, restart it with
-   `sudo systemctl restart k3s-agent`.
+- **NVIDIA:**
+  1. Install a driver that supports CUDA 13 (580 or later) and check that
+     `nvidia-smi` lists the GPU. On EC2, an AWS Deep Learning Base GPU AMI
+     (Ubuntu) comes with one.
+  2. Install `nvidia-container-toolkit`.
+- **AMD:**
+  1. Check that the `amdgpu` driver is loaded and `/dev/kfd` exists. Ubuntu's
+     kernel has it, and ROCm itself isn't needed on the PC.
+  2. Install `amd-container-toolkit`, which provides `amd-container-runtime`.
 
-`join-worker.sh` then labels the node `idlecloud/gpu=nvidia` and
-`idlecloud/gpu-vram-gib=<GiB>`, and pulls the GPU worker image (several GB)
-so the first job doesn't wait for it. Without the toolkit it joins without the
-labels and says so. K3s already ships the `nvidia` RuntimeClass the
-coordinator uses; check with `kubectl get runtimeclass nvidia`.
+`join-worker.sh` then:
+
+- finds the GPU. It checks `nvidia-smi` first, then the `amdgpu` driver's
+  KFD topology. Integrated graphics (AMD APUs such as the Radeon 780M) are
+  skipped, so a PC with only an APU joins as a CPU worker, and one with an
+  APU and a discrete NVIDIA card joins as an NVIDIA worker;
+- labels the node `idlecloud/gpu=<nvidia|amd>` and
+  `idlecloud/gpu-vram-gib=<GiB>` (the smallest GPU's memory);
+- writes `/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl`,
+  K3s's own containerd config plus the `idlecloud-gpu` runtime handler, which
+  points at the vendor's runtime. The coordinator runs every GPU copy in that
+  runtime class (`k8s/base/gpu-runtimeclass.yml`);
+- on AMD nodes:
+  - writes `/etc/rancher/k3s/registries.yaml`, which makes K3s pull
+    `idlecloud-pytorch-rocm` wherever a copy names `idlecloud-pytorch-gpu`,
+    with the same tag. K3s applies rewrites only to a mirror endpoint
+    different from the registry's default, so the file lists ghcr.io as
+    `https://ghcr.io:443`;
+  - starts the agent with `--disable-default-registry-endpoint`, so a failed
+    ROCm pull can't fall back to the CUDA image;
+  - adds a udev rule that lets every user open `/dev/kfd` and the AMD render
+    nodes. Task Pods run as uid 65534 and receive these devices with their
+    host owner and mode (`root:render 0660` on Ubuntu);
+- pulls the GPU image (several GB) through the CRI, so the first job doesn't
+  wait for it and an AMD node gets the ROCm build.
+
+Without the toolkit, the script joins without the labels and says so. It
+won't overwrite a containerd template or `registries.yaml` it didn't write.
+Two settings change what it picks:
+
+- `IDLECLOUD_GPU_VENDOR=nvidia|amd|none` picks the vendor on a PC with both,
+  or joins without GPU jobs.
+- `IDLECLOUD_ALLOW_INTEGRATED_GPU=1` accepts an APU, for testing only. Its
+  shared memory then counts as its VRAM.
+
+Pass either through sudo, e.g. `sudo IDLECLOUD_GPU_VENDOR=amd bash
+infra/join-worker.sh ...`. Run the script again after adding, removing or
+changing a GPU, or its toolkit. Workers that joined before this setup only
+have K3s's own `nvidia` handler, so they must run the script again before
+they can start GPU copies.
+
+Checks on a GPU worker:
+
+```sh
+kubectl get nodes -L idlecloud/gpu,idlecloud/gpu-vram-gib  # on the hub
+sudo grep -A3 idlecloud-gpu /var/lib/rancher/k3s/agent/etc/containerd/config.toml
+sudo k3s crictl images | grep idlecloud-pytorch       # AMD: the ROCm build under the -gpu name
+```
 
 The coordinator runs at most one GPU copy per node, so a node counts as one
 GPU slot however many GPUs it has (`GET /capacity?gpu=true`). A GPU copy with
 no free GPU node waits in Pending; it doesn't fail. A copy that lands where
-PyTorch sees no CUDA device ends at once with exit code 69 and a log line
-saying so (`worker/runner/README.md`).
+PyTorch sees no GPU ends at once with exit code 69 and a log line saying so
+(`worker/runner/README.md`).
 
 An EC2 GPU instance standing in for a lab PC joins like a laptop
 (`add-peer.sh` with an address below .200), not in a burst slot: the
