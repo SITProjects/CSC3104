@@ -10,7 +10,8 @@
 #
 # No ROCm base image is needed: the torch wheel brings the ROCm libraries, and
 # the AMD container runtime on the worker passes /dev/kfd and the GPU's render
-# node in. The wheel still loads a few system libraries, installed below.
+# node in (under WSL2: /dev/dxg, see librocdxg below). The wheel still loads a
+# few system libraries, installed below.
 FROM ghcr.io/astral-sh/uv:0.13.5 AS uv
 FROM python:3.12-slim
 
@@ -33,6 +34,19 @@ RUN --mount=from=uv,source=/uv,target=/bin/uv \
     && uv pip install --system --no-cache -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt \
     && python -c "import torch; assert torch.version.hip, torch.__version__; print('torch', torch.__version__, 'HIP', torch.version.hip)"
+
+# librocdxg: ROCm's way to the GPU under WSL2 (Windows workers), through
+# /dev/dxg instead of /dev/kfd. The ROCm runtime loads it by itself when there
+# is no /dev/kfd; on Linux workers it stays unused. Release 1.2.1 pairs with
+# ROCm 7.14 (github.com/ROCm/librocdxg). It needs libdxcore.so from the
+# Windows driver, which the node's WSL runtime mounts in (infra/join-worker.sh).
+ARG ROCDXG_VERSION=1.2.1
+ARG ROCDXG_SHA256=7889eef45a1132ed2dde88d8ea1356bf791ec9c05802a18940bc81b970e850e0
+ADD https://github.com/ROCm/librocdxg/releases/download/v${ROCDXG_VERSION}/rocdxg-roct_${ROCDXG_VERSION}_amd64.deb /tmp/rocdxg.deb
+RUN echo "$ROCDXG_SHA256  /tmp/rocdxg.deb" | sha256sum -c - \
+    && dpkg -i /tmp/rocdxg.deb \
+    && rm /tmp/rocdxg.deb \
+    && test -e /opt/rocm/lib/librocdxg.so.1
 
 COPY worker/runner/runner.py /opt/idlecloud/runner.py
 # The checkpoint helper user scripts import (from idlecloud_ckpt import Checkpointer)

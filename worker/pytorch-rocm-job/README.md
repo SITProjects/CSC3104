@@ -38,6 +38,13 @@ pull it and the workflow's access check fails.
   runtime handler at `amd-container-runtime`. That runtime passes `/dev/kfd`
   and the GPU's render node into the container (`AMD_VISIBLE_DEVICES=all`).
 
+Windows workers reach their AMD GPU under WSL2 through `/dev/dxg` instead of
+`/dev/kfd`. For that, the image carries AMD's `librocdxg` (`rocdxg-roct`
+1.2.1, the release paired with ROCm 7.14, checked by SHA-256). The ROCm
+runtime loads it by itself when there's no `/dev/kfd`. The node's WSL runtime
+mounts in the Windows driver's `libdxcore.so` from `/usr/lib/wsl/lib` (see
+`infra/README.md`). On Linux workers it is never used.
+
 The ROCm wheel loads `libnuma`, `libelf`, `libdrm` and `libdrm_amdgpu` from
 the system, which is why the Dockerfile installs them.
 Phase 0 found this set on a Radeon 780M under Podman.

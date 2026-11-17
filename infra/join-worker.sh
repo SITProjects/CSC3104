@@ -58,7 +58,9 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
     wireguard curl ca-certificates iputils-ping
 
 install -d -m 700 /etc/wireguard
-install -m 600 "$WG_CONFIG" /etc/wireguard/wg0.conf
+# On a rejoin these can be the installed files themselves.
+[[ "$WG_CONFIG" -ef /etc/wireguard/wg0.conf ]] ||
+    install -m 600 "$WG_CONFIG" /etc/wireguard/wg0.conf
 
 systemctl enable wg-quick@wg0
 systemctl restart wg-quick@wg0
@@ -69,7 +71,8 @@ ping -I wg0 -c 3 -W 3 10.10.0.1 >/dev/null ||
 
 # Store the join token for the K3s agent service.
 install -d -m 700 /etc/rancher/k3s
-install -m 600 "$TOKEN_FILE" /etc/rancher/k3s/agent-token
+[[ "$TOKEN_FILE" -ef /etc/rancher/k3s/agent-token ]] ||
+    install -m 600 "$TOKEN_FILE" /etc/rancher/k3s/agent-token
 
 # Make the agent wait for WireGuard during startup.
 install -d -m 755 /etc/systemd/system/k3s-agent.service.d
@@ -126,15 +129,31 @@ fi
 #   IDLECLOUD_GPU_VENDOR=nvidia|amd|none   pick a vendor when both are found,
 #                                           or join without GPU jobs
 #   IDLECLOUD_ALLOW_INTEGRATED_GPU=1        accept an AMD APU (testing only)
+#
+# Under WSL2 (Windows workers, agent/install-worker.ps1) the GPU is the Windows
+# driver's, reached through /dev/dxg and the libraries in /usr/lib/wsl. NVIDIA
+# is found through WSL's nvidia-smi. WSL can't see which AMD GPU Windows has,
+# so install-worker.ps1 looks on the Windows side and passes it in:
+#   IDLECLOUD_WSL_GPU=amd IDLECLOUD_WSL_GPU_VRAM_GIB=<GiB>
+# Both vendors then use one small runtime, written below, that hands the pod
+# /dev/dxg and /usr/lib/wsl; no vendor container toolkit is needed.
 GPU_IMAGE="ghcr.io/sitprojects/idlecloud-pytorch-gpu:main" # migration 014
 GPU_RUNTIME_HANDLER="idlecloud-gpu"
 CONTAINERD_TEMPLATE=/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl
 REGISTRIES=/etc/rancher/k3s/registries.yaml
 AMD_UDEV_RULES=/etc/udev/rules.d/70-idlecloud-amd-gpu.rules
+WSL_GPU_RUNTIME=/usr/local/lib/idlecloud/wsl-gpu-runtime
 WRITTEN_BY="# Written by infra/join-worker.sh for idlecloud. Running it again replaces this file."
 WANT_VENDOR="${IDLECLOUD_GPU_VENDOR:-auto}"
 [[ "$WANT_VENDOR" =~ ^(auto|nvidia|amd|none)$ ]] ||
     die "IDLECLOUD_GPU_VENDOR must be auto, nvidia, amd or none."
+
+IS_WSL=0
+if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
+    IS_WSL=1
+    # WSL's nvidia-smi comes with the Windows driver and isn't on root's PATH
+    PATH="$PATH:/usr/lib/wsl/lib"
+fi
 
 # KFD gfx_target_version of AMD APUs (integrated graphics): gfx801, gfx810,
 # gfx902, gfx909, gfx90c, gfx1033, gfx1035, gfx1036, gfx1037, gfx1103,
@@ -201,25 +220,102 @@ find_amd() {
     (( found ))
 }
 
+# The idlecloud-gpu runtime under WSL: runc, after adding to each container
+# /dev/dxg (mode 0666, as Pods run as uid 65534), /usr/lib/wsl read-only (the
+# Windows driver's user-mode libraries: libcuda and libdxcore) and
+# /usr/lib/wsl/lib at the front of LD_LIBRARY_PATH. The ROCm image brings
+# librocdxg, which ROCm uses in place of /dev/kfd. Docker Desktop and the
+# NVIDIA toolkit do the same under WSL.
+write_wsl_gpu_runtime() {
+    command -v jq >/dev/null 2>&1 ||
+        DEBIAN_FRONTEND=noninteractive apt-get install -y jq
+    install -d -m 755 "$(dirname "$WSL_GPU_RUNTIME")"
+    {
+        echo '#!/bin/bash'
+        echo "$WRITTEN_BY"
+        cat <<'EOF'
+# containerd's runc shim runs this as runc (BinaryName); see infra/README.md.
+set -euo pipefail
+
+bundle=""
+create=0
+args=("$@")
+for (( i = 0; i < ${#args[@]}; i++ )); do
+    case "${args[i]}" in
+        create) create=1 ;;
+        --bundle | -b) bundle="${args[i + 1]:-}" ;;
+        --bundle=*) bundle="${args[i]#--bundle=}" ;;
+    esac
+done
+
+if (( create )) && [[ -f "$bundle/config.json" && -e /dev/dxg ]]; then
+    major=$(( 0x$(stat -c %t /dev/dxg) ))
+    minor=$(( 0x$(stat -c %T /dev/dxg) ))
+    jq --argjson major "$major" --argjson minor "$minor" '
+        .linux.devices = ((.linux.devices // []) + [{
+            path: "/dev/dxg", type: "c", major: $major, minor: $minor,
+            fileMode: 438, uid: 0, gid: 0
+        }])
+        | .linux.resources.devices = ((.linux.resources.devices // []) + [{
+            allow: true, type: "c", major: $major, minor: $minor, access: "rwm"
+        }])
+        | .mounts = ((.mounts // []) + [{
+            destination: "/usr/lib/wsl", type: "bind", source: "/usr/lib/wsl",
+            options: ["rbind", "ro", "nosuid", "nodev"]
+        }])
+        | (.process.env // []) as $env
+        | ([$env[] | select(startswith("LD_LIBRARY_PATH="))
+            | ltrimstr("LD_LIBRARY_PATH=")] | first // "") as $old
+        | .process.env = ([$env[] | select(startswith("LD_LIBRARY_PATH=") | not)]
+            + ["LD_LIBRARY_PATH=/usr/lib/wsl/lib" + (if $old == "" then "" else ":" + $old end)])
+    ' "$bundle/config.json" > "$bundle/config.json.idlecloud"
+    mv -f "$bundle/config.json.idlecloud" "$bundle/config.json"
+fi
+
+runc="$(command -v runc || true)"
+[[ -n "$runc" ]] || runc=/var/lib/rancher/k3s/data/current/bin/runc
+exec "$runc" "$@"
+EOF
+    } > "$WSL_GPU_RUNTIME.tmp"
+    chmod 755 "$WSL_GPU_RUNTIME.tmp"
+    mv -f "$WSL_GPU_RUNTIME.tmp" "$WSL_GPU_RUNTIME"
+}
+
 GPU_VENDOR=""
 GPU_RUNTIME=""
 GPU_VRAM_GIB=0
-if [[ "$WANT_VENDOR" == auto || "$WANT_VENDOR" == nvidia ]] && find_nvidia; then
-    if GPU_RUNTIME="$(command -v nvidia-container-runtime)"; then
+if (( IS_WSL )) && [[ ! -e /dev/dxg ]]; then
+    echo "WSL without /dev/dxg: no GPU here. Update WSL (wsl --update) and the Windows GPU driver for GPU jobs."
+elif (( IS_WSL )); then
+    if [[ "$WANT_VENDOR" == auto || "$WANT_VENDOR" == nvidia ]] && find_nvidia; then
         GPU_VENDOR=nvidia
         GPU_VRAM_GIB=$NVIDIA_VRAM_GIB
-    else
-        echo "Warning: nvidia-smi works but the NVIDIA container toolkit is missing." >&2
-        echo "Install nvidia-container-toolkit and run this script again to take GPU jobs." >&2
-    fi
-fi
-if [[ -z "$GPU_VENDOR" ]] && [[ "$WANT_VENDOR" == auto || "$WANT_VENDOR" == amd ]] && find_amd; then
-    if GPU_RUNTIME="$(command -v amd-container-runtime)"; then
+    elif [[ "$WANT_VENDOR" == auto || "$WANT_VENDOR" == amd ]] &&
+        [[ "${IDLECLOUD_WSL_GPU:-}" == amd ]]; then
+        [[ "${IDLECLOUD_WSL_GPU_VRAM_GIB:-}" =~ ^[0-9]+$ ]] ||
+            die "IDLECLOUD_WSL_GPU=amd needs IDLECLOUD_WSL_GPU_VRAM_GIB, the GPU's memory in GiB."
         GPU_VENDOR=amd
-        GPU_VRAM_GIB=$AMD_VRAM_GIB
-    else
-        echo "Warning: this PC has a discrete AMD GPU but the AMD container toolkit is missing." >&2
-        echo "Install amd-container-toolkit and run this script again to take GPU jobs." >&2
+        GPU_VRAM_GIB=$IDLECLOUD_WSL_GPU_VRAM_GIB
+    fi
+    [[ -n "$GPU_VENDOR" ]] && GPU_RUNTIME="$WSL_GPU_RUNTIME"
+else
+    if [[ "$WANT_VENDOR" == auto || "$WANT_VENDOR" == nvidia ]] && find_nvidia; then
+        if GPU_RUNTIME="$(command -v nvidia-container-runtime)"; then
+            GPU_VENDOR=nvidia
+            GPU_VRAM_GIB=$NVIDIA_VRAM_GIB
+        else
+            echo "Warning: nvidia-smi works but the NVIDIA container toolkit is missing." >&2
+            echo "Install nvidia-container-toolkit and run this script again to take GPU jobs." >&2
+        fi
+    fi
+    if [[ -z "$GPU_VENDOR" ]] && [[ "$WANT_VENDOR" == auto || "$WANT_VENDOR" == amd ]] && find_amd; then
+        if GPU_RUNTIME="$(command -v amd-container-runtime)"; then
+            GPU_VENDOR=amd
+            GPU_VRAM_GIB=$AMD_VRAM_GIB
+        else
+            echo "Warning: this PC has a discrete AMD GPU but the AMD container toolkit is missing." >&2
+            echo "Install amd-container-toolkit and run this script again to take GPU jobs." >&2
+        fi
     fi
 fi
 if [[ "$WANT_VENDOR" =~ ^(nvidia|amd)$ && "$GPU_VENDOR" != "$WANT_VENDOR" ]]; then
@@ -234,6 +330,10 @@ if [[ -n "$GPU_VENDOR" ]]; then
         --node-label "idlecloud/gpu=$GPU_VENDOR"
         --node-label "idlecloud/gpu-vram-gib=$GPU_VRAM_GIB"
     )
+
+    if (( IS_WSL )); then
+        write_wsl_gpu_runtime
+    fi
 
     # The idlecloud-gpu handler: runc through the vendor's runtime, which adds
     # the GPU devices and driver files to the container. K3s fills in the rest
@@ -277,10 +377,13 @@ mirrors:
 EOF
     chmod 600 "$REGISTRIES"
     AGENT_ARGS+=(--disable-default-registry-endpoint)
+fi
 
+if [[ "$GPU_VENDOR" == amd ]] && (( ! IS_WSL )); then
     # Task Pods run as uid 65534, and the runtime passes /dev/kfd and the
     # render node in with their host owner and mode (root:render 0660 on
     # Ubuntu). Let any user open them, as render nodes are meant to be.
+    # (Under WSL the runtime above makes /dev/dxg in the container 0666.)
     cat > "$AMD_UDEV_RULES" <<EOF
 $WRITTEN_BY
 # idlecloud GPU task Pods (uid 65534) reach the AMD GPU through these.
@@ -292,8 +395,13 @@ EOF
     udevadm trigger --action=change --subsystem-match=kfd --subsystem-match=drm
     udevadm settle || true
 else
-    ours "$REGISTRIES" && rm -f -- "$REGISTRIES"
     ours "$AMD_UDEV_RULES" && rm -f -- "$AMD_UDEV_RULES"
+fi
+if [[ "$GPU_VENDOR" != amd ]]; then
+    ours "$REGISTRIES" && rm -f -- "$REGISTRIES"
+fi
+if [[ -z "$GPU_VENDOR" ]] || (( ! IS_WSL )); then
+    ours "$WSL_GPU_RUNTIME" && rm -f -- "$WSL_GPU_RUNTIME"
 fi
 
 if [[ -n "$GPU_VENDOR" ]]; then

@@ -73,11 +73,15 @@ It:
    `idlecloud-node-agent`, so it starts at boot and is restarted if it stops.
    It waits for its credentials from step 2 below.
 4. Runs `infra/join-worker.sh` inside Ubuntu to join the cluster over
-   WireGuard, then starts both tasks.
+   WireGuard, then starts both tasks. A PC with a discrete GPU joins as a GPU
+   worker (see "GPU workers on Windows" below).
 
 Running it again skips the join if the K3s agent is already active and only
-refreshes the sensor, tasks and node agent. Add `-Rejoin` to join again (needs
-a new token).
+refreshes the sensor, tasks and node agent. Add `-Rejoin` to join again. A
+PC that already joined needs no new token or setup zip:
+`install-worker.ps1 -NodeName pc1 -Rejoin` reuses the VPN config and join
+token it has in Ubuntu, and K3s keeps using the node's certificates after
+that token expires.
 
 Check on an admin machine that the node is `Ready`:
 
@@ -139,6 +143,37 @@ In Ubuntu, `journalctl -u idlecloud-node-agent -n 30` and
   `sudo k3s kubectl --kubeconfig /etc/idlecloud/node-agent.kubeconfig get node <name> -o jsonpath='{.spec.taints}'`.
   `node.kubernetes.io/unreachable` taints there mean the K3s agent, not the
   node agent, has lost the server; check `systemctl status k3s-agent wg-quick@wg0`.
+
+## GPU workers on Windows
+
+A Windows PC joins as a GPU worker, taking `pytorch-gpu` jobs as well as
+ordinary ones, if it has either of these:
+
+- **A discrete NVIDIA GPU:** the normal Windows NVIDIA driver is all it needs.
+  WSL2 shares it with Linux, and `nvidia-smi` works in Ubuntu. Don't install
+  a Linux NVIDIA driver in WSL.
+- **A discrete AMD GPU that ROCm supports under WSL:** AMD's list is mostly
+  Radeon RX 7000 and 9000 cards and Radeon PRO W7000. It needs an AMD
+  Software: Adrenalin driver with WSL support.
+
+Integrated graphics (AMD APUs) don't count. Both vendors need Windows 11 with
+an up-to-date WSL (`wsl --update`), so that Ubuntu has `/dev/dxg`.
+
+`install-worker.ps1` finds an AMD GPU on the Windows side, because WSL can't
+tell which one Windows has. It passes the GPU and its memory to
+`join-worker.sh`. `join-worker.sh` finds NVIDIA through WSL's `nvidia-smi`. It
+then labels the node and installs a small container runtime. That runtime
+gives GPU tasks `/dev/dxg` and the Windows driver's libraries (`/usr/lib/wsl`),
+so no NVIDIA or AMD container toolkit is needed (`infra/README.md`, "GPU
+workers"). Two options change what the installer picks:
+
+- `-GpuVendor nvidia|amd|none` picks a vendor, or joins without GPU jobs.
+- `-AllowIntegratedGpu` accepts an APU, for testing only.
+
+To give a PC that already joined its GPU setup, update the repo on it and
+run `install-worker.ps1 -NodeName pc1 -Rejoin`, adding either option if
+needed. The node keeps its name and gets the GPU labels when its K3s agent
+restarts.
 
 ## If WSL2 does not work
 
