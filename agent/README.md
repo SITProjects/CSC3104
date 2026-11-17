@@ -77,8 +77,11 @@ It:
    worker (see "GPU workers on Windows" below).
 
 Running it again skips the join if the K3s agent is already active and only
-refreshes the sensor, tasks and node agent. Add `-Rejoin` to join again (needs
-a new token).
+refreshes the sensor, tasks and node agent. Add `-Rejoin` to join again. A
+PC that already joined needs no new token or setup zip:
+`install-worker.ps1 -NodeName pc1 -Rejoin` reuses the VPN config and join
+token it has in Ubuntu, and K3s keeps using the node's certificates after
+that token expires.
 
 Check on an admin machine that the node is `Ready`:
 
@@ -167,7 +170,10 @@ workers"). Two options change what the installer picks:
 - `-GpuVendor nvidia|amd|none` picks a vendor, or joins without GPU jobs.
 - `-AllowIntegratedGpu` accepts an APU, for testing only.
 
-Add `-Rejoin` with a new setup zip to apply them to a PC that already joined.
+To give a PC that already joined its GPU setup, update the repo on it and
+run `install-worker.ps1 -NodeName pc1 -Rejoin`, adding either option if
+needed. The node keeps its name and gets the GPU labels when its K3s agent
+restarts.
 
 ## If WSL2 does not work
 

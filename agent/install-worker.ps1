@@ -28,6 +28,11 @@ The join token expires: 24 hours for a setup zip (request a new one on the
 admin pages), 10 minutes from add-peer.sh. Running this again skips the join if the K3s agent is already
 active (use -Rejoin to force it) and refreshes the sensor, tasks and node agent.
 
+-NodeName <name> -Rejoin with no other files joins again with the VPN config
+and join token already in Ubuntu, e.g. to apply GPU options to a PC that
+already joined. K3s keeps using the node's certificates after that token
+expires.
+
 Run in Windows PowerShell from the repo, as the PC's normal user:
 
   powershell -ExecutionPolicy Bypass -File .\agent\install-worker.ps1 `
@@ -296,10 +301,19 @@ try {
 if ((Get-WslOutput systemctl is-active k3s-agent) -eq 'active' -and -not $Rejoin) {
     Write-Host 'K3s agent is already running, skipping the join (use -Rejoin to force it).'
 } else {
+    # A rejoin with no new files reuses the ones join-worker.sh installed.
+    $installedWg = '/etc/wireguard/wg0.conf'
+    $installedToken = '/etc/rancher/k3s/agent-token'
+    $reuse = $false
     if ($setup) {
         if (-not $setup.Files.wg_config -or -not $setup.Files.join_token) {
-            throw "$Bundle has no wg0.conf or join token. If $NodeName already joined, use -Rejoin only with a new setup zip."
+            throw "$Bundle has no wg0.conf or join token. If $NodeName already joined, run this with -NodeName $NodeName -Rejoin instead."
         }
+    } elseif (-not $WgConfig -and -not $TokenFile -and $Rejoin) {
+        if ((Get-WslOutput sh -c "test -s $installedWg && test -s $installedToken && echo ok") -ne 'ok') {
+            throw "This PC has not joined yet ($installedWg or $installedToken is missing). Join with -Bundle first."
+        }
+        $reuse = $true
     } elseif (-not $WgConfig -or -not $TokenFile) {
         throw 'Joining needs -Bundle, or -WgConfig and -TokenFile from add-peer.sh on the hub.'
     }
@@ -307,7 +321,12 @@ if ((Get-WslOutput systemctl is-active k3s-agent) -eq 'active' -and -not $Rejoin
     Initialize-Stage
     try {
         Copy-ToStage $JoinScript 'join-worker.sh'
-        if ($setup) {
+        $wgPath = "$Stage/wg0.conf"
+        $tokenPath = "$Stage/agent-token"
+        if ($reuse) {
+            $wgPath = $installedWg
+            $tokenPath = $installedToken
+        } elseif ($setup) {
             Write-ToStage 'wg0.conf' $setup.Files.wg_config
             Write-ToStage 'agent-token' $setup.Files.join_token
         } else {
@@ -324,7 +343,7 @@ if ((Get-WslOutput systemctl is-active k3s-agent) -eq 'active' -and -not $Rejoin
                 $gpuEnv += 'IDLECLOUD_WSL_GPU=amd', "IDLECLOUD_WSL_GPU_VRAM_GIB=$($amd.Gib)"
             }
         }
-        Invoke-Wsl env @gpuEnv bash "$Stage/join-worker.sh" $NodeName "$Stage/wg0.conf" "$Stage/agent-token"
+        Invoke-Wsl env @gpuEnv bash "$Stage/join-worker.sh" $NodeName $wgPath $tokenPath
     } finally {
         # The stage holds the WireGuard private key and join token.
         & wsl.exe -d $Distro -u root --exec rm -rf $Stage
@@ -341,6 +360,12 @@ Done. $NodeName should show as joined on the admin pages within a minute.
 Then download its agent credentials there and run this again with
 -AgentCredentials. Until then the coordinator gets no heartbeats from it and
 treats it as offline, so it runs no tasks.
+"@
+} elseif ($reuse) {
+    Write-Host @"
+
+Done. $NodeName joined again with its existing credentials. On the hub,
+'kubectl get nodes -L idlecloud/gpu,idlecloud/gpu-vram-gib' shows its GPU labels.
 "@
 } else {
     Write-Host @"

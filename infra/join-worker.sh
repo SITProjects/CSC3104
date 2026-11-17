@@ -58,7 +58,9 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
     wireguard curl ca-certificates iputils-ping
 
 install -d -m 700 /etc/wireguard
-install -m 600 "$WG_CONFIG" /etc/wireguard/wg0.conf
+# On a rejoin these can be the installed files themselves.
+[[ "$WG_CONFIG" -ef /etc/wireguard/wg0.conf ]] ||
+    install -m 600 "$WG_CONFIG" /etc/wireguard/wg0.conf
 
 systemctl enable wg-quick@wg0
 systemctl restart wg-quick@wg0
@@ -69,7 +71,8 @@ ping -I wg0 -c 3 -W 3 10.10.0.1 >/dev/null ||
 
 # Store the join token for the K3s agent service.
 install -d -m 700 /etc/rancher/k3s
-install -m 600 "$TOKEN_FILE" /etc/rancher/k3s/agent-token
+[[ "$TOKEN_FILE" -ef /etc/rancher/k3s/agent-token ]] ||
+    install -m 600 "$TOKEN_FILE" /etc/rancher/k3s/agent-token
 
 # Make the agent wait for WireGuard during startup.
 install -d -m 755 /etc/systemd/system/k3s-agent.service.d

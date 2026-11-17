@@ -133,6 +133,18 @@ changing a GPU, or its toolkit. Workers that joined before this setup only
 have K3s's own `nvidia` handler, so they must run the script again before
 they can start GPU copies.
 
+A PC that already joined needs no new token: its own files work, as K3s
+keeps using the node's certificates after the join token expires.
+
+```bash
+sudo bash infra/join-worker.sh <node-name> /etc/wireguard/wg0.conf /etc/rancher/k3s/agent-token
+```
+
+K3s adds the node's labels again each time the agent starts, so the GPU
+labels appear without removing the node. It never removes one, though: after
+taking a GPU out, also run `kubectl label node <node-name> idlecloud/gpu-
+idlecloud/gpu-vram-gib-` on the hub.
+
 **Windows workers (WSL2):** `agent/install-worker.ps1` runs this script
 inside WSL, where the GPU is the Windows driver's. It has no `/dev/nvidia*`
 or `/dev/kfd`, only `/dev/dxg` and the driver's libraries in `/usr/lib/wsl`.
