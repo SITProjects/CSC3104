@@ -6,7 +6,7 @@ overhead stays small. It is an estimate for planning, not a reservation.
 """
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 
 from kubernetes import client
 from kubernetes.utils import parse_quantity
@@ -15,7 +15,7 @@ from core.settings import JOB_NAMESPACE
 from services.coordinator.k8s import (
     GPU_JOB_LABEL,
     GPU_NODE_LABEL,
-    GPU_NODE_VALUE,
+    GPU_VENDORS,
     GPU_VRAM_LABEL,
 )
 
@@ -54,11 +54,16 @@ def _requests(pod: client.V1Pod) -> tuple[float, float]:
     return cpu, mem
 
 
-def gpu_node(node: client.V1Node, min_gpu_vram_gib: int | None = None) -> bool:
-    """A worker labelled with a working NVIDIA GPU, with enough GPU memory if a
-    minimum is asked for (the same rules k8s.py gives GPU copies)."""
+def gpu_node(
+    node: client.V1Node,
+    min_gpu_vram_gib: int | None = None,
+    vendors: Collection[str] = GPU_VENDORS,
+) -> bool:
+    """A worker labelled with a working GPU of one of these vendors, with enough
+    GPU memory if a minimum is asked for (the same rules k8s.py gives GPU
+    copies)."""
     labels = (node.metadata.labels if node.metadata else None) or {}
-    if labels.get(GPU_NODE_LABEL) != GPU_NODE_VALUE:
+    if labels.get(GPU_NODE_LABEL) not in vendors:
         return False
     if not min_gpu_vram_gib:
         return True
@@ -75,6 +80,7 @@ def free_slots(
     mem_mib: int,
     gpu: bool = False,
     min_gpu_vram_gib: int | None = None,
+    gpu_vendors: Collection[str] = GPU_VENDORS,
 ) -> tuple[int, int]:
     """
     Counts copies of size (cpu_cores, mem_mib) that still fit on usable workers.
@@ -91,13 +97,14 @@ def free_slots(
         mem_mib: The memory one copy asks for.
         gpu: Count slots for GPU copies.
         min_gpu_vram_gib: For GPU copies, the smallest GPU memory accepted.
+        gpu_vendors: For GPU copies, the GPU vendors accepted.
     returns:
         tuple[int, int]: Free slots in all, and how many usable nodes there are
             (usable GPU nodes, for GPU copies).
     """
     room = {}
     for node in nodes:
-        if usable(node) and (not gpu or gpu_node(node, min_gpu_vram_gib)):
+        if usable(node) and (not gpu or gpu_node(node, min_gpu_vram_gib, gpu_vendors)):
             alloc = node.status.allocatable or {}
             room[node.metadata.name] = [
                 float(parse_quantity(alloc.get("cpu", "0"))),
@@ -132,6 +139,7 @@ async def current_free_slots(
     mem_mib: int,
     gpu: bool = False,
     min_gpu_vram_gib: int | None = None,
+    gpu_vendors: Collection[str] = GPU_VENDORS,
 ) -> tuple[int, int]:
     """free_slots for the cluster as it is now (needs list on nodes and on Pods
     in the task namespace)."""
@@ -144,5 +152,11 @@ async def current_free_slots(
         ),
     )
     return free_slots(
-        nodes.items or [], pods.items or [], cpu_cores, mem_mib, gpu, min_gpu_vram_gib
+        nodes.items or [],
+        pods.items or [],
+        cpu_cores,
+        mem_mib,
+        gpu,
+        min_gpu_vram_gib,
+        gpu_vendors,
     )

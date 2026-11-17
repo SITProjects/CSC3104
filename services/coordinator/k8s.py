@@ -27,13 +27,18 @@ JOB_TTL_SECONDS = 600
 TERMINATION_GRACE_SECONDS = 30
 TOLERATION_SECONDS = 30
 REPLICA_SELECTOR = "app.kubernetes.io/managed-by=idlecloud-coordinator"
-# GPU job types (job_types.gpu, migration 014). infra/join-worker.sh labels a
-# worker whose NVIDIA GPU works; K3s ships the nvidia RuntimeClass and picks up
-# the NVIDIA container runtime when it is installed before the agent starts.
+# GPU job types (job_types.gpu and gpu_vendors, migrations 014 and 015).
+# infra/join-worker.sh labels a worker whose GPU works with its vendor.
 GPU_NODE_LABEL = "idlecloud/gpu"
-GPU_NODE_VALUE = "nvidia"
+GPU_VENDORS = ("nvidia", "amd")
 GPU_VRAM_LABEL = "idlecloud/gpu-vram-gib"
-GPU_RUNTIME_CLASS = "nvidia"
+# One RuntimeClass for every vendor (infra/k8s/base/gpu-runtimeclass.yml), so a
+# copy's Pod is the same whichever GPU node takes it. Each GPU node maps the
+# handler to its own vendor's container runtime in its containerd config:
+# nvidia-container-runtime or amd-container-runtime. Likewise each node pulls
+# its own build of the image (an AMD node's K3s rewrites the name to the ROCm
+# build), so the scheduler alone decides the vendor, after the Pod exists.
+GPU_RUNTIME_CLASS = "idlecloud-gpu"
 # On every GPU copy's Pod, so a node runs at most one of them: the copy gets all
 # of the node's GPUs (NVIDIA_VISIBLE_DEVICES=all), so a second one would share
 GPU_JOB_LABEL = "idlecloud/gpu-job"
@@ -76,10 +81,25 @@ async def list_replica_pods(core_api: CoreV1Api) -> list[V1Pod]:
     return pods.items or []
 
 
-def _required_nodes(avoid: Collection[str], min_gpu_vram_gib: int | None) -> dict:
+def gpu_vendors(job_type: JobType) -> list[str]:
     """
-    The hard node rules for a copy, or nothing: off these nodes (by name), and
-    on a node with at least this much GPU memory.
+    The GPU vendors a job type's copies may run on, in GPU_VENDORS order: none
+    for a CPU type, and NVIDIA for a GPU type from before migration 015.
+    """
+    if not job_type.gpu:
+        return []
+    accepted = job_type.gpu_vendors or ["nvidia"]
+    return [vendor for vendor in GPU_VENDORS if vendor in accepted]
+
+
+def _required_nodes(
+    avoid: Collection[str],
+    min_gpu_vram_gib: int | None,
+    vendors: Collection[str] = (),
+) -> dict:
+    """
+    The hard node rules for a copy, or nothing: off these nodes (by name), on a
+    GPU node of one of these vendors, and with at least this much GPU memory.
 
     A node-name field selector takes one value per NotIn, so each node gets its
     own requirement; requirements in one term must all hold.
@@ -90,15 +110,22 @@ def _required_nodes(avoid: Collection[str], min_gpu_vram_gib: int | None) -> dic
             {"key": "metadata.name", "operator": "NotIn", "values": [name]}
             for name in sorted(avoid)
         ]
+    expressions = []
+    if vendors:
+        expressions.append(
+            {"key": GPU_NODE_LABEL, "operator": "In", "values": list(vendors)}
+        )
     if min_gpu_vram_gib:
         # Gt compares the label as an integer: more than n - 1 is at least n
-        term["matchExpressions"] = [
+        expressions.append(
             {
                 "key": GPU_VRAM_LABEL,
                 "operator": "Gt",
                 "values": [str(min_gpu_vram_gib - 1)],
             }
-        ]
+        )
+    if expressions:
+        term["matchExpressions"] = expressions
     if not term:
         return {}
     return {
@@ -108,17 +135,25 @@ def _required_nodes(avoid: Collection[str], min_gpu_vram_gib: int | None) -> dic
 
 def _gpu_env(job_type: JobType) -> list[dict]:
     """
-    What a GPU copy's container needs: the NVIDIA runtime exposes every GPU on
-    the node to it, and the runner refuses to start the command without CUDA
-    rather than let it train on the CPU unnoticed.
+    What a GPU copy's container needs: the node's vendor runtime exposes every
+    GPU on the node to it (each runtime reads its own variables and ignores the
+    other's), and the runner refuses to start the command unless PyTorch sees a
+    GPU, rather than let it train on the CPU unnoticed. ROCm builds of PyTorch
+    answer through the same torch.cuda API, so one check covers both vendors.
     """
-    if not job_type.gpu:
+    vendors = gpu_vendors(job_type)
+    if not vendors:
         return []
-    return [
-        {"name": "NVIDIA_VISIBLE_DEVICES", "value": "all"},
-        {"name": "NVIDIA_DRIVER_CAPABILITIES", "value": "compute,utility"},
-        {"name": "IDLECLOUD_REQUIRE_CUDA", "value": "1"},
-    ]
+    env = []
+    if "nvidia" in vendors:
+        env += [
+            {"name": "NVIDIA_VISIBLE_DEVICES", "value": "all"},
+            {"name": "NVIDIA_DRIVER_CAPABILITIES", "value": "compute,utility"},
+        ]
+    if "amd" in vendors:
+        env.append({"name": "AMD_VISIBLE_DEVICES", "value": "all"})
+    env.append({"name": "IDLECLOUD_REQUIRE_CUDA", "value": "1"})
+    return env
 
 
 def build_replica_job_manifest(
@@ -177,16 +212,15 @@ def build_replica_job_manifest(
             "labelSelector": {"matchLabels": {"idlecloud/task-id": str(task.id)}},
         }
     ]
-    node_selector = {"idlecloud/role": "worker"}
+    vendors = gpu_vendors(job_type)
     gpu_spec = {}
-    if job_type.gpu:
+    if vendors:
         anti_affinity.append(
             {
                 "topologyKey": "kubernetes.io/hostname",
                 "labelSelector": {"matchLabels": {GPU_JOB_LABEL: "true"}},
             }
         )
-        node_selector[GPU_NODE_LABEL] = GPU_NODE_VALUE
         gpu_spec["runtimeClassName"] = GPU_RUNTIME_CLASS
 
     return {
@@ -225,8 +259,9 @@ def build_replica_job_manifest(
                     ],
                     "terminationGracePeriodSeconds": TERMINATION_GRACE_SECONDS,
                     # campus PCs and burst workers only, never the control plane;
-                    # GPU copies only on workers with a working NVIDIA GPU
-                    "nodeSelector": node_selector,
+                    # GPU copies only on workers with a working GPU of an accepted
+                    # vendor (the node affinity below)
+                    "nodeSelector": {"idlecloud/role": "worker"},
                     **gpu_spec,
                     "affinity": {
                         "podAntiAffinity": {
@@ -235,7 +270,8 @@ def build_replica_job_manifest(
                         "nodeAffinity": {
                             **_required_nodes(
                                 avoid_nodes,
-                                job_type.min_gpu_vram_gib if job_type.gpu else None,
+                                job_type.min_gpu_vram_gib if vendors else None,
+                                vendors,
                             ),
                             "preferredDuringSchedulingIgnoredDuringExecution": [
                                 {

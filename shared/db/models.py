@@ -323,8 +323,8 @@ class JobType(Base):
         server_default=text("true"),
     )
 
-    # Whether copies need an NVIDIA GPU node (migration 014), and the smallest
-    # GPU memory in GiB they accept, if any
+    # Whether copies need a GPU node (migration 014), and the smallest GPU
+    # memory in GiB they accept, if any
     gpu: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -333,6 +333,13 @@ class JobType(Base):
 
     min_gpu_vram_gib: Mapped[int | None] = mapped_column(
         Integer,
+        nullable=True,
+    )
+
+    # The GPU vendors ("nvidia", "amd") a GPU type's copies may run on, None for
+    # CPU types (migration 015). Each worker pulls its vendor's build of the image.
+    gpu_vendors: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text),
         nullable=True,
     )
 
@@ -366,6 +373,15 @@ class JobType(Base):
         CheckConstraint(
             "min_gpu_vram_gib IS NULL OR (gpu AND min_gpu_vram_gib > 0)",
             name="job_types_min_gpu_vram_gib_check",
+        ),
+        CheckConstraint(
+            "(NOT gpu AND gpu_vendors IS NULL) OR (gpu AND cardinality(gpu_vendors) > 0"
+            " AND gpu_vendors <@ ARRAY['nvidia', 'amd']::TEXT[])",
+            name="job_types_gpu_vendors_check",
+        ),
+        CheckConstraint(
+            "NOT gpu OR position('@' IN image) = 0",
+            name="job_types_gpu_image_tag_check",
         ),
         CheckConstraint(
             "checkpoint_max_mib BETWEEN 1 AND 2048",
