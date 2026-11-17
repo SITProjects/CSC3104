@@ -79,6 +79,9 @@ class JobSpec(BaseModel):
         default=None, ge=1, le=MAX_TASKS_PER_JOB, examples=[8]
     )
     replicas_per_task: int = Field(ge=1, le=5, examples=[3])
+    # The accuracy (0 to 1) the owner wants from a scored model, shown as met or
+    # not met. Scoring needs an "eval_file" in the task input (GPU plan phase 3).
+    min_score: float | None = Field(default=None, ge=0, le=1, examples=[0.9])
     cpu_request: int = Field(ge=1, le=16, examples=[2])  # in cores
     mem_request: int = Field(ge=64, le=4096, examples=[256])  # in MiB
 
@@ -173,6 +176,48 @@ class Manifest(BaseModel):
     attempt: int
     # The most the runner uploads from the checkpoint folder (job type's cap)
     checkpoint_max_bytes: int = 100 * 1024 * 1024
+    # Only for a check copy: what to score (worker/model-check)
+    check: "CheckSource | None" = None
+
+
+class CheckSource(BaseModel):
+    """
+    The trained model a check copy scores. The checker refuses the archive
+    unless its SHA-256 matches the one in result.json, and result.json unless
+    its SHA-256 is result_sha256, the hash the training copy reported.
+    """
+
+    trained_replica_id: int
+    result_url: str
+    result_sha256: str
+    archive_url: str
+    eval_url: str
+
+
+class CheckIn(BaseModel):
+    """A check copy's outcome (POST /internal/replicas/{id}/check)."""
+
+    status: Literal["scored", "not_scored"]
+    score: float | None = Field(default=None, ge=0, le=1)
+    samples: int | None = Field(default=None, ge=1)
+    model_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    eval_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    evaluator: str = Field(min_length=1, max_length=64)
+    # why the model wasn't scored, e.g. "no_model: output/model.onnx is missing"
+    reason: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def check_outcome(self) -> "CheckIn":
+        if self.status == "scored" and (
+            self.score is None or self.samples is None or self.model_sha256 is None
+        ):
+            raise ValueError("a scored check needs score, samples and model_sha256")
+        if self.status == "not_scored" and not self.reason:
+            raise ValueError("a check that didn't score needs a reason")
+        return self
+
+
+Manifest.model_rebuild()  # it names CheckSource, defined after it
 
 
 class CheckpointIn(BaseModel):

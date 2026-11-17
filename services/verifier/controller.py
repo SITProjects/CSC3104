@@ -15,6 +15,7 @@ from shared.db.models import (
     TaskStatus,
 )
 
+from . import model_check
 from .pc_tracking import get_dispute_exclusions
 from .spot_check import accept_on_trust, reopen_trusted_results
 from .trust import score_replicas
@@ -70,7 +71,10 @@ async def process_vote(session: AsyncSession, task: Task) -> None:
         session: The verifier's current transaction.
         task: The locked VOTING task with no unfinished replicas.
     """
-    replicas = await get_replicas(session, task.id)
+    every = await get_replicas(session, task.id)
+    # check copies score a model (model_check.py); they are not votes
+    replicas = [r for r in every if r.check_of is None]
+    checks = [r for r in every if r.check_of is not None]
     replica_count = len(replicas)
     if not 1 <= replica_count <= MAX_REPLICAS:
         await fail_verification(session, task, "invalid_replica_count", replica_count)
@@ -83,6 +87,11 @@ async def process_vote(session: AsyncSession, task: Task) -> None:
         if replica.status == ReplicaStatus.DONE and replica.exit_code == 0
     ]
     if not await verifies(session, task):
+        # a GPU model with an evaluation file is scored before it is accepted
+        if successful and await model_check.is_scored(session, task):
+            trained = max(successful, key=lambda r: r.id)
+            await model_check.score_or_check(session, task, trained, checks)
+            return
         await accept_single_run(session, task, successful, replica_count)
         return
     winner = winning_hash(

@@ -12,7 +12,7 @@
     VERIFIED: "Verified", DISPUTED: "Disputed", COMPLETED: "Completed",
     FAILED: "Failed", CANCELLED: "Cancelled", SCHEDULED: "Queued",
     WAITING: "Waiting for a PC", EVICTED: "Moving to another PC",
-    LOST: "Moving to another PC", DONE: "Done",
+    LOST: "Moving to another PC", DONE: "Done", SCORING: "Scoring",
   };
   const label = (s) => STATUS_TEXT[s] || s;
 
@@ -20,6 +20,7 @@
   const TONE = {
     RUNNING: "bg-blue-100 text-blue-800", SCHEDULED: "bg-blue-100 text-blue-800",
     PREPARING: "bg-blue-100 text-blue-800", VOTING: "bg-blue-100 text-blue-800",
+    SCORING: "bg-blue-100 text-blue-800",
     COMPLETED: "bg-green-100 text-green-800", VERIFIED: "bg-green-100 text-green-800",
     DONE: "bg-green-100 text-green-800",
     EVICTED: "bg-amber-100 text-amber-800", LOST: "bg-amber-100 text-amber-800",
@@ -30,6 +31,7 @@
     ocr: { file: "result.txt", what: "text", when: ["COMPLETED"] },
     python: { file: "output.tar.gz", what: "output", when: ["COMPLETED", "FAILED"] },
     pytorch: { file: "output.tar.gz", what: "output", when: ["COMPLETED", "FAILED"] },
+    "pytorch-gpu": { file: "output.tar.gz", what: "output", when: ["COMPLETED", "FAILED"] },
   };
 
   function el(tag, className, text) {
@@ -76,7 +78,9 @@
 
   function copyItem(r) {
     const item = el("li", "flex flex-wrap items-center gap-1.5");
-    item.append(el("span", "font-medium", r.node || "–"), " · ", badge(copyState(r)));
+    // a check copy runs on the platform's checker, not on a lending PC
+    const who = r.check ? `checker${r.node ? ` (${r.node})` : ""}` : r.node || "–";
+    item.append(el("span", "font-medium", who), " · ", badge(copyState(r)));
     if (r.status === "RUNNING" && r.node) item.append(` ${r.progress}%`);
     if (r.saved_at && (r.status === "RUNNING" || r.status === "SCHEDULED")) {
       // a moved copy carries on from here; older work is redone
@@ -102,7 +106,7 @@
 
   // The job's stages, in order; see the stages list in templates/job_detail.html.
   const STAGE_TEXT = { done: "done", current: "in progress", todo: "not started" };
-  const CHECKING = new Set(["VOTING", "VERIFIED", "DISPUTED", "FAILED"]);
+  const CHECKING = new Set(["VOTING", "SCORING", "VERIFIED", "DISPUTED", "FAILED"]);
 
   // Which stage the job is at now.
   function currentStage(job) {
@@ -130,6 +134,31 @@
     });
   }
 
+  // The platform's score of a trained model, in place of a vote
+  function scoreCell(s) {
+    const cell = el("td", "grid gap-0.5");
+    if (s.state === "awaiting") {
+      cell.append(el("span", null, "Awaiting score"));
+      return cell;
+    }
+    if (s.state === "not_scored") {
+      cell.append(el("span", null, "Not scored"));
+      if (s.reason) cell.append(el("span", "text-xs text-muted-foreground wrap-anywhere", s.reason));
+      return cell;
+    }
+    const pct = (x) => `${(x * 100).toFixed(1)}%`;
+    cell.append(el("span", "font-medium", `${pct(s.score)} accuracy`));
+    cell.append(el("span", "text-xs text-muted-foreground", `on ${s.samples} samples, measured by the platform`));
+    if (s.target != null) {
+      cell.append(el("span", s.met ? "text-xs text-green-700" : "text-xs text-amber-700",
+        `Target ${pct(s.target)} ${s.met ? "met" : "not met"}`));
+    }
+    const digest = el("span", "font-mono text-xs text-muted-foreground", `model ${s.model_sha256.slice(0, 12)}…`);
+    digest.title = `SHA-256 of model.onnx: ${s.model_sha256}`;
+    cell.append(digest);
+    return cell;
+  }
+
   function voteText(task) {
     const v = task.votes;
     if (!v) return "";
@@ -150,7 +179,7 @@
     const list = el("ul", "grid gap-1.5");
     task.replicas.forEach((r) => list.append(copyItem(r)));
     copies.append(list);
-    row.append(status, progress, copies, el("td", null, voteText(task)));
+    row.append(status, progress, copies, task.score ? scoreCell(task.score) : el("td", null, voteText(task)));
     return row;
   }
 

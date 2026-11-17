@@ -120,6 +120,33 @@ JOB_TYPES = {
     )
 }
 
+# Types whose trained model the platform scores (job_types.check_image,
+# migration 017): their form takes an evaluation file and a target accuracy
+SCORED_TYPES = frozenset({"pytorch-gpu"})
+MAX_EVAL_SAMPLES = 10_000  # worker/model-check/evaluate.py MAX_SAMPLES
+
+
+def parse_min_score(value: str | None, has_eval_file: bool) -> float | None:
+    """
+    The target accuracy from the form, a percentage, as a fraction (0 to 1).
+
+    raises:
+        UploadError: If it isn't a number from 0 to 100, or there is no
+            evaluation file to measure it on.
+    """
+    if value is None or not value.strip():
+        return None
+    try:
+        percent = float(value)
+    except ValueError:
+        raise UploadError("The target accuracy must be a number.") from None
+    if not 0 <= percent <= 100:
+        raise UploadError("The target accuracy must be from 0 to 100%.")
+    if not has_eval_file:
+        raise UploadError("Add an evaluation file to measure the target accuracy on.")
+    return round(percent / 100, 6)
+
+
 # The coordinator's limits on one copy of a task (JobSpec in its models.py)
 MIN_CPU, MAX_CPU = 1, 16  # cores
 MIN_MEM, MAX_MEM = 64, 4096  # MiB
@@ -232,10 +259,54 @@ def output_replica(job: dict[str, Any]) -> int | None:
     if not job["tasks"]:
         return None
     task = job["tasks"][0]
-    finished = [r for r in task["replicas"] if r["status"] == "DONE"]
+    finished = [
+        r
+        for r in task["replicas"]
+        if r["status"] == "DONE" and r.get("check_of") is None
+    ]
     accepted = [r for r in finished if r["result_hash"] == task["final_hash"]]
     chosen = accepted or finished
     return max(r["id"] for r in chosen) if chosen else None
+
+
+def score_view(task: dict[str, Any], min_score: float | None) -> dict | None:
+    """
+    How the platform's check of the task's model went, or None for a task that
+    isn't scored. state is "awaiting" (training done, no check result yet),
+    "scored" or "not_scored".
+    """
+    checks = [r for r in task["replicas"] if r.get("check_of") is not None]
+    if not checks:
+        return None
+    done = [r for r in checks if r["status"] == "DONE" and r.get("check_status")]
+    if not done:
+        if task["status"] == "SCORING":
+            return {"state": "awaiting", "checks": len(checks)}
+        # every check failed and the task was accepted without a score
+        return {"state": "not_scored", "reason": "The checker failed."}
+    check = max(done, key=lambda r: r["id"])
+    if check["check_status"] != "scored":
+        return {"state": "not_scored", "reason": check.get("check_reason") or ""}
+    score = check["check_score"]
+    return {
+        "state": "scored",
+        "score": score,
+        "samples": check.get("check_samples"),
+        "model_sha256": check.get("check_model_sha256"),
+        "eval_sha256": check.get("check_eval_sha256"),
+        "target": min_score,
+        "met": None if min_score is None else score >= min_score,
+    }
+
+
+def find_replica(job: dict[str, Any], replica_id: int) -> dict[str, Any]:
+    """A copy of one of the job's tasks by id."""
+    return next(
+        replica
+        for task in job["tasks"]
+        for replica in task["replicas"]
+        if replica["id"] == replica_id
+    )
 
 
 def replica_attempts(job: dict[str, Any]) -> dict[int, int]:
@@ -364,6 +435,7 @@ def job_spec(
     task_count: int | None = None,
     params: dict[str, Any] | None = None,
     task_input: dict[str, Any] | None = None,
+    min_score: float | None = None,
 ) -> dict[str, Any]:
     """
     The body for the coordinator's POST /jobs.
@@ -399,6 +471,8 @@ def job_spec(
     }
     if task_count is not None:
         spec["task_count"] = task_count
+    if min_score is not None:
+        spec["min_score"] = min_score
     return spec
 
 
@@ -450,6 +524,8 @@ def progress_view(job: dict[str, Any]) -> dict[str, Any]:
                 # the last checkpoint this copy saved, for long jobs
                 "saved_at": r.get("checkpoint_at"),
                 "saved_step": r.get("checkpoint_step"),
+                # a check copy scores a trained model on the platform's checker
+                "check": r.get("check_of") is not None,
             }
             for r in sorted(task["replicas"], key=lambda r: r["id"])
         ]
@@ -461,6 +537,7 @@ def progress_view(job: dict[str, Any]) -> dict[str, Any]:
                 "replicas": replicas,
                 "restarts": sum(r["restarts"] for r in replicas),
                 "votes": _votes(task),
+                "score": score_view(task, job.get("min_score")),
             }
         )
     done = sum(1 for t in tasks if t["status"] == "VERIFIED")

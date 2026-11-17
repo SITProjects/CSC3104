@@ -15,6 +15,10 @@ on:
       - worker/pytorch-job/requirements.txt
       - worker/pytorch-gpu-job/Dockerfile
       - worker/pytorch-gpu-job/requirements.txt
+      - worker/pytorch-gpu-job/idlecloud_ckpt.py
+      - worker/model-check/Dockerfile
+      - worker/model-check/requirements.txt
+      - worker/model-check/evaluate.py
       - shared/__init__.py
       - shared/checkpoint.py
       - shared/normalized_text.py
@@ -32,6 +36,10 @@ on:
       - worker/pytorch-job/requirements.txt
       - worker/pytorch-gpu-job/Dockerfile
       - worker/pytorch-gpu-job/requirements.txt
+      - worker/pytorch-gpu-job/idlecloud_ckpt.py
+      - worker/model-check/Dockerfile
+      - worker/model-check/requirements.txt
+      - worker/model-check/evaluate.py
       - shared/__init__.py
       - shared/checkpoint.py
       - shared/normalized_text.py
@@ -62,6 +70,8 @@ jobs:
             dockerfile: worker/pytorch-job/Dockerfile
           - name: pytorch-gpu
             dockerfile: worker/pytorch-gpu-job/Dockerfile
+          - name: model-check
+            dockerfile: worker/model-check/Dockerfile
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -96,6 +106,8 @@ jobs:
             dockerfile: worker/pytorch-job/Dockerfile
           - name: pytorch-gpu
             dockerfile: worker/pytorch-gpu-job/Dockerfile
+          - name: model-check
+            dockerfile: worker/model-check/Dockerfile
     permissions:
       contents: read
       packages: write

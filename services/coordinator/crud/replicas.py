@@ -56,7 +56,9 @@ async def fail_unplaced(
     """
     Fails a RUNNING attempt whose Pod never got a node, so its task can be voted
     on, and returns its task id. A Pod placed since housekeeping looked is left
-    alone (None).
+    alone (None). So is a check copy: it waits for a checker node, and the task
+    shows "awaiting score" meanwhile, because a model is never marked scored
+    without a check.
     """
     return await session.scalar(
         update(Replica)
@@ -65,6 +67,7 @@ async def fail_unplaced(
             Replica.attempt == attempt,
             Replica.status == ReplicaStatus.RUNNING,
             Replica.node_name.is_(None),
+            Replica.check_of.is_(None),
         )
         .values(
             status=ReplicaStatus.FAILED, token_hash=None, ended_at=datetime.now(UTC)
@@ -156,7 +159,12 @@ async def fetch_scheduled_replicas(
             Replica.status == ReplicaStatus.SCHEDULED,
             Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
             Task.status.in_(
-                [TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.DISPUTED]
+                [
+                    TaskStatus.PENDING,
+                    TaskStatus.RUNNING,
+                    TaskStatus.DISPUTED,
+                    TaskStatus.SCORING,
+                ]
             ),
             ~unplaced_earlier_sibling,
         )
@@ -269,7 +277,9 @@ async def recover_replicas(session: AsyncSession) -> None:
                 Replica.status == ReplicaStatus.EVICTED,
                 Replica.status == ReplicaStatus.LOST,
             ),
-            Task.status.in_([TaskStatus.RUNNING, TaskStatus.DISPUTED]),
+            Task.status.in_(
+                [TaskStatus.RUNNING, TaskStatus.DISPUTED, TaskStatus.SCORING]
+            ),
         )
         .with_for_update(of=Replica, skip_locked=True)
     )
@@ -347,6 +357,35 @@ async def record_checkpoint(
     replica.checkpoint_step = step
     replica.checkpoint_at = datetime.now(UTC)
     await session.flush()
+
+
+async def record_check(
+    session: AsyncSession,
+    replica: Replica,
+    task: Task,
+    outcome: dict,
+    result_hash: str,
+) -> None:
+    """
+    Records a check copy's outcome and marks it DONE (exit code 0): scored, or
+    not scored with the reason. Call set_voting afterwards, so the verifier
+    finishes the task (services/verifier/model_check.py).
+
+    args:
+        session: The database session for this request.
+        replica: The RUNNING check copy, locked by the caller.
+        task: Its task.
+        outcome: The check's fields (models.CheckIn as a dict).
+        result_hash: SHA-256 of the outcome as canonical JSON.
+    """
+    replica.check_status = outcome["status"]
+    replica.check_score = outcome.get("score")
+    replica.check_samples = outcome.get("samples")
+    replica.check_model_sha256 = outcome.get("model_sha256")
+    replica.check_eval_sha256 = outcome.get("eval_sha256")
+    replica.check_evaluator = outcome["evaluator"]
+    replica.check_reason = outcome.get("reason")
+    await mark_replica_done(session, replica, task, result_hash, 0)
 
 
 async def schedule_replica(session: AsyncSession, replica: Replica, token: str) -> None:

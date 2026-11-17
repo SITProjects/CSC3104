@@ -17,7 +17,11 @@ from services.coordinator.crud import (
     set_voting,
     sibling_nodes,
 )
-from services.coordinator.k8s import build_replica_job_manifest, create_job
+from services.coordinator.k8s import (
+    build_check_job_manifest,
+    build_replica_job_manifest,
+    create_job,
+)
 from shared.db.models import ReplicaStatus
 
 log = logging.getLogger("coordinator.scheduler")
@@ -40,7 +44,13 @@ async def launch_batch(
             log.info(f"launching replica {replica.id} attempt {replica.attempt}")
             # the pod gets the plain token; only its hash is stored
             token = secrets.token_urlsafe(32)
-            job_manifest = build_replica_job_manifest(
+            # a check copy scores a trained model on a checker node instead
+            build = (
+                build_check_job_manifest
+                if replica.check_of is not None
+                else build_replica_job_manifest
+            )
+            job_manifest = build(
                 replica,
                 task,
                 job_type,
