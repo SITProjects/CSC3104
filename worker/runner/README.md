@@ -33,7 +33,16 @@ For a job type with `gpu` set (migration 014) the coordinator sets
 short PyTorch check on a CUDA device and logs the device's name and memory. If
 PyTorch sees no CUDA device, the command is not started: the log says why and
 the copy reports exit code 69, so the task fails with that log instead of a
-script quietly training on the CPU. The image must have PyTorch.
+script quietly training on the CPU. The image must have PyTorch. ROCm builds
+of PyTorch (`worker/pytorch-rocm-job`) answer through the same `torch.cuda`
+API, so the check is the same on AMD GPUs.
+
+The container sees every GPU on its node. If some are integrated (an AMD APU
+next to a discrete card), the runner hides them from the command with
+`HIP_VISIBLE_DEVICES` (`CUDA_VISIBLE_DEVICES` on NVIDIA) and logs it, so
+`cuda:0` is a discrete GPU. A node with only an integrated GPU is never
+labelled a GPU worker unless its owner asked for it (`infra/join-worker.sh`,
+`IDLECLOUD_ALLOW_INTEGRATED_GPU=1`), and then the runner uses that GPU.
 
 ## Checkpoints: carrying on after the PC's owner returns
 

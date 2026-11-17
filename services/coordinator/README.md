@@ -58,14 +58,15 @@ counts free GPU nodes the same way (`&gpu_vram=<GiB>` for a minimum,
 needed: the labels and the runtime class are enough for one GPU copy per node.
 
 Only discrete GPUs make a GPU worker. Integrated graphics (AMD APUs such as
-the Radeon 780M) are too slow to be worth a GPU copy, so `join-worker.sh` must
+the Radeon 780M) are too slow to be worth a GPU copy, so `join-worker.sh` does
 not label a node `idlecloud/gpu` for them; a PC with an integrated AMD GPU and a
-discrete NVIDIA one joins as an NVIDIA worker.
+discrete NVIDIA one joins as an NVIDIA worker. On a node with both kinds, the
+runner hides the integrated GPU from the command (`worker/runner/README.md`).
 
 A GPU node must define the `idlecloud-gpu` handler before it gets the
-`idlecloud/gpu` label, or its GPU copies can't start. Workers joined with the
-`join-worker.sh` from migration 014 only have K3s's own `nvidia` handler and
-must join again once `join-worker.sh` sets up `idlecloud-gpu`.
+`idlecloud/gpu` label, or its GPU copies can't start. `join-worker.sh` sets up
+both together (`infra/README.md`, "GPU workers"). Workers joined with an older
+`join-worker.sh` only have K3s's own `nvidia` handler and must run it again.
 
 ## Campus workers
 

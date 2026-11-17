@@ -68,15 +68,27 @@ EXIT_NOT_FOUND = 127
 # a GPU job type's copy landed where CUDA doesn't work (sysexits EX_UNAVAILABLE)
 EXIT_NO_CUDA = 69
 CUDA_CHECK_TIMEOUT_SECONDS = 120
-CUDA_CHECK = (
-    "import torch, sys\n"
-    "if not torch.cuda.is_available():\n"
-    "    sys.exit('torch ' + torch.__version__ + ' sees no CUDA device')\n"
-    "x = torch.ones(1024, device='cuda')\n"
-    "print('CUDA ' + str(torch.version.cuda) + ' on ' + torch.cuda.get_device_name(0) + ', '\n"
-    "      + str(torch.cuda.get_device_properties(0).total_memory // 2**20) + ' MiB, check sum '\n"
-    "      + str(int((x * 2).sum().item())))\n"
-)
+# Runs in the image's Python. ROCm builds of PyTorch use the same torch.cuda
+# API. The runtime shows the copy every GPU on the node; an integrated one (an
+# AMD APU next to a discrete card) is hidden from the command when a discrete
+# one is there, through the line HIP_VISIBLE_DEVICES=... (CUDA_VISIBLE_DEVICES
+# on NVIDIA), which the runner sets for the command.
+CUDA_CHECK = """
+import sys, torch
+if not torch.cuda.is_available():
+    sys.exit('torch ' + torch.__version__ + ' sees no CUDA device')
+gpus = [torch.cuda.get_device_properties(i) for i in range(torch.cuda.device_count())]
+use = [i for i, gpu in enumerate(gpus) if not gpu.is_integrated] or list(range(len(gpus)))
+x = torch.ones(1024, device=f'cuda:{use[0]}')
+platform = 'ROCm ' + str(torch.version.hip) if torch.version.hip else 'CUDA ' + str(torch.version.cuda)
+gpu = gpus[use[0]]
+print(platform + ' on ' + gpu.name + ', ' + str(gpu.total_memory // 2**20)
+      + ' MiB, check sum ' + str(int((x * 2).sum().item())))
+if len(use) < len(gpus):
+    variable = 'HIP_VISIBLE_DEVICES' if torch.version.hip else 'CUDA_VISIBLE_DEVICES'
+    print(variable + '=' + ','.join(map(str, use)))
+"""
+GPU_SELECTION = ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 HIDDEN_FROM_COMMAND = ("REPLICA_TOKEN", "REPLICA_ID", "COORDINATOR_URL", "TASK_INDEX")
 # the runner's own folders in the work folder; the web app refuses these file names
 OUTPUT_NAME = "output"
@@ -248,7 +260,14 @@ def check_cuda(log: Log) -> bool:
             f"({detail[0]}). The command was not started."
         )
         return False
-    log.note(check.stdout.strip())
+    for line in check.stdout.strip().splitlines():
+        name, _, value = line.partition("=")
+        if name in GPU_SELECTION and value:
+            # the command (command_env) sees only the discrete GPUs
+            os.environ[name] = value
+            log.note(f"Integrated GPUs hidden from the command: {line}")
+        else:
+            log.note(line)
     return True
 
 
