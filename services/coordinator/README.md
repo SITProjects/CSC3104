@@ -113,3 +113,31 @@ then fails it with a `replica_unplaceable` event. The copy still counts towards
 the vote total, so the task passes only if two different PCs agree; otherwise
 it is disputed or fails, and the job ends instead of hanging. The rule is never
 relaxed to reuse a PC, since one PC would then get two votes.
+
+## Long jobs: retries, checkpoints and maximum age
+
+A GPU training job can run for hours on PCs whose owners come and go, so a copy
+is not failed for being evicted (migration 016):
+
+- A replica counts `failures`: a lost node or Pod, a launch error, or a GPU
+  copy whose runner found no usable GPU (exit 69). The copy fails at
+  `RETRY_ATTEMPTS` (3). An owner eviction is not a failure, and neither is a
+  Pod the node agent stopped locally (exit 143, `pod_watcher.decide`).
+- A GPU copy with exit 69 is moved instead of failed: its node goes into
+  `replicas.bad_nodes`, which the scheduler avoids along with the siblings'
+  nodes. On the last retry the exit stands as the copy's result, so the log
+  reaches the user.
+- Evictions still end in two ways: a copy fails at `MAX_ATTEMPTS` (50) attempts,
+  and housekeeping fails a job older than its type's `max_age_hours` (24 for
+  `pytorch-gpu`, none for the others) with a `job_expired` event.
+- Every attempt has its own S3 keys, `jobs/{job}/replicas/{replica}/attempts/{n}/`
+  for `checkpoint.tar.gz`, `output.tar.gz` and `result.json`, so an old
+  attempt's late upload can't replace a newer one's. The web app and the
+  verifier read the old key (straight under the replica) for older jobs.
+- `POST /internal/replicas/{id}/checkpoint` records each checkpoint the runner
+  publishes: attempt, SHA-256, size and the training step from
+  `idlecloud.json`. The next attempt's manifest lists that archive first, the
+  job page shows "saved 4 min ago, step 1200", and `replica_evicted` events
+  carry the last save's time and step so lost work can be measured.
+- `checkpoint_max_bytes` in the manifest is the job type's `checkpoint_max_mib`
+  (100, or 500 for `pytorch-gpu`).

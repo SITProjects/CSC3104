@@ -4,8 +4,9 @@ coming back.
 
 It trains a small convolutional digits classifier on the GPU and saves
 everything needed to carry on (model, optimizer, step, epoch and random state)
-to $CHECKPOINT_DIR every --save-seconds, also in the middle of an epoch. If the
-job is moved, it starts again from the last uploaded save, not from 0.
+to $CHECKPOINT_DIR every --save-seconds, also in the middle of an epoch, with
+the image's idlecloud_ckpt helper. If the job is moved, it starts again from
+the last uploaded save, not from 0, on whichever GPU it lands on.
 
 Upload this file as a "Python with PyTorch (GPU)" job and run, for example:
     python train_gpu.py --epochs 40 --save-seconds 30
@@ -22,21 +23,13 @@ import time
 from pathlib import Path
 
 import torch
+from idlecloud_ckpt import Checkpointer
 from sklearn.datasets import load_digits
 from sklearn.model_selection import train_test_split
 from torch import nn
 
-CHECKPOINT = Path(os.environ.get("CHECKPOINT_DIR", "checkpoint")) / "state.pt"
 OUTPUT = Path(os.environ.get("OUTPUT_DIR", "output"))
 BATCH = 64
-
-
-def save(state: dict) -> None:
-    """Writes the checkpoint so it is never half written: a new file, then a rename."""
-    CHECKPOINT.parent.mkdir(parents=True, exist_ok=True)
-    partial = CHECKPOINT.with_suffix(".tmp")
-    torch.save(state, partial)
-    os.replace(partial, CHECKPOINT)
 
 
 def accuracy(model: nn.Module, x: torch.Tensor, y: torch.Tensor) -> float:
@@ -90,19 +83,23 @@ def main() -> None:
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss()
 
+    batches_per_epoch = -(-len(x_train) // BATCH)
+    ckpt = Checkpointer(every_seconds=args.save_seconds)
     epoch, batch_index = 0, 0
-    if CHECKPOINT.exists():
-        state = torch.load(CHECKPOINT, map_location=device, weights_only=True)
+    state = ckpt.load(map_location=device)
+    if state:
         epoch, batch_index = state["epoch"], state["batch_index"]
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
-        torch.set_rng_state(state["cpu_rng"])
-        torch.cuda.set_rng_state(state["cuda_rng"])
+        torch.set_rng_state(state["cpu_rng"].cpu())
+        # The GPU random state is only kept on the same kind of GPU
+        if state.get("cuda_rng_device") == torch.cuda.get_device_name(0):
+            torch.cuda.set_rng_state(state["cuda_rng"].cpu())
         print(f"Resuming from epoch {epoch}, batch {batch_index}", flush=True)
     resumed_from = {"epoch": epoch, "batch": batch_index}
 
     def checkpoint() -> None:
-        save(
+        ckpt.save(
             {
                 "epoch": epoch,
                 "batch_index": batch_index,
@@ -110,10 +107,11 @@ def main() -> None:
                 "optimizer": optimizer.state_dict(),
                 "cpu_rng": torch.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state(),
-            }
+                "cuda_rng_device": torch.cuda.get_device_name(0),
+            },
+            step=epoch * batches_per_epoch + batch_index,
         )
 
-    last_save = time.monotonic()
     loss = torch.tensor(float("nan"))  # a resumed epoch may have no batches left
     while epoch < args.epochs:
         model.train()
@@ -130,13 +128,11 @@ def main() -> None:
             loss.backward()
             optimizer.step()
             batch_index += 1
-            if time.monotonic() - last_save >= args.save_seconds:
+            if ckpt.due():
                 checkpoint()
-                last_save = time.monotonic()
             time.sleep(args.slow_down)
         epoch, batch_index = epoch + 1, 0
         checkpoint()
-        last_save = time.monotonic()
         print(
             f"epoch {epoch}/{args.epochs} loss {float(loss):.4f} "
             f"accuracy {accuracy(model, x_test, y_test):.4f}",

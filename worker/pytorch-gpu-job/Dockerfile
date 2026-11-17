@@ -18,6 +18,9 @@ RUN --mount=from=uv,source=/uv,target=/bin/uv \
     uv pip install --system --no-cache -r /opt/idlecloud/requirements.txt
 
 COPY worker/runner/runner.py /opt/idlecloud/runner.py
+# The checkpoint helper user scripts import (from idlecloud_ckpt import Checkpointer)
+COPY worker/pytorch-gpu-job/idlecloud_ckpt.py /opt/idlecloud/lib/idlecloud_ckpt.py
+ENV PYTHONPATH=/opt/idlecloud/lib
 
 # The Pod runs as user 65534 and the runner works in a temporary folder.
 USER 65534:65534

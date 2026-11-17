@@ -11,7 +11,7 @@ async def create_event(
     session: AsyncSession,
     event_type: str,
     job_id: UUID,
-    task_id: int,
+    task_id: int | None,
     node_name: str | None = None,
     detail: dict[str, Any] | None = None,
 ) -> None:

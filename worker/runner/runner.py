@@ -14,8 +14,15 @@ It does not see the replica token.
 
 The checkpoint folder is uploaded as checkpoint.tar.gz every
 CHECKPOINT_INTERVAL_SECONDS when it has changed, and once more when the copy
-is stopped. A rerun of the copy on another PC starts with the last folder that
-was uploaded, so a program that saves its progress there can carry on.
+is stopped, up to the job type's size cap (checkpoint_max_bytes in the
+manifest). Each upload is reported to the coordinator with its SHA-256, size
+and, when the program wrote one to checkpoint/idlecloud.json, its training
+step. A rerun of the copy on another PC starts with the last folder that was
+uploaded, so a program that saves its progress there can carry on.
+
+Presigned URLs can stop working before a long job ends (the hub's AWS
+credentials rotate). An upload refused with 403 fetches the manifest again
+and is tried once more with the fresh URL.
 
 On SIGTERM (the PC's owner is back) the command gets SIGTERM too and a short
 time to stop, the checkpoint folder is uploaded, and the copy is reported
@@ -49,7 +56,10 @@ SHUTDOWN_BUDGET_SECONDS = 25
 EVICTION_REPORT_TIMEOUT_SECONDS = 5
 MAX_LOG_BYTES = 5 * 1024 * 1024
 MAX_OUTPUT_BYTES = 100 * 1024 * 1024
+# used when the coordinator doesn't send checkpoint_max_bytes
 MAX_CHECKPOINT_BYTES = 100 * 1024 * 1024
+# the training step the program saved, written by idlecloud_ckpt.py
+STEP_FILE = "idlecloud.json"
 CHECKPOINT_INTERVAL_SECONDS = float(os.environ.get("CHECKPOINT_INTERVAL_SECONDS", "60"))
 EXIT_EVICTED = 143
 # exit codes for problems before the command starts, like a shell's
@@ -309,24 +319,76 @@ def pack(output: Path, log: Log) -> bytes:
     return buffer.getvalue()
 
 
+class Manifest:
+    """
+    The copy's manifest, fetched again when S3 refuses one of its URLs.
+
+    Presigned URLs are signed with the hub's AWS credentials, which can
+    expire before a long job ends. A fresh manifest has fresh URLs.
+    """
+
+    def __init__(self, config: dict[str, str]) -> None:
+        self.config = config
+        self.lock = threading.Lock()
+        self.data = call(config, "GET", "manifest")
+
+    def __getitem__(self, key: str):
+        return self.data[key]
+
+    def get(self, key: str, default=None):
+        return self.data.get(key, default)
+
+    def put(self, key: str, body: bytes, content_type: str) -> None:
+        """Uploads to the manifest's URL under key, refreshing it once on 403."""
+        url = self.get(key)
+        try:
+            upload(url, body, content_type)
+        except error.HTTPError as exc:
+            if exc.code != 403:
+                raise
+            with self.lock:
+                if self.get(key) == url:  # another thread may have refreshed it
+                    self.data = call(self.config, "GET", "manifest")
+            upload(self.get(key), body, content_type)
+
+
+def read_step(folder: Path) -> int | None:
+    """The training step in checkpoint/idlecloud.json, if the program wrote one."""
+    try:
+        step = json.loads((folder / STEP_FILE).read_text()).get("step")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return step if isinstance(step, int) and step >= 0 else None
+
+
 class Checkpoints:
     """
     Keeps a copy's checkpoint folder in an attempt-specific S3 archive.
 
     save() uploads the folder only when it changed since the last upload, so
-    an idle folder costs nothing. A failed upload is logged and tried again on
-    the next save; the last good upload stays in S3, because a PUT replaces an
-    object whole or not at all.
+    an idle folder costs nothing, then reports the upload to the coordinator.
+    A failed upload is logged and tried again on the next save; the last good
+    upload stays in S3, because a PUT replaces an object whole or not at all.
     """
 
-    def __init__(self, folder: Path, manifest: dict, log: Log) -> None:
+    def __init__(
+        self,
+        folder: Path,
+        manifest: Manifest,
+        log: Log,
+        config: dict[str, str] | None = None,
+    ) -> None:
         self.folder = folder
+        self.manifest = manifest
         self.get_urls = manifest.get("checkpoint_archive_get_urls", [])
         # a coordinator from before checkpoints sends no URL: then nothing is kept
-        self.put_url = manifest.get("checkpoint_archive_put_url")
+        self.enabled = bool(manifest.get("checkpoint_archive_put_url"))
+        self.max_bytes = manifest.get("checkpoint_max_bytes") or MAX_CHECKPOINT_BYTES
+        self.config = config
         self.log = log
         self.saved = self.state()  # nothing to upload until the folder changes
         self.lock = threading.Lock()
+        self.report_failed = False  # note a failing /checkpoint report only once
 
     def state(self) -> list[tuple[str, int, int, int, int]]:
         """Paths and metadata, including atomic replacements of equal-size files."""
@@ -377,17 +439,17 @@ class Checkpoints:
 
     def save(self, cancel: threading.Event | None = None) -> None:
         with self.lock:
-            if not self.put_url or (cancel is not None and cancel.is_set()):
+            if not self.enabled or (cancel is not None and cancel.is_set()):
                 return
             try:
                 now = self.state()
                 if now == self.saved:
                     return
                 size = folder_size(self.folder)
-                if size > MAX_CHECKPOINT_BYTES:
+                if size > self.max_bytes:
                     self.log.note(
                         f"The checkpoint folder holds {size} bytes, more than the "
-                        f"{MAX_CHECKPOINT_BYTES} allowed, so it was not saved."
+                        f"{self.max_bytes} allowed, so it was not saved."
                     )
                     self.saved = now  # don't repeat the note until it changes
                     return
@@ -399,12 +461,39 @@ class Checkpoints:
                 # otherwise produce a valid archive containing truncated state.
                 if self.state() != now or (cancel is not None and cancel.is_set()):
                     return
-                upload(self.put_url, buffer.getvalue(), "application/gzip")
+                archive = buffer.getvalue()
+                self.manifest.put(
+                    "checkpoint_archive_put_url", archive, "application/gzip"
+                )
             except (OSError, tarfile.TarError) as exc:
                 if cancel is None or not cancel.is_set():
                     self.log.note(f"Couldn't save the checkpoint folder: {exc}")
                 return
             self.saved = now
+            self.report(archive)
+
+    def report(self, archive: bytes) -> None:
+        """Tells the coordinator about an upload. Best effort: S3 holds it anyway."""
+        if self.config is None:
+            return
+        try:
+            call(
+                self.config,
+                "POST",
+                "checkpoint",
+                {
+                    "attempt": self.manifest["attempt"],
+                    "sha256": hashlib.sha256(archive).hexdigest(),
+                    "bytes": len(archive),
+                    "step": read_step(self.folder),
+                },
+                timeout=EVICTION_REPORT_TIMEOUT_SECONDS,
+                attempts=1,
+            )
+        except OSError as exc:
+            if not self.report_failed:
+                self.report_failed = True
+                print(f"Couldn't report the checkpoint: {exc}", file=sys.stderr)
 
     def save_every(self, interval: float, done: threading.Event) -> None:
         """Saves every interval seconds until done is set."""
@@ -428,15 +517,17 @@ def save_before_eviction(checkpoints: Checkpoints, deadline: float) -> None:
         )
 
 
-def report(config: dict[str, str], manifest: dict, archive: bytes, code: int) -> None:
+def report(
+    config: dict[str, str], manifest: Manifest, archive: bytes, code: int
+) -> None:
     """Uploads output.tar.gz and result.json, then reports result.json's hash."""
-    upload(manifest["output_archive_url"], archive, "application/gzip")
+    manifest.put("output_archive_url", archive, "application/gzip")
     result = json.dumps(
         {"archive_sha256": hashlib.sha256(archive).hexdigest(), "exit_code": code},
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
-    upload(manifest["output_upload_url"], result, "application/json")
+    manifest.put("output_upload_url", result, "application/json")
     call(
         config,
         "POST",
@@ -458,14 +549,14 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, stop)
 
-    manifest = call(config, "GET", "manifest")
+    manifest = Manifest(config)
     log = Log()
     with tempfile.TemporaryDirectory(prefix="job-") as folder:
         work = Path(folder)
         output = work / OUTPUT_NAME
         output.mkdir()
         (work / CHECKPOINT_NAME).mkdir()
-        checkpoints = Checkpoints(work / CHECKPOINT_NAME, manifest, log)
+        checkpoints = Checkpoints(work / CHECKPOINT_NAME, manifest, log, config)
         try:
             command, names = check_input(manifest["input"])
             download_inputs(manifest, names, work)

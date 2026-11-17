@@ -229,3 +229,68 @@ async def cancel_job(session: AsyncSession, job_id: uuid.UUID) -> list[tuple[int
         .values(status=JobStatus.CANCELLED, finished_at=now)
     )
     return [(replica_id, attempt) for replica_id, attempt in result.all()]
+
+
+async def expire_old_jobs(session: AsyncSession, now: datetime) -> list[uuid.UUID]:
+    """
+    Fails unfinished jobs older than their job type's max_age_hours, in the
+    caller's transaction, and returns their ids.
+
+    Owner evictions don't use up a copy's retries, so without a limit a job
+    that keeps losing its PC could wait for ever. Like a failed vote, the job's
+    unfinished copies become CANCELLED without their tokens (housekeeping
+    deletes their Pods) and its unfinished tasks FAILED.
+
+    args:
+        session: Housekeeping's transaction.
+        now: The current time.
+    """
+    expired = (
+        await session.scalars(
+            select(Job)
+            .join(JobType, Job.job_type == JobType.name)
+            .where(
+                Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
+                JobType.max_age_hours.is_not(None),
+                Job.created_at
+                < now - func.make_interval(0, 0, 0, 0, JobType.max_age_hours),
+            )
+            .with_for_update(of=Job, skip_locked=True)
+        )
+    ).all()
+    for job in expired:
+        tasks = select(Task.id).where(Task.job_id == job.id)
+        await session.execute(
+            update(Replica)
+            .where(
+                Replica.task_id.in_(tasks),
+                Replica.status.in_(
+                    [
+                        ReplicaStatus.SCHEDULED,
+                        ReplicaStatus.RUNNING,
+                        ReplicaStatus.EVICTED,
+                        ReplicaStatus.LOST,
+                    ]
+                ),
+            )
+            .values(status=ReplicaStatus.CANCELLED, token_hash=None, ended_at=now)
+        )
+        await session.execute(
+            update(Task)
+            .where(
+                Task.job_id == job.id,
+                Task.status.in_(
+                    [
+                        TaskStatus.PENDING,
+                        TaskStatus.RUNNING,
+                        TaskStatus.VOTING,
+                        TaskStatus.DISPUTED,
+                    ]
+                ),
+            )
+            .values(status=TaskStatus.FAILED)
+        )
+        job.status = JobStatus.FAILED
+        job.finished_at = now
+    await session.flush()
+    return [job.id for job in expired]

@@ -155,17 +155,34 @@ class Manifest(BaseModel):
     task_index: int
     input: dict[str, Any]
     input_urls: dict[str, str]  # name -> presigned GET URL
-    output_upload_url: str  # presigned PUT for result.json
+    # presigned PUT for result.json. Like output.tar.gz it is per attempt
+    # (attempts/{n}/), so an old attempt's late upload can't replace the
+    # result a newer one reported.
+    output_upload_url: str
     # presigned PUT for output.tar.gz: what a generic job (worker/runner) returns
     # to its owner. Workers that only report result.json, like OCR, ignore it.
     output_archive_url: str
     # Generic checkpoints are separate per attempt, so an old copy's late PUT
-    # cannot overwrite a newer copy's progress. Try earlier attempts newest first.
+    # cannot overwrite a newer copy's progress. Try them in this order: the one
+    # last reported to /checkpoint first, then the other earlier attempts,
+    # newest first.
     checkpoint_archive_get_urls: list[str]
     checkpoint_archive_put_url: str
     checkpoint_get_url: str | None  # None on first attempt
     checkpoint_put_url: str
     attempt: int
+    # The most the runner uploads from the checkpoint folder (job type's cap)
+    checkpoint_max_bytes: int = 100 * 1024 * 1024
+
+
+class CheckpointIn(BaseModel):
+    """A checkpoint archive the runner has just uploaded."""
+
+    attempt: int = Field(ge=1)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bytes: int = Field(ge=0)
+    # the training step the script wrote next to its state, if it did
+    step: int | None = Field(default=None, ge=0)
 
 
 class ProgressIn(BaseModel):

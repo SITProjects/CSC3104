@@ -42,6 +42,35 @@ progress to `$CHECKPOINT_DIR` by time, not only at the end of an epoch, and
 loads it at start. The runner uploads that folder when it changes (checked
 every 60 s); a moved job restarts from the last upload.
 
+The image has a small helper for this, `idlecloud_ckpt`. It writes the state
+whole (a new file, then a rename), saves by time, and records the step, which
+the job page shows as "saved 4 min ago, step 1200". `load()` maps the state to
+this node's device, so a job can carry on on a different GPU:
+
+```python
+from idlecloud_ckpt import Checkpointer
+
+ckpt = Checkpointer(every_seconds=300)
+state = ckpt.load()
+if state:
+    model.load_state_dict(state["model"])
+    optimizer.load_state_dict(state["optimizer"])
+    step = state["step"]
+...
+if ckpt.due():
+    ckpt.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "step": step,
+        },
+        step=step,
+    )
+```
+
+The checkpoint folder may hold up to 500 MB. A job still unfinished 24 hours
+after it was submitted fails, however often it was moved.
+
 `examples/train_gpu.py` shows the pattern: a small convolutional digits
 classifier that saves the model, optimizer, position in the epoch and random
 state every `--save-seconds`, and stops with an error if there is no GPU.

@@ -334,6 +334,20 @@ class JobType(Base):
         nullable=True,
     )
 
+    # The most the runner uploads from a copy's checkpoint folder, in MiB, and
+    # how old an unfinished job may get before it fails (None: no limit).
+    # Migration 016.
+    checkpoint_max_mib: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("100"),
+    )
+
+    max_age_hours: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
     jobs: Mapped[list["Job"]] = relationship(
         back_populates="job_type_obj",
     )
@@ -359,6 +373,14 @@ class JobType(Base):
         CheckConstraint(
             "NOT gpu OR position('@' IN image) = 0",
             name="job_types_gpu_image_tag_check",
+        ),
+        CheckConstraint(
+            "checkpoint_max_mib BETWEEN 1 AND 2048",
+            name="job_types_checkpoint_max_mib_check",
+        ),
+        CheckConstraint(
+            "max_age_hours IS NULL OR max_age_hours > 0",
+            name="job_types_max_age_hours_check",
         ),
     )
 
@@ -620,6 +642,31 @@ class Replica(Base):
         nullable=True,
     )
 
+    # Failures that weren't owner evictions (lost node, launch error, no GPU);
+    # the copy fails at RETRY_ATTEMPTS. Migration 016.
+    failures: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
+
+    # Nodes this copy must not use again, such as one without a working GPU
+    bad_nodes: Mapped[list[str]] = mapped_column(
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'"),
+    )
+
+    # The newest checkpoint archive the runner published and reported
+    checkpoint_attempt: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    checkpoint_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    checkpoint_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    checkpoint_step: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    checkpoint_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+
     task: Mapped["Task"] = relationship(
         back_populates="replicas",
     )
@@ -763,6 +810,9 @@ class ReplicaView(BaseModel):
     attempt: int
     progress: int
     result_hash: str | None
+    # The newest saved checkpoint, for "last saved" on the job page
+    checkpoint_step: int | None = None
+    checkpoint_at: datetime | None = None
 
 
 class TaskView(BaseModel):

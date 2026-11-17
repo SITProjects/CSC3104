@@ -6,11 +6,12 @@ from datetime import UTC, datetime
 from kubernetes.client import BatchV1Api
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from core.settings import BATCH_SIZE, RETRY_ATTEMPTS, SCHEDULER_INTERVAL
+from core.settings import BATCH_SIZE, SCHEDULER_INTERVAL
 from services.coordinator.crud import (
     fetch_scheduled_replicas,
     mark_job_running,
     mark_task_running,
+    out_of_retries,
     recover_replicas,
     schedule_replica,
     set_voting,
@@ -45,14 +46,19 @@ async def launch_batch(
                 job_type,
                 token,
                 coordinator_url,
-                avoid_nodes=await sibling_nodes(session, replica),
+                # other copies' nodes, so the vote is between different PCs,
+                # and nodes where this copy found no working GPU
+                avoid_nodes=sorted(
+                    {*await sibling_nodes(session, replica), *replica.bad_nodes}
+                ),
             )
             try:
                 # BatchV1Api is blocking, so keep it off the event loop
                 await create_job(job_manifest, k3_api)
             except Exception:  # noqa: BLE001
                 log.error(f"Failed to create K8s job for replica {replica.id}")
-                if replica.attempt >= RETRY_ATTEMPTS:
+                replica.failures += 1
+                if out_of_retries(replica):
                     replica.status = ReplicaStatus.FAILED
                     replica.token_hash = None
                     replica.ended_at = datetime.now(UTC)
