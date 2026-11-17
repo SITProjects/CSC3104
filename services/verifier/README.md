@@ -49,6 +49,29 @@ the task if it didn't, without more copies or trust changes
 coordinator first. The coordinator refuses such a job if it asks for more than
 one copy per task.
 
+## Scoring trained models
+
+A job type with a `check_image` (`pytorch-gpu`, migration 017) whose task has
+an `eval_file` is not accepted on the exit code alone (`model_check.py`). Once
+training succeeded, the verifier adds a check copy (`replicas.check_of` set to
+the training copy) and sets the task to SCORING. The coordinator runs it with
+the checker image on a node labelled `idlecloud/checker=true`
+(`k8s.build_check_job_manifest`); it reports to `POST /internal/replicas/{id}/check`,
+and the task comes back to VOTING.
+
+- A check that reported (scored, or not scored with a reason) makes the task
+  VERIFIED with the training copy's hash, and records `task_scored` or
+  `task_not_scored`.
+- A check that crashed, timed out or lost its node is replaced, up to
+  `CHECK_ATTEMPTS` (3). After that the task is VERIFIED as not scored
+  (`checker_failed`): a checker failure is never the owner's.
+- A check copy that can't be placed waits: housekeeping doesn't fail it, and
+  a job waiting only for its score doesn't expire. The job page shows
+  "Awaiting score".
+- The score is a result, not a vote. No PC's trust changes, however low it is.
+- Check copies are not counted as votes or copies anywhere else in the
+  verifier.
+
 ## Ending jobs
 
 - OCR jobs are completed by `output.py` once every task is verified and the

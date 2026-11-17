@@ -141,3 +141,27 @@ is not failed for being evicted (migration 016):
   carry the last save's time and step so lost work can be measured.
 - `checkpoint_max_bytes` in the manifest is the job type's `checkpoint_max_mib`
   (100, or 500 for `pytorch-gpu`).
+
+## Check copies: scoring trained models
+
+A check copy (`replicas.check_of`, migration 017) scores the model of a
+finished training copy. The verifier creates it (`services/verifier/README.md`);
+the coordinator:
+
+- launches it with `k8s.build_check_job_manifest`: the job type's
+  `check_image`, 1 core, 1 GiB, 10 minutes, only on nodes labelled
+  `idlecloud/checker=true` (`infra/k8s/deploy.sh` labels the hub), with none of
+  the GPU or sibling rules;
+- gives its manifest a `check` section: presigned GETs for the training
+  attempt's `result.json` and `output.tar.gz`, the hash the training copy
+  reported for `result.json`, and the task's `eval_file` (stored by the web app
+  at `jobs/{job}/eval/eval.npz`, which the training copy is never given);
+- takes its outcome on `POST /internal/replicas/{id}/check` (`CheckIn`): the
+  status, top-1 accuracy, sample count, model and evaluation file digests,
+  evaluator version, or the reason it wasn't scored. A check copy can't use
+  `/result`, and a training copy can't use `/check`;
+- never fails it for waiting on a checker node (`fail_unplaced`), and never
+  expires a job whose only unfinished task is SCORING.
+
+`jobs.min_score` (0 to 1, from the web form's target accuracy) is only shown on
+the job page as met or not met.

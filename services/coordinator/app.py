@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import os
 from contextlib import asynccontextmanager, suppress
@@ -52,6 +53,7 @@ from services.coordinator.crud import (
     list_nodes,
     list_users,
     mark_replica_done,
+    record_check,
     record_checkpoint,
     requeue_without_gpu,
     set_voting,
@@ -70,7 +72,9 @@ from services.coordinator.models import (
     AddTasksIn,
     AddTasksResponse,
     CapacityOut,
+    CheckIn,
     CheckpointIn,
+    CheckSource,
     CreateJobResponse,
     Credentials,
     HeartbeatIn,
@@ -307,6 +311,30 @@ async def get_replica_manifest(
             "put_object", f"{attempt_prefix}/checkpoint.tar.gz", ttl
         ),
         checkpoint_max_bytes=job_type.checkpoint_max_mib * 1024 * 1024,
+        check=await check_source(session, replica, task, ttl)
+        if replica.check_of is not None
+        else None,
+    )
+
+
+async def check_source(
+    session: AsyncSession, replica: Replica, task: Task, ttl: int
+) -> CheckSource:
+    """
+    What a check copy scores: the files of the training copy's attempt that
+    reported the result, and the task's evaluation file.
+    """
+    trained = await session.get(Replica, replica.check_of)
+    eval_file = task.input.get("eval_file")
+    if trained is None or trained.result_hash is None or not eval_file:
+        raise HTTPException(409, f"replica {replica.id} has nothing to check")
+    done = f"jobs/{task.job_id}/replicas/{trained.id}/attempts/{trained.attempt}"
+    return CheckSource(
+        trained_replica_id=trained.id,
+        result_url=presign("get_object", f"{done}/result.json", ttl),
+        result_sha256=trained.result_hash,
+        archive_url=presign("get_object", f"{done}/output.tar.gz", ttl),
+        eval_url=presign("get_object", f"jobs/{task.job_id}/{eval_file}", ttl),
     )
 
 
@@ -386,6 +414,43 @@ async def report_checkpoint(
     return Ack()
 
 
+@app.post("/internal/replicas/{id}/check")
+async def report_check(
+    id: int,
+    body: CheckIn,
+    session: DbSession,
+    authorization: str | None = Header(None),
+) -> Ack:
+    """
+    Records a check copy's score, or why the model couldn't be scored, and
+    lets the verifier finish the task. A checker that crashes reports nothing;
+    its Pod fails and the verifier starts another check.
+
+    args:
+        id: The id of the check copy.
+        body: The outcome.
+        session: The database session for this request.
+        authorization: The value of the Authorization header, "Bearer <REPLICA_TOKEN>".
+    returns:
+        Ack: An acknowledgment of the report.
+    raises:
+        HTTPException: 409 if the replica isn't a RUNNING check copy.
+    """
+    async with session.begin():
+        replica, task, _ = await require_token(session, id, authorization, True)
+        if replica.check_of is None or replica.status != ReplicaStatus.RUNNING:
+            raise HTTPException(
+                409, f"replica {id} is not a running check, cannot report a check"
+            )
+        outcome = body.model_dump()
+        result_hash = hashlib.sha256(
+            json.dumps(outcome, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        await record_check(session, replica, task, outcome, result_hash)
+        await set_voting(session, task)
+    return Ack()
+
+
 @app.post("/internal/replicas/{id}/result")
 async def report_result(
     id: int,
@@ -406,7 +471,8 @@ async def report_result(
     """
     async with session.begin():
         replica, task, job_type = await require_token(session, id, authorization, True)
-        if replica.status != ReplicaStatus.RUNNING:
+        # a check copy reports to /check
+        if replica.status != ReplicaStatus.RUNNING or replica.check_of is not None:
             raise HTTPException(
                 409,
                 f"replica {id} status is {replica.status.value}, cannot report result",

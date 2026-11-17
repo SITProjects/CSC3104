@@ -23,6 +23,7 @@ UNFINISHED_TASKS = (
     TaskStatus.RUNNING,
     TaskStatus.VOTING,
     TaskStatus.DISPUTED,
+    TaskStatus.SCORING,
 )
 
 

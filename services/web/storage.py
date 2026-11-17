@@ -37,6 +37,15 @@ def input_file_key(job_id: UUID, name: str) -> str:
     return f"jobs/{job_id}/inputs/{name}"
 
 
+# A scored job's evaluation file, under jobs/{id}/. Only the platform's checker
+# reads it (worker/model-check); the training PC isn't given it.
+EVAL_FILE = "eval/eval.npz"
+
+
+def eval_file_key(job_id: UUID) -> str:
+    return f"jobs/{job_id}/{EVAL_FILE}"
+
+
 def replica_keys(job_id: UUID, replica_id: int, attempt: int, name: str) -> list[str]:
     """
     Where a copy's result.json or output.tar.gz may be, newest layout first.

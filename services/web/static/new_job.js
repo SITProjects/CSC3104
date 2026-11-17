@@ -44,6 +44,11 @@
       field.disabled = commandSection.hidden;
     }
     $("command").required = !commandSection.hidden;
+    const scoring = $("scoring-section");
+    scoring.hidden = type.scored !== "true";
+    for (const field of scoring.querySelectorAll("input")) {
+      field.disabled = scoring.hidden;
+    }
     resources.hidden = type.customResources !== "true";
     for (const field of resources.querySelectorAll("input")) {
       field.disabled = resources.hidden;

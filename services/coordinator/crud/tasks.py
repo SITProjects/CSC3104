@@ -125,5 +125,9 @@ async def set_voting(session: AsyncSession, task: Task):
         )
     )
 
-    if not unfinished and task.status in [TaskStatus.DISPUTED, TaskStatus.RUNNING]:
+    if not unfinished and task.status in [
+        TaskStatus.DISPUTED,
+        TaskStatus.RUNNING,
+        TaskStatus.SCORING,
+    ]:
         task.status = TaskStatus.VOTING

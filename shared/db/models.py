@@ -64,6 +64,8 @@ class TaskStatus(str, Enum):
     DISPUTED = "DISPUTED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    # a check copy is scoring the trained model (migration 017)
+    SCORING = "SCORING"
 
 
 class ReplicaStatus(str, Enum):
@@ -279,6 +281,13 @@ class JobType(Base):
         nullable=False,
     )
 
+    # The image that scores this type's trained models on a checker node, or
+    # None if they aren't scored (migration 017)
+    check_image: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
     command: Mapped[list[str] | None] = mapped_column(
         ARRAY(Text),
         nullable=True,
@@ -448,6 +457,13 @@ class Job(Base):
         nullable=True,
     )
 
+    # The accuracy (0 to 1) the owner wants from the scored model. Shown as met
+    # or not met; it never changes the job's outcome (migration 017).
+    min_score: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
     job_type_obj: Mapped["JobType"] = relationship(
         back_populates="jobs",
     )
@@ -470,6 +486,10 @@ class Job(Base):
         CheckConstraint(
             "replicas_per_task BETWEEN 1 AND 5",
             name="jobs_replicas_per_task_check",
+        ),
+        CheckConstraint(
+            "min_score IS NULL OR (min_score >= 0 AND min_score <= 1)",
+            name="jobs_min_score_check",
         ),
         Index(
             "jobs_files_to_delete_idx",
@@ -667,6 +687,22 @@ class Replica(Base):
         nullable=True,
     )
 
+    # A check copy scores the model of the training copy check_of, on a
+    # checker node (migration 017). Its outcome: 'scored' with the top-1
+    # accuracy on check_samples samples, or 'not_scored' with check_reason.
+    check_of: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("replicas.id"),
+        nullable=True,
+    )
+    check_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    check_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    check_samples: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    check_model_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    check_eval_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    check_evaluator: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    check_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     task: Mapped["Task"] = relationship(
         back_populates="replicas",
     )
@@ -683,6 +719,20 @@ class Replica(Base):
         CheckConstraint(
             "progress BETWEEN 0 AND 100",
             name="replicas_progress_check",
+        ),
+        CheckConstraint(
+            "check_status IS NULL OR (check_of IS NOT NULL"
+            " AND check_status IN ('scored', 'not_scored'))",
+            name="replicas_check_status_check",
+        ),
+        CheckConstraint(
+            "check_score IS NULL OR (check_score >= 0 AND check_score <= 1)",
+            name="replicas_check_score_check",
+        ),
+        Index(
+            "replicas_check_of_idx",
+            "check_of",
+            postgresql_where=text("check_of IS NOT NULL"),
         ),
         Index(
             "replicas_task_idx",
@@ -813,6 +863,14 @@ class ReplicaView(BaseModel):
     # The newest saved checkpoint, for "last saved" on the job page
     checkpoint_step: int | None = None
     checkpoint_at: datetime | None = None
+    # Set on a check copy: the training copy it scored and how that went
+    check_of: int | None = None
+    check_status: str | None = None
+    check_score: float | None = None
+    check_samples: int | None = None
+    check_model_sha256: str | None = None
+    check_eval_sha256: str | None = None
+    check_reason: str | None = None
 
 
 class TaskView(BaseModel):
@@ -870,6 +928,7 @@ class JobView(BaseModel):
     status: JobStatus
     progress: int = 0  # 0-100, average over tasks
     files_deleted_at: datetime | None = None
+    min_score: float | None = None
     # All the tasks the job will have; tasks can be fewer while more are added
     task_count: int
     tasks: list[TaskView]

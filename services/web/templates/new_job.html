@@ -28,6 +28,7 @@
         <option value="{{ t.name }}" data-needs-pdf="{{ 'true' if t.needs_pdf else 'false' }}"
                 data-custom-resources="{{ 'true' if t.custom_resources else 'false' }}"
                 data-runs-command="{{ 'true' if t.runs_command else 'false' }}"
+                data-scored="{{ 'true' if t.name in scored_types else 'false' }}"
                 data-example="{{ t.example }}"
                 data-description="{{ t.description }}" data-cpu="{{ t.default_cpu }}" data-mem="{{ t.default_mem }}"
                 {% if chosen and chosen.name == t.name %}selected{% endif %}>{{ t.label }}</option>
@@ -64,6 +65,28 @@
         <p id="inputs-hint">Your script and its data: up to {{ max_input_files }} files and {{ max_mb }} MB in all.</p>
       </div>
     </div>
+
+    {# GPU training: the platform scores the returned model (worker/model-check). #}
+    {% set scored = chosen and chosen.name in scored_types %}
+    <fieldset id="scoring-section" class="fieldset" {% if not scored %}hidden{% endif %}>
+      <legend>Score the model <span class="font-normal text-muted-foreground">(optional)</span></legend>
+      <p>Save the trained model as <code>output/model.onnx</code> (one float input, class logits out). After training, the platform measures its top-1 accuracy on your evaluation file on its own machine, not on the PC that trained it.</p>
+      <div class="grid gap-4 sm:grid-cols-2">
+        <div role="group" class="field">
+          <label class="label" for="eval_file">Evaluation file</label>
+          <input class="input" id="eval_file" type="file" name="eval_file" accept=".npz" aria-describedby="eval-hint"
+                 {% if not scored %}disabled{% endif %}>
+          <p id="eval-hint">An <code>.npz</code> with <code>x</code> (samples) and <code>y</code> (integer labels), up to {{ max_eval_samples }} samples.</p>
+        </div>
+        <div role="group" class="field">
+          <label class="label" for="min_accuracy">Target accuracy (%)</label>
+          <input class="input" id="min_accuracy" type="number" name="min_accuracy" inputmode="decimal" step="0.1"
+                 min="0" max="100" value="{{ form.min_accuracy or '' }}" aria-describedby="min-accuracy-hint"
+                 {% if not scored %}disabled{% endif %}>
+          <p id="min-accuracy-hint">Optional. The job page says whether the score met it.</p>
+        </div>
+      </div>
+    </fieldset>
 
     {# Only for job types that let users choose; the others always use their defaults. #}
     {% set custom = chosen and chosen.custom_resources %}

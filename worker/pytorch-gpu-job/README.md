@@ -81,3 +81,37 @@ python train_gpu.py --epochs 40 --save-seconds 30
 
 Its log starts with `cuda: True` and the GPU's name; `metrics.json` in the
 download shows where a resumed run carried on from.
+
+## Getting the model scored
+
+If the job has an evaluation file (the "Score the model" fields on the New job
+page), the platform scores the trained model after training, on its own
+checker (`worker/model-check`), not on the PC that trained it. For that, save
+the model as `output/model.onnx` with one float input and class logits out:
+
+```python
+torch.onnx.export(
+    model.cpu().eval(),
+    (example_batch.cpu(),),
+    os.path.join(os.environ["OUTPUT_DIR"], "model.onnx"),
+    input_names=["x"],
+    output_names=["logits"],
+    dynamo=True,
+    external_data=False,  # one file: the checker reads only model.onnx
+    dynamic_shapes=({0: torch.export.Dim("batch")},),
+)
+```
+
+The image has `onnx` and `onnxscript` for this. The evaluation file is an
+`.npz` with `x` (samples, in the shape the model takes) and `y` (integer
+labels), at most 10,000 samples. The job page then shows the top-1 accuracy,
+the sample count, the model's SHA-256 and, if you set one, whether the target
+accuracy was met. A model that can't be exported is still returned; the job is
+just "not scored", with the reason.
+
+Examples:
+
+- `examples/train_gpu.py` exports `model.onnx` at the end.
+  `examples/make_eval_digits.py` writes its `eval.npz` (the digits it held out).
+- `examples/random_model.py` is a test fixture: random weights and a log that
+  claims 99.9%. The platform's score is about 10%, and no PC's trust changes.
