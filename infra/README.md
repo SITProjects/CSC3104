@@ -133,6 +133,30 @@ changing a GPU, or its toolkit. Workers that joined before this setup only
 have K3s's own `nvidia` handler, so they must run the script again before
 they can start GPU copies.
 
+**Windows workers (WSL2):** `agent/install-worker.ps1` runs this script
+inside WSL, where the GPU is the Windows driver's. It has no `/dev/nvidia*`
+or `/dev/kfd`, only `/dev/dxg` and the driver's libraries in `/usr/lib/wsl`.
+So under WSL, the script does this instead:
+
+- **NVIDIA:** finds the GPU through `/usr/lib/wsl/lib/nvidia-smi`.
+- **AMD:** takes the GPU from `IDLECLOUD_WSL_GPU=amd` and
+  `IDLECLOUD_WSL_GPU_VRAM_GIB`, which `install-worker.ps1` sets after
+  checking the Windows display adapters. APUs are skipped by PCI device ID.
+- **Runtime:** points `idlecloud-gpu` at
+  `/usr/local/lib/idlecloud/wsl-gpu-runtime`, for both vendors. That's a
+  wrapper around runc. When a container is created, it adds `/dev/dxg` (mode
+  0666), mounts `/usr/lib/wsl` read-only, and puts `/usr/lib/wsl/lib` first in
+  `LD_LIBRARY_PATH`. Docker Desktop and the NVIDIA toolkit do the same under
+  WSL. The CUDA build of PyTorch then finds the driver's `libcuda`. The ROCm
+  image carries AMD's `librocdxg`, which ROCm uses in place of `/dev/kfd`.
+  No vendor container toolkit is needed, and `jq` is installed for the
+  wrapper.
+- **AMD image rewrite:** same as on Linux. There's no udev rule.
+
+ROCm under WSL only works on the Radeon cards AMD lists for it, mostly RX 7000
+and 9000. A copy on an unsupported card ends with exit code 69 and moves to
+another node.
+
 Checks on a GPU worker:
 
 ```sh

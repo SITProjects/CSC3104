@@ -9,7 +9,11 @@ Turns this Windows PC into an IdleCloud worker in one step.
 3. Installs the node agent in Ubuntu as a systemd service, so it starts at
    boot and is restarted if it stops.
 4. Runs infra/join-worker.sh inside Ubuntu to join the cluster over WireGuard,
-   then starts the sensor and WSL tasks.
+   then starts the sensor and WSL tasks. A PC with a discrete NVIDIA GPU, or
+   an AMD one ROCm supports under WSL, joins as a GPU worker (infra/README.md,
+   "GPU workers"). WSL can't tell which AMD GPU Windows has, so this script
+   finds it and passes it on. -GpuVendor nvidia|amd|none picks one, or none;
+   -AllowIntegratedGpu accepts an AMD APU, for testing only.
 
 The easiest way: download the PC's setup zip from the admin pages (Workers,
 Add worker) and pass it with -Bundle. It holds the node name, wg0.conf, the
@@ -48,7 +52,12 @@ param(
     [Parameter(ParameterSetName = 'Files')]
     [Parameter(ParameterSetName = 'Bundle')] [string] $SensorExe,
     [Parameter(ParameterSetName = 'Files')]
-    [Parameter(ParameterSetName = 'Bundle')] [switch] $Rejoin
+    [Parameter(ParameterSetName = 'Bundle')] [switch] $Rejoin,
+    [Parameter(ParameterSetName = 'Files')]
+    [Parameter(ParameterSetName = 'Bundle')]
+    [ValidateSet('auto', 'nvidia', 'amd', 'none')] [string] $GpuVendor = 'auto',
+    [Parameter(ParameterSetName = 'Files')]
+    [Parameter(ParameterSetName = 'Bundle')] [switch] $AllowIntegratedGpu
 )
 
 $ErrorActionPreference = 'Stop'
@@ -117,6 +126,50 @@ function Read-Zip([string] $Path) {
     } finally {
         $zip.Dispose()
     }
+}
+
+# PCI device IDs of AMD APUs' integrated graphics, which never make a GPU
+# worker: Raven/Picasso (15DD, 15D8), Renoir/Cezanne/Lucienne/Barcelo (1636,
+# 1638, 164C, 15E7), Van Gogh (163F), Rembrandt (1681), Raphael/Granite Ridge
+# (164E, 13C0), Mendocino (1506), Phoenix/Hawk Point (15BF, 15C8, 1900, 1901),
+# Strix Point (150E), Strix Halo (1586), Krackan (1114), Carrizo (9874),
+# Stoney (98E4). infra/join-worker.sh skips the same chips on Linux.
+$AmdApuDeviceIds = @('15DD', '15D8', '1636', '1638', '164C', '15E7', '163F', '1681',
+    '164E', '13C0', '1506', '15BF', '15C8', '1900', '1901', '150E', '1586', '1114',
+    '9874', '98E4')
+
+function Get-AmdGpu {
+    # The discrete AMD GPU with the most memory, as @{ Name; Gib }, or $null.
+    # Memory comes from the display driver's registry key, because
+    # Win32_VideoController.AdapterRAM stops at 4 GB.
+    $present = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
+        ForEach-Object { if ($_.PNPDeviceID -match 'VEN_1002&DEV_([0-9A-F]{4})') { $Matches[1].ToUpper() } })
+    $class = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
+    $best = $null
+    foreach ($key in (Get-ChildItem $class -ErrorAction SilentlyContinue)) {
+        $props = Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue
+        if (-not $props -or "$($props.MatchingDeviceId)" -notmatch 'ven_1002&dev_([0-9a-f]{4})') { continue }
+        $device = $Matches[1].ToUpper()
+        if ($present -notcontains $device) { continue }  # a driver key left from an old card
+        $raw = $props.'HardwareInformation.qwMemorySize'
+        if (-not $raw) { $raw = $props.'HardwareInformation.MemorySize' }  # older drivers, 4 GB at most
+        $bytes = 0
+        if ($raw -is [byte[]] -and $raw.Length -ge 8) { $bytes = [BitConverter]::ToUInt64($raw, 0) }
+        elseif ($raw -is [byte[]] -and $raw.Length -ge 4) { $bytes = [BitConverter]::ToUInt32($raw, 0) }
+        elseif ($raw -is [int]) { $bytes = [int64]$raw -band 0xFFFFFFFFL }  # a DWORD over 2 GB reads as negative
+        elseif ($raw) { $bytes = [int64]$raw }
+        $gib = [int][Math]::Floor($bytes / 1GB)
+        # an APU's own memory is a small carve-out; under 2 GB it is no dGPU
+        if (($AmdApuDeviceIds -contains $device) -or $gib -lt 2) {
+            if (-not $AllowIntegratedGpu) {
+                Write-Host "Integrated AMD GPU ($($props.DriverDesc), $device): not a GPU worker for it."
+                continue
+            }
+            Write-Host "Integrated AMD GPU ($($props.DriverDesc)) accepted (-AllowIntegratedGpu)."
+        }
+        if (-not $best -or $gib -gt $best.Gib) { $best = @{ Name = "$($props.DriverDesc)"; Gib = $gib } }
+    }
+    $best
 }
 
 $distros = (& wsl.exe -l -q) | ForEach-Object { ($_ -replace "`0", '').Trim() }
@@ -261,7 +314,17 @@ if ((Get-WslOutput systemctl is-active k3s-agent) -eq 'active' -and -not $Rejoin
             Copy-ToStage $WgConfig 'wg0.conf'
             Copy-ToStage $TokenFile 'agent-token'
         }
-        Invoke-Wsl bash "$Stage/join-worker.sh" $NodeName "$Stage/wg0.conf" "$Stage/agent-token"
+        # GPU settings for join-worker.sh, through env since sudo isn't involved
+        $gpuEnv = @("IDLECLOUD_GPU_VENDOR=$GpuVendor")
+        if ($AllowIntegratedGpu) { $gpuEnv += 'IDLECLOUD_ALLOW_INTEGRATED_GPU=1' }
+        if ($GpuVendor -in 'auto', 'amd') {
+            $amd = Get-AmdGpu
+            if ($amd) {
+                Write-Host "AMD GPU found: $($amd.Name), $($amd.Gib) GB."
+                $gpuEnv += 'IDLECLOUD_WSL_GPU=amd', "IDLECLOUD_WSL_GPU_VRAM_GIB=$($amd.Gib)"
+            }
+        }
+        Invoke-Wsl env @gpuEnv bash "$Stage/join-worker.sh" $NodeName "$Stage/wg0.conf" "$Stage/agent-token"
     } finally {
         # The stage holds the WireGuard private key and join token.
         & wsl.exe -d $Distro -u root --exec rm -rf $Stage
