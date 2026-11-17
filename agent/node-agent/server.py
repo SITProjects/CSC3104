@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 import config
+import localstop
 import uvicorn
 from decision import IdleDetector, NodeState, Reading, Transition
 from fastapi import FastAPI
@@ -30,6 +31,10 @@ log = logging.getLogger("node-agent")
 detector = IdleDetector(schedule=parse(config.BLOCKED))
 # Set on every state change to wake keep_taint_in_sync
 state_changed = asyncio.Event()
+# Set once the owner-active taint is on the node for the current BUSY spell
+taint_confirmed = asyncio.Event()
+# Set when the detector goes BUSY, to wake stop_locally_if_unconfirmed
+went_busy = asyncio.Event()
 
 
 def record(event: str, **fields) -> None:
@@ -58,6 +63,9 @@ def handle(change: Transition | None) -> None:
     if change is None:
         return
     log.info("%s -> %s (%s)", change.old, change.new, change.reason)
+    if change.new is NodeState.BUSY:
+        taint_confirmed.clear()
+        went_busy.set()
     state_changed.set()
     # The key press came idle_seconds before this line. None when the change
     # came from a silent sensor, not a reading.
@@ -100,6 +108,8 @@ async def keep_taint_in_sync(tainter: NodeTainter) -> None:
                 await asyncio.sleep(config.TAINT_RETRY_S)
                 continue
             applied = wanted
+            if wanted is NodeState.BUSY and detector.state is NodeState.BUSY:
+                taint_confirmed.set()
             if changed:
                 log.info(
                     "%s taint on %s",
@@ -111,6 +121,32 @@ async def keep_taint_in_sync(tainter: NodeTainter) -> None:
             await asyncio.wait_for(state_changed.wait(), config.TAINT_RESYNC_S)
         except TimeoutError:
             applied = None  # check the node again, someone may have edited it
+
+
+async def stop_locally_if_unconfirmed() -> None:
+    """
+    When the owner comes back and the taint isn't on the node within
+    LOCAL_STOP_AFTER_S, most likely because the hub can't be reached, stop the
+    task containers here so the owner gets the PC back anyway. With the taint
+    on, Kubernetes evicts the Pods itself and this does nothing.
+    """
+    while True:
+        await went_busy.wait()
+        went_busy.clear()
+        try:
+            await asyncio.wait_for(taint_confirmed.wait(), config.LOCAL_STOP_AFTER_S)
+            continue
+        except TimeoutError:
+            pass
+        if detector.state is not NodeState.BUSY:
+            continue  # the owner left again
+        log.warning(
+            "taint not confirmed %.0fs after the owner came back: stopping task "
+            "containers locally",
+            config.LOCAL_STOP_AFTER_S,
+        )
+        stopped = await asyncio.to_thread(localstop.stop_task_containers)
+        record("local_stop", containers=stopped)
 
 
 async def taint_on_exit(tainter: NodeTainter) -> None:
@@ -161,6 +197,8 @@ async def lifespan(app: FastAPI):
         tainter = NodeTainter(connect(config.KUBECONFIG), config.NODE_NAME)
         tasks.append(asyncio.create_task(keep_taint_in_sync(tainter)))
         log.info("managing the owner-active taint on node %s", config.NODE_NAME)
+        if config.LOCAL_STOP_ENABLED:
+            tasks.append(asyncio.create_task(stop_locally_if_unconfirmed()))
     else:
         log.warning("NODE_AGENT_TAINT=0: decisions are only logged, node not tainted")
     if config.COORDINATOR_URL:

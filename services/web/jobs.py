@@ -238,6 +238,15 @@ def output_replica(job: dict[str, Any]) -> int | None:
     return max(r["id"] for r in chosen) if chosen else None
 
 
+def replica_attempts(job: dict[str, Any]) -> dict[int, int]:
+    """Each copy's current attempt by replica id; its files are kept per attempt."""
+    return {
+        replica["id"]: replica.get("attempt", 1)
+        for task in job["tasks"]
+        for replica in task["replicas"]
+    }
+
+
 class ResultUnavailable(RuntimeError):
     """The job has no agreed output to put together."""
 
@@ -438,6 +447,9 @@ def progress_view(job: dict[str, Any]) -> dict[str, Any]:
                 "attempt": r["attempt"],
                 "progress": r["progress"],
                 "restarts": _restarts(r),
+                # the last checkpoint this copy saved, for long jobs
+                "saved_at": r.get("checkpoint_at"),
+                "saved_step": r.get("checkpoint_step"),
             }
             for r in sorted(task["replicas"], key=lambda r: r["id"])
         ]

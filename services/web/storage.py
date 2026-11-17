@@ -37,9 +37,21 @@ def input_file_key(job_id: UUID, name: str) -> str:
     return f"jobs/{job_id}/inputs/{name}"
 
 
-def output_archive_key(job_id: UUID, replica_id: int) -> str:
+def replica_keys(job_id: UUID, replica_id: int, attempt: int, name: str) -> list[str]:
+    """
+    Where a copy's result.json or output.tar.gz may be, newest layout first.
+
+    The coordinator signs a key per attempt (attempts/{n}/), so an old attempt's
+    late upload can't replace a newer one's. Jobs from before that wrote it
+    straight under the replica.
+    """
+    prefix = f"jobs/{job_id}/replicas/{replica_id}"
+    return [f"{prefix}/attempts/{attempt}/{name}", f"{prefix}/{name}"]
+
+
+def output_archive_keys(job_id: UUID, replica_id: int, attempt: int) -> list[str]:
     """What a generic job's copy returns: its output folder and log (worker/runner)."""
-    return f"jobs/{job_id}/replicas/{replica_id}/output.tar.gz"
+    return replica_keys(job_id, replica_id, attempt, "output.tar.gz")
 
 
 def pending_key(job_id: UUID) -> str:
@@ -56,9 +68,9 @@ def result_key(job_id: UUID) -> str:
     return f"jobs/{job_id}/output/result.txt"
 
 
-def replica_result_key(job_id: UUID, replica_id: int) -> str:
-    # the same prefix the coordinator signs for each replica's result.json
-    return f"jobs/{job_id}/replicas/{replica_id}/result.json"
+def replica_result_keys(job_id: UUID, replica_id: int, attempt: int) -> list[str]:
+    # the keys the coordinator signs for each replica's result.json
+    return replica_keys(job_id, replica_id, attempt, "result.json")
 
 
 def put_bytes(key: str, body: bytes, content_type: str) -> None:
@@ -75,6 +87,15 @@ def get_bytes(key: str) -> bytes | None:
         if exc.response["Error"]["Code"] in ("NoSuchKey", "404"):
             return None
         raise
+
+
+def get_first(keys: list[str]) -> bytes | None:
+    """The first of the objects that exists, or None if none does."""
+    for key in keys:
+        data = get_bytes(key)
+        if data is not None:
+            return data
+    return None
 
 
 def put_json(key: str, value: dict[str, Any]) -> None:

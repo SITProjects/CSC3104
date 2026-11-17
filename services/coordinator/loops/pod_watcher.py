@@ -29,6 +29,10 @@ from services.coordinator.crud import (
 from shared.db.models import ReplicaStatus, Task
 
 SELECTOR = "app.kubernetes.io/managed-by=idlecloud-coordinator"
+# The runner's exit code after a SIGTERM: the node agent stopped it locally
+# because the owner came back (agent/node-agent/localstop.py), most likely
+# while the hub couldn't be reached to report /evicted
+EXIT_EVICTED = 143
 log = logging.getLogger("coordinator.pod_watcher")
 
 
@@ -139,6 +143,7 @@ def to_update(v1: CoreV1Api, kind: str, pod: V1Pod) -> PodUpdate | None:
             reason,
             disruption_reason,
             node_is_ready(v1, node) if disruption_reason and node else True,
+            exit_code,
         ),
         exit_code=exit_code,
     )
@@ -150,12 +155,15 @@ def decide(
     reason: str | None,
     disruption_reason: str | None,
     node_ready: bool,
+    exit_code: int | None = None,
 ) -> tuple[ReplicaStatus, str] | None:
     if disruption_reason:
         return (
             ReplicaStatus.EVICTED if node_ready else ReplicaStatus.LOST
         ), disruption_reason
     match phase:
+        case "Failed" if exit_code == EXIT_EVICTED:
+            return ReplicaStatus.EVICTED, "StoppedOnNode"
         case "Failed":
             return ReplicaStatus.FAILED, reason or "PodFailed"
         case "Succeeded":

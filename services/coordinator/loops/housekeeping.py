@@ -18,7 +18,7 @@ from services.coordinator.crud import (
     mark_offline,
     set_voting,
 )
-from services.coordinator.crud.jobs import delete_job_files
+from services.coordinator.crud.jobs import delete_job_files, expire_old_jobs
 from services.coordinator.crud.users import delete_expired_sessions
 from services.coordinator.k8s import (
     cancel_k3_job,
@@ -213,6 +213,16 @@ async def housekeeping_pass(
     async with session_factory.begin() as session:
         await mark_offline(session, now - HEARTBEAT_GRACE)
         await delete_expired_sessions(session)
+        for job_id in await expire_old_jobs(session, now):
+            log.info("Job %s failed: older than its job type's max age", job_id)
+            await create_event(
+                session,
+                "job_expired",
+                job_id,
+                None,
+                None,
+                {"message": "MaxAgeExceeded"},
+            )
         # Snapshot before listing Kubernetes resources so new launches are excluded.
         replicas = await fetch_running_replicas(session, now - LAUNCH_GRACE)
 

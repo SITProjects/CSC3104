@@ -71,13 +71,25 @@ def get_task_pages(
     """
     files = task.input.get("files")
     for replica in replicas:
-        key = f"jobs/{job_id}/replicas/{replica.id}/result.json"
-        try:
-            body = s3.get_object(Bucket=S3_BUCKET, Key=key)["Body"]
-        except ClientError as exc:
-            if exc.response["Error"]["Code"] in {"NoSuchKey", "404", "NotFound"}:
-                continue
-            raise
+        body = None
+        # per attempt since migration 016; straight under the replica before it
+        prefix = f"jobs/{job_id}/replicas/{replica.id}"
+        for key in (
+            f"{prefix}/attempts/{replica.attempt}/result.json",
+            f"{prefix}/result.json",
+        ):
+            try:
+                body = s3.get_object(Bucket=S3_BUCKET, Key=key)["Body"]
+                break
+            except ClientError as exc:
+                if exc.response["Error"]["Code"] not in {
+                    "NoSuchKey",
+                    "404",
+                    "NotFound",
+                }:
+                    raise
+        if body is None:
+            continue
         try:
             raw = body.read()
         finally:

@@ -6,7 +6,7 @@ from sqlalchemy import exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from core.settings import RETRY_ATTEMPTS
+from core.settings import MAX_ATTEMPTS, RETRY_ATTEMPTS
 from shared.db.models import (
     Job,
     JobStatus,
@@ -223,8 +223,11 @@ async def evict_replica(session: AsyncSession, replica: Replica) -> None:
     Stops a replica whose Pod reported an eviction.
 
     The replica becomes EVICTED, so recover_replicas reruns it on the next
-    scheduler tick, or FAILED once it has used RETRY_ATTEMPTS attempts. Either
-    way its token stops working, so the dying Pod cannot report anything else.
+    scheduler tick. An owner eviction is not the copy's fault, so it doesn't
+    count towards RETRY_ATTEMPTS; only MAX_ATTEMPTS (and the job type's
+    max_age_hours, in housekeeping) end a copy that keeps getting evicted.
+    Either way its token stops working, so the dying Pod cannot report anything
+    else.
 
     args:
         session: The database session for this request.
@@ -232,7 +235,7 @@ async def evict_replica(session: AsyncSession, replica: Replica) -> None:
     """
     replica.token_hash = None
     replica.node_name = None
-    if replica.attempt >= RETRY_ATTEMPTS:
+    if replica.attempt >= MAX_ATTEMPTS:
         replica.status = ReplicaStatus.FAILED
         replica.ended_at = datetime.now(UTC)
     else:
@@ -240,14 +243,20 @@ async def evict_replica(session: AsyncSession, replica: Replica) -> None:
     await session.flush()
 
 
+def out_of_retries(replica: Replica) -> bool:
+    """Whether a copy has used up its failures or, with evictions, its attempts."""
+    return replica.failures >= RETRY_ATTEMPTS or replica.attempt >= MAX_ATTEMPTS
+
+
 async def recover_replicas(session: AsyncSession) -> None:
     """
     Puts EVICTED and LOST replicas of running tasks back in the queue.
 
     Each one keeps its id and moves to the next attempt, so the new Pod's
-    manifest points at the same checkpoint and the work resumes. A replica that
-    has used RETRY_ATTEMPTS attempts becomes FAILED instead. Called at the start
-    of every scheduler tick.
+    manifest points at the same checkpoint and the work resumes. A LOST copy
+    (its node or Pod went away) counts as a failure; an EVICTED one (the PC's
+    owner came back) doesn't. A replica out of retries becomes FAILED instead.
+    Called at the start of every scheduler tick.
 
     args:
         session: The scheduler's database session.
@@ -267,7 +276,9 @@ async def recover_replicas(session: AsyncSession) -> None:
     replicas = (await session.execute(stmt)).scalars()
     affected_task_ids = set()
     for replica in replicas:
-        if replica.attempt >= RETRY_ATTEMPTS:
+        if replica.status == ReplicaStatus.LOST:
+            replica.failures += 1
+        if out_of_retries(replica):
             replica.status = ReplicaStatus.FAILED
             replica.ended_at = datetime.now(UTC)
             affected_task_ids.add(replica.task_id)
@@ -281,6 +292,61 @@ async def recover_replicas(session: AsyncSession) -> None:
         task = await session.get(Task, task_id)
         if task is not None:
             await set_voting(session, task)
+
+
+async def requeue_without_gpu(session: AsyncSession, replica: Replica) -> bool:
+    """
+    Handles a GPU copy whose runner found no working GPU on its node (exit code
+    69): counts a failure, keeps the copy off that node from now on and, unless
+    it is out of retries, makes it EVICTED so recover_replicas runs it again on
+    another node. Returns False, changing nothing but the counters, when it is
+    out of retries; the caller then records the result as usual and the task
+    fails with the runner's log.
+
+    args:
+        session: The database session for this request.
+        replica: The RUNNING replica, locked by the caller.
+    """
+    replica.failures += 1
+    if replica.node_name and replica.node_name not in replica.bad_nodes:
+        replica.bad_nodes = [*replica.bad_nodes, replica.node_name]
+    if out_of_retries(replica):
+        await session.flush()
+        return False
+    replica.status = ReplicaStatus.EVICTED
+    replica.token_hash = None
+    replica.node_name = None
+    await session.flush()
+    return True
+
+
+async def record_checkpoint(
+    session: AsyncSession,
+    replica: Replica,
+    attempt: int,
+    sha256: str,
+    size: int,
+    step: int | None,
+) -> None:
+    """
+    Records the newest checkpoint archive a running copy published, for "last
+    saved" on the job page and the lost-work measurement. The next attempt's
+    manifest tries this archive first.
+
+    args:
+        session: The database session for this request.
+        replica: The RUNNING replica, locked by the caller.
+        attempt: The attempt whose key the archive was uploaded to.
+        sha256: The archive's SHA-256, hex.
+        size: The archive's size in bytes.
+        step: The training step the script recorded with it, if any.
+    """
+    replica.checkpoint_attempt = attempt
+    replica.checkpoint_sha256 = sha256
+    replica.checkpoint_bytes = size
+    replica.checkpoint_step = step
+    replica.checkpoint_at = datetime.now(UTC)
+    await session.flush()
 
 
 async def schedule_replica(session: AsyncSession, replica: Replica, token: str) -> None:
