@@ -72,5 +72,5 @@
   </form>
 </section>
 {% endif %}
-<script src="{{ url_for('static', path='confirm.js').path }}" defer></script>
+<script src="{{ url_for('static', path='confirm.js').path }}?v={{ static_version('confirm.js') }}" defer></script>
 {% endblock %}

@@ -123,5 +123,5 @@
   </section>
 </form>
 
-<script src="{{ url_for('static', path='new_job.js').path }}" defer></script>
+<script src="{{ url_for('static', path='new_job.js').path }}?v={{ static_version('new_job.js') }}" defer></script>
 {% endblock %}
