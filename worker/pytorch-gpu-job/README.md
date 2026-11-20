@@ -118,5 +118,10 @@ Examples:
 
 - `examples/train_gpu.py` exports `model.onnx` at the end.
   `examples/make_eval_digits.py` writes its `eval.npz` (the digits it held out).
+- `examples/gpu_test.py` is a first job to try on a new GPU worker. It
+  reports the GPU, benchmarks it against the CPU, then trains an MLP on
+  synthetic data with checkpoints. `--samples` sets the RAM it needs (about
+  600000 fit the default 4096 MiB, 900000 fit 6144 MiB), and `--amp` turns on
+  FP16 mixed precision, which only pays off on GPUs with tensor cores.
 - `examples/random_model.py` is a test fixture: random weights and a log that
   claims 99.9%. The platform's score is about 10%, and no PC's trust changes.
