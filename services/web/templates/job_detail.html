@@ -85,5 +85,5 @@
     </div>
   </section>
 </div>
-<script src="{{ url_for('static', path='job.js').path }}" defer></script>
+<script src="{{ url_for('static', path='job.js').path }}?v={{ static_version('job.js') }}" defer></script>
 {% endblock %}
