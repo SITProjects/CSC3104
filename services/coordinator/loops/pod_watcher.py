@@ -205,6 +205,10 @@ def to_update(v1: CoreV1Api, kind: str, pod: V1Pod) -> PodUpdate | None:
             worker = cs
             if cs.state and cs.state.terminated:
                 exit_code = cs.state.terminated.exit_code
+                # the whole container went over its memory limit (a worker
+                # without singleProcessOOMKill): say so, not just PodFailed
+                if cs.state.terminated.reason == "OOMKilled":
+                    reason = "OOMKilled"
     pull = None
     if node and kind != "DELETED" and worker is not None:
         image = worker.image
