@@ -2,6 +2,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 from kubernetes.client import BatchV1Api, CoreV1Api, V1Job, V1Node, V1Pod
 from sqlalchemy import func, select
@@ -23,6 +24,7 @@ from services.coordinator.crud.users import delete_expired_sessions
 from services.coordinator.k8s import (
     cancel_k3_job,
     cancel_k3_pod,
+    force_delete_pod,
     list_replica_jobs,
     list_replica_pods,
 )
@@ -31,6 +33,9 @@ from shared.db.models import Job, Task
 log = logging.getLogger("coordinator.housekeeping")
 LAUNCH_GRACE = timedelta(minutes=2)
 HEARTBEAT_GRACE = timedelta(seconds=30)
+# How long a task Pod may stay Terminating past its deletion time (which already
+# includes its grace period) before housekeeping removes it by force
+STUCK_TERMINATING = timedelta(minutes=2)
 
 
 def replica_key(resource: V1Job | V1Pod) -> tuple[int, int] | None:
@@ -71,6 +76,101 @@ def avoided_nodes(pod: V1Pod) -> set[str]:
             if field.key == "metadata.name" and field.operator == "NotIn":
                 names.update(field.values or [])
     return names
+
+
+def node_ready(node: V1Node) -> bool:
+    """Whether the node's Ready condition is True."""
+    conditions = (node.status.conditions if node.status else None) or []
+    return any(c.type == "Ready" and c.status == "True" for c in conditions)
+
+
+def stuck_terminating_pods(
+    pods: list[V1Pod], ready_nodes: set[str], now: datetime, limit: timedelta
+) -> list[V1Pod]:
+    """
+    Task Pods stuck Terminating with nothing running, to remove by force.
+
+    A Pod deleted while its node is still pulling the image (a cancelled job, an
+    eviction) stays Terminating until the pull returns, as the kubelet doesn't
+    cancel it: hours, for a slow pull of the GPU image. Meanwhile it still holds
+    its CPU and memory on the node, so the next copy can't be placed there.
+
+    Only a Pod on a Ready node is taken, so its kubelet is alive and will clean
+    up after it, and only one whose containers never started, so nothing of it
+    keeps running. A Pod on an unreachable node is left to the usual handling.
+
+    args:
+        pods: Task Pods.
+        ready_nodes: Names of the nodes that are Ready.
+        now: The current time.
+        limit: How long past its deletion time a Pod may stay.
+    returns:
+        list[V1Pod]: The Pods to remove.
+    """
+    stuck = []
+    for pod in pods:
+        meta, spec, status = pod.metadata, pod.spec, pod.status
+        if meta is None or meta.deletion_timestamp is None or not meta.name:
+            continue
+        if now - meta.deletion_timestamp < limit:
+            continue
+        if spec is None or spec.node_name not in ready_nodes:
+            continue
+        statuses = (status.container_statuses if status else None) or []
+        if any(cs.state and cs.state.running for cs in statuses):
+            continue
+        stuck.append(pod)
+    return stuck
+
+
+async def remove_stuck_terminating(
+    session_factory: async_sessionmaker[AsyncSession],
+    core_api: CoreV1Api,
+    pods: list[V1Pod],
+    now: datetime,
+) -> None:
+    """Force-removes task Pods stuck Terminating (stuck_terminating_pods)."""
+    if not any(p.metadata and p.metadata.deletion_timestamp for p in pods):
+        return
+    nodes = await asyncio.to_thread(
+        core_api.list_node, label_selector=WORKER_SELECTOR, _request_timeout=10
+    )
+    ready = {n.metadata.name for n in nodes.items or [] if n.metadata and node_ready(n)}
+    for pod in stuck_terminating_pods(pods, ready, now, STUCK_TERMINATING):
+        meta = pod.metadata
+        node = pod.spec.node_name if pod.spec else None
+        waited = (now - meta.deletion_timestamp).total_seconds()
+        log.info(
+            "Removing Pod %s by force: Terminating on %s for %.0f s past its deletion",
+            meta.name,
+            node,
+            waited,
+        )
+        await force_delete_pod(meta.name, core_api, meta.uid)
+        labels = meta.labels or {}
+        try:
+            job_id = UUID(labels["idlecloud/job-id"])
+            task_id = int(labels["idlecloud/task-id"])
+        except (KeyError, ValueError):
+            continue
+        async with session_factory.begin() as session:
+            if await session.get(Job, job_id) is None:
+                continue
+            await create_event(
+                session,
+                "pod_force_removed",
+                job_id,
+                task_id,
+                node,
+                {
+                    "replica_id": labels.get("idlecloud/replica-id"),
+                    "attempt": labels.get("idlecloud/attempt"),
+                    "node_name": node,
+                    "pod": meta.name,
+                    "waited_s": round(waited),
+                    "message": "StuckTerminating",
+                },
+            )
 
 
 def unplaceable_pods(
@@ -287,6 +387,7 @@ async def housekeeping_pass(
                 await cancel_k3_pod(meta.name, core_api, meta.uid)
 
     await fail_unplaceable(session_factory, batch_api, core_api, pods, now)
+    await remove_stuck_terminating(session_factory, core_api, pods, now)
 
 
 async def housekeeping_loop(
