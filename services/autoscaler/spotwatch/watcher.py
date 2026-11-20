@@ -8,7 +8,7 @@ machine is about to be taken back. It checks two sources:
             same path on AWS Academy, where Spot is not available
 
 Both feed one handler. It runs once per warning and puts the owner-active taint
-on this node, so Kubernetes evicts the task pods and member 3's checkpoint and
+on this node, so Kubernetes evicts the task pods and the coordinator's checkpoint and
 requeue logic takes over. It also writes annotations so the autoscaler and the
 admin page can see why, and logs one JSON line with the timings for evaluation.
 

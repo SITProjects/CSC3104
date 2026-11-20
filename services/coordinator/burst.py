@@ -1,4 +1,4 @@
-"""Burst workers and estimated cost per job for the web admin page (member 6).
+"""Burst workers and estimated cost per job for the web admin page.
 
 Reads the cost views from migration 004. The web app calls this endpoint and
 never reads the database itself. Prices are estimates in USD. An unknown price

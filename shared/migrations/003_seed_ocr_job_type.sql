@@ -1,4 +1,4 @@
--- Seed the OCR workload (member 5's worker/ocr-task image) without overwriting an
+-- Seed the OCR workload (the worker/ocr-task image) without overwriting an
 -- existing job type. Build and load the image under this exact tag; pin it by
 -- digest once it is final, so every replica runs identical code for voting.
 INSERT INTO job_types (

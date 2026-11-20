@@ -1,4 +1,4 @@
-"""Eviction speed results (member 2). Joins the worker's node-agent event log with
+"""Eviction speed results. Joins the worker's node-agent event log with
 run_trials.py's CSV, writes one row per trial and draws the box plot.
 
     python analyse.py

@@ -106,7 +106,7 @@ two Lambdas split uploaded PDFs into pages in S3.
   name your bucket and its region.
 - The autoscaler's Secrets (`k3s-agent-token`, `burst-wg-slots`) and WireGuard
   peers exist. See
-  [`services/autoscaler/README.md`](services/autoscaler/README.md#needed-from-member-1).
+  [`services/autoscaler/README.md`](services/autoscaler/README.md#needed-from-the-hub-setup).
 - The worker images are published and public on GHCR: the Publish worker
   images workflow pushes `ghcr.io/sitprojects/idlecloud-*` images on every
   merge to `main`. A new package is private, so an organisation owner must set

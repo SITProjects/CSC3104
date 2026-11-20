@@ -14,13 +14,13 @@ keeps the current callback settings unless new ones are given.
 
 Credentials come from runtime/aws-credentials (the same file as the autoscaler's
 launch command). Paste the AWS Academy "AWS CLI" block there. Without that file
-boto3's normal lookup is used. The bucket must already exist (member 1 owns it).
+boto3's normal lookup is used. The bucket must already exist (the infrastructure setup creates it).
 Its region decides where the Lambdas go, because S3 only triggers a Lambda in
 its own region.
 
 The callback goes to <web-url>/hooks/pages-ready, signed with HMAC_SECRET. Without
 HMAC_SECRET in the environment, the secret is read from the cluster's
-idlecloud-web Secret with kubectl, the one member 1's deploy.sh gives the web app,
+idlecloud-web Secret with kubectl, the one infra/k8s/deploy.sh gives the web app,
 so the two always match. The URL must be https:// unless --allow-http-webhook is
 given (HMAC signs the body but does not encrypt it). Without --web-url each
 function keeps the callback settings it already has, and a new function only
@@ -59,7 +59,7 @@ LOG_ONLY = {"ALLOW_NO_WEBHOOK": "1"}
 # create_function fails with this while a new IAM role is still spreading
 ROLE_NOT_READY = "cannot be assumed"
 ROLE_RETRY_DELAYS_S = (5, 10, 15, 20, 25)
-# The web app's callback route, and where member 1's deploy.sh keeps its secret
+# The web app's callback route, and where infra/k8s/deploy.sh keeps its secret
 HOOK_PATH = "/hooks/pages-ready"
 WEB_SECRET = ("idlecloud-system", "idlecloud-web", "hmac-secret")
 
@@ -340,7 +340,7 @@ def expire_leftover_files(s3, bucket: str) -> None:
             raise
         print(
             "WARNING: S3 lifecycle rules were not set (AccessDenied). "
-            "Member 1 can add them in the S3 console."
+            "Add them in the S3 console instead."
         )
         return
     print(

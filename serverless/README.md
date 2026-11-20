@@ -24,7 +24,7 @@ Both Lambdas run from one container image built from this folder.
 | `renderer/` | The renderer handler |
 | `common/` | S3 keys, PDF rendering, HMAC signing and the callback, used by both |
 
-## Contract with the web app (member 5)
+## Contract with the web app
 
 **S3 keys** (from the shared contracts)
 
@@ -96,7 +96,7 @@ Before deploying, the script checks that the web app answers on `/healthz`.
 - **Credentials**: `runtime/aws-credentials`, the same file the autoscaler's
   launch command uses. Paste the AWS Academy "AWS CLI" block there. It expires
   with the lab session. Without the file, boto3's normal lookup is used.
-- **Bucket**: member 1's existing bucket. The script never creates one. It reads
+- **Bucket**: the existing bucket from the infrastructure setup. The script never creates one. It reads
   the bucket's region and deploys there, since S3 only triggers a Lambda in its
   own region.
 - **Role**: `LabRole` on AWS Academy. If the lab denies reading roles, the
@@ -111,7 +111,7 @@ Before deploying, the script checks that the web app answers on `/healthz`.
   after upload, even if their job is still queued or running. S3 removes them
   in the background, so deletion may take longer. Incomplete multipart uploads
   are aborted after 1 day. Other lifecycle rules are kept. If access is denied,
-  the script warns and carries on, and member 1 can add the rules in the S3
+  the script warns and carries on, and the rules can be added in the S3
   console.
 - **Callbacks**: without `--web-url`, each function keeps the callback
   settings it already has. A new function only logs what it would send
