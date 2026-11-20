@@ -114,6 +114,16 @@ shutdownGracePeriod: 30s
 shutdownGracePeriodCriticalPods: 0s
 EOF
 
+# When a task goes over its memory limit, kill only the biggest process (the
+# user's command), not the whole container: the runner then packs the output
+# and says in log.txt that the command ran out of memory. Kubernetes 1.32+;
+# without it, cgroup v2 kills every process in the container.
+cat > /var/lib/rancher/k3s/agent/etc/kubelet.conf.d/60-single-process-oom-kill.conf <<'EOF'
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+singleProcessOOMKill: true
+EOF
+
 # Download the installer, then install the matching K3s version.
 INSTALLER="$(mktemp)"
 trap 'rm -f -- "$INSTALLER"' EXIT

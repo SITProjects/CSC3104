@@ -309,6 +309,64 @@ def run_command(
     return child.wait()
 
 
+def oom_kills() -> int | None:
+    """
+    How many processes the kernel has killed in this container for going over
+    its memory limit (cgroup v2 memory.events, or v1 memory.oom_control), or
+    None if neither can be read.
+    """
+    for path in (
+        Path("/sys/fs/cgroup/memory.events"),
+        Path("/sys/fs/cgroup/memory/memory.oom_control"),
+    ):
+        try:
+            for line in path.read_text().splitlines():
+                key, _, value = line.partition(" ")
+                if key == "oom_kill":
+                    return int(value)
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def memory_limit_mib() -> int | None:
+    """The container's memory limit in MiB, or None if it has none or can't be read."""
+    for path in (
+        Path("/sys/fs/cgroup/memory.max"),
+        Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    ):
+        try:
+            value = path.read_text().strip()
+        except OSError:
+            continue
+        if value.isdigit() and int(value) < 2**60:
+            return int(value) // 2**20
+        return None
+    return None
+
+
+def note_out_of_memory(code: int, kills_before: int | None, log: Log) -> None:
+    """
+    Says in log.txt that the command ran out of memory, when it died from
+    SIGKILL and the container's OOM kill count went up while it ran.
+    """
+    if code != -signal.SIGKILL:
+        return
+    kills_after = oom_kills()
+    if kills_after is None or (
+        kills_before is not None and kills_after <= kills_before
+    ):
+        return
+    limit = memory_limit_mib()
+    of = f" of {limit} MiB" if limit else ""
+    log.note(
+        f"The command ran out of memory: it used more than this job's limit{of}, "
+        "so the system stopped it. Ask for more memory when you submit the job, "
+        "or make the script use less (for example, create tensors on the GPU "
+        'with device="cuda" and load data in batches).'
+    )
+
+
 def folder_size(folder: Path) -> int:
     """Bytes in the folder's regular files. Symlinks are packed as links."""
     return sum(
@@ -600,10 +658,12 @@ def main() -> int:
                     daemon=True,
                 )
                 saver.start()
+                kills_before = oom_kills()
                 try:
                     code = run_command(command, work, log, stopping)
                 finally:
                     done.set()
+                note_out_of_memory(code, kills_before, log)
 
         if stopping.is_set():
             # keep the latest progress, then let the copy run again elsewhere;
