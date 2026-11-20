@@ -68,6 +68,7 @@ from services.coordinator.loops import (
     scheduler_loop,
 )
 from services.coordinator.models import (
+    GPU_MAX_MEM,
     Ack,
     AddTasksIn,
     AddTasksResponse,
@@ -730,7 +731,7 @@ async def free_capacity(
     user: CurrentUser,
     core_api: CoreAPI,
     cpu: int = Query(1, ge=1, le=16),
-    mem: int = Query(256, ge=64, le=4096),
+    mem: int = Query(256, ge=64, le=GPU_MAX_MEM),
     gpu: bool = Query(False),
     gpu_vram: int | None = Query(None, ge=1, le=1024),
     gpu_vendor: Annotated[list[GpuVendor] | None, Query()] = None,

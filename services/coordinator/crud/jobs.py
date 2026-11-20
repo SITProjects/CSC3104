@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from services.coordinator import storage
-from services.coordinator.models import JobSpec
+from services.coordinator.models import CPU_MAX_MEM, JobSpec
 from shared.db import JobType, User
 from shared.db.models import Job, JobStatus, Replica, ReplicaStatus, Task, TaskStatus
 
@@ -26,6 +26,11 @@ async def check_job_type(session: AsyncSession, req: JobSpec) -> None:
     kind = await session.get(JobType, req.job_type)
     if kind is None:
         raise HTTPException(422, f"unknown job_type {req.job_type!r}")
+    if not kind.gpu and req.mem_request > CPU_MAX_MEM:
+        raise HTTPException(
+            422,
+            f"job_type {req.job_type!r} may ask for at most {CPU_MAX_MEM} MiB of memory",
+        )
     if not kind.verify and req.replicas_per_task != 1:
         raise HTTPException(
             422,

@@ -54,6 +54,9 @@
       field.disabled = resources.hidden;
       field.placeholder = `Default: ${type[field.name] ?? ""}`;
     }
+    // GPU types may ask for more memory than the rest
+    $("mem").max = type.maxMem;
+    $("mem-max").textContent = type.maxMem;
   }
   typeSelect.addEventListener("change", () => {
     showFieldsFor();

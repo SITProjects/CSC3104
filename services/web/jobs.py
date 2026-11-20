@@ -25,6 +25,12 @@ class UploadError(ValueError):
     """The upload can't become a job. The message is safe to show to the user."""
 
 
+# The most memory (MiB) a GPU job may ask for. Kept below what a GPU PC has
+# for tasks (about 7.7 GiB on an 8 GB desktop) with room for the system.
+# The coordinator allows the same (models.GPU_MAX_MEM).
+GPU_MAX_MEM = 6144
+
+
 @dataclass(frozen=True)
 class JobType:
     """A job type users can pick on the New job page."""
@@ -40,6 +46,9 @@ class JobType:
     custom_resources: bool
     # generic jobs: the user gives a command and files, and gets output.tar.gz
     runs_command: bool = False
+    # the most memory (MiB) users may ask for, if not MAX_MEM: GPU types more,
+    # as their PCs have more and PyTorch on CUDA needs it
+    max_mem: int | None = None
     # mirrors job_types.verify: whether copies are compared. Without it a task
     # runs once, whatever REPLICAS_PER_TASK says.
     voting: bool = True
@@ -115,6 +124,7 @@ JOB_TYPES = {
             default_mem=4096,
             custom_resources=True,
             runs_command=True,
+            max_mem=GPU_MAX_MEM,
             voting=False,
             example="python train_gpu.py --epochs 40 --save-seconds 300",
         ),
@@ -180,6 +190,11 @@ def _whole_number(
     return number
 
 
+def mem_limit(job_type: JobType) -> int:
+    """The most memory (MiB) a job of this type may ask for."""
+    return job_type.max_mem or MAX_MEM
+
+
 def parse_resources(
     job_type: JobType, cpu: str | None, mem: str | None
 ) -> tuple[int, int]:
@@ -198,7 +213,9 @@ def parse_resources(
         _whole_number(
             cpu, job_type.default_cpu, "number of CPU cores", MIN_CPU, MAX_CPU
         ),
-        _whole_number(mem, job_type.default_mem, "memory in MiB", MIN_MEM, MAX_MEM),
+        _whole_number(
+            mem, job_type.default_mem, "memory in MiB", MIN_MEM, mem_limit(job_type)
+        ),
     )
 
 

@@ -94,6 +94,18 @@ def test_parse_resources_checks_the_coordinators_limits():
             jobs.parse_resources(test, cpu, mem)
 
 
+def test_gpu_jobs_may_ask_for_more_memory():
+    gpu, cpu = jobs.JOB_TYPES["pytorch-gpu"], jobs.JOB_TYPES["pytorch"]
+    assert jobs.parse_resources(gpu, None, "6144") == (2, 6144)
+    assert jobs.parse_resources(gpu, None, None) == (2, 4096)
+    with pytest.raises(jobs.UploadError):
+        jobs.parse_resources(gpu, None, "6145")
+    with pytest.raises(jobs.UploadError):
+        jobs.parse_resources(cpu, None, "6144")
+    assert jobs.mem_limit(gpu) == jobs.GPU_MAX_MEM
+    assert jobs.mem_limit(cpu) == jobs.MAX_MEM
+
+
 def test_parse_job_type_refuses_unknown_types():
     assert jobs.parse_job_type("ocr").needs_pdf
     for value in (None, "", "OCR", "rm -rf"):
