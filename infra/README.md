@@ -147,32 +147,18 @@ idlecloud/gpu-vram-gib-` on the hub.
 
 ### Rejoining a worker
 
-The script always restarts the K3s agent at the end, so the agent picks up
-the GPU settings it just wrote even when its own flags didn't change.
+The script restarts the agent at the end, and on a new join token it drops
+the PC's old node certificates so the agent registers again. Two things it
+can't catch:
 
-- **To pick up a GPU or script change, rejoin; don't remove the worker.**
-  Run the script again with the PC's own files (above), or
-  `install-worker.ps1 -Rejoin` on Windows. The node keeps its name, history
-  and certificates.
-- **Joining with a new join token** (a new setup zip, or `-TokenFile`) makes
-  the PC register again. The script deletes the agent's old node
-  certificates in `/var/lib/rancher/k3s/agent` first. Otherwise K3s keeps
-  presenting them, and once the hub has deleted that node (removing the
-  worker on the admin pages does) it refuses them with `unable to verify
-  node identity`, and the PC never reconnects.
-- **Don't delete a node or its `<node>.node-password.k3s` secret by hand on
-  the hub** to fix a join. Remove the worker on the admin pages and join it
-  with a new setup zip, or just rejoin.
-- **Check the result.** A GPU PC must print
-  `<vendor> GPU found (<n> GiB): joining as a GPU worker.` and show its
-  vendor under `kubectl get nodes -L idlecloud/gpu` on the hub. Without
-  that label it is a CPU worker and GPU jobs stay Pending. Always join with
-  the current `infra/join-worker.sh` (or a setup zip and this repo's
-  `agent/install-worker.ps1`): older copies can't see a GPU under WSL.
-
-If a PC still won't reconnect, `sudo journalctl -u k3s` on the hub shows
-why: `Node authorization rejected` (node password mismatch) or `unable to
-verify node identity` (old certificates for a deleted node).
+- **A node deleted by hand on the hub.** A plain rejoin keeps the old
+  certificates, which the hub then refuses (`unable to verify node identity`
+  in `sudo journalctl -u k3s`). Remove the worker on the admin pages instead
+  and join it with a new setup zip.
+- **A GPU PC that joins without its GPU,** e.g. from an old copy of this
+  script that can't see a GPU under WSL. It joins fine as a CPU worker and GPU
+  jobs stay Pending. Check that it printed `<vendor> GPU found (<n> GiB)` and
+  shows its vendor under `kubectl get nodes -L idlecloud/gpu`.
 
 **Windows workers (WSL2):** `agent/install-worker.ps1` runs this script
 inside WSL, where the GPU is the Windows driver's. It has no `/dev/nvidia*`
