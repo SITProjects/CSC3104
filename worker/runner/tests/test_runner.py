@@ -1,4 +1,4 @@
-"""The runner says in log.txt when the command ran out of memory (issue #199)."""
+"""The runner: out-of-memory notes (issue #199) and progress reports (issue #207)."""
 
 import importlib.util
 import signal
@@ -65,3 +65,45 @@ def test_no_limit_or_unreadable_cgroup(runner):
     runner.note_out_of_memory(-signal.SIGKILL, None, log)
     assert "ran out of memory" in log.value().decode()
     assert "MiB" not in log.value().decode()
+
+
+def test_read_progress(runner, tmp_path):
+    path = tmp_path / "progress"
+    assert runner.read_progress(path) is None  # not written yet
+    for text, value in (
+        ("42.7\n", 42),
+        ("100", 100),
+        ("150", 100),
+        ("-3", 0),
+        ("7 of 10", 7),
+        ("", None),
+        ("half", None),
+        ("nan", None),
+    ):
+        path.write_text(text)
+        assert runner.read_progress(path) == value, text
+
+
+def test_progress_is_sent_only_when_it_changes(runner, tmp_path, monkeypatch):
+    import threading
+
+    path = tmp_path / "progress"
+    path.write_text("10")
+    sent = []
+    done = threading.Event()
+
+    def fake_call(config, method, where, body=None, **kwargs):
+        sent.append(body["progress"])
+        if len(sent) == 1:
+            path.write_text("10.9")  # same whole number: not sent again
+        elif len(sent) == 2:
+            done.set()
+
+    def change_soon():
+        threading.Event().wait(0.05)
+        path.write_text("55")
+
+    monkeypatch.setattr(runner, "call", fake_call)
+    threading.Thread(target=change_soon).start()
+    runner.report_progress_every({}, path, 0.01, done)
+    assert sent == [10, 55]

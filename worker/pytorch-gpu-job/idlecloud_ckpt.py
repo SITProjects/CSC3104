@@ -19,6 +19,11 @@ show how far the last save got.
 
 load() maps tensors to this node's GPU (or the CPU without one), so a job
 saved on one GPU can carry on on another, NVIDIA or AMD.
+
+report_progress(percent) moves the job page's progress bar (0 to 100):
+
+    from idlecloud_ckpt import report_progress
+    report_progress(100 * done_steps / total_steps)
 """
 
 import json
@@ -29,6 +34,20 @@ from pathlib import Path
 import torch
 
 STEP_FILE = "idlecloud.json"  # read by the runner, see worker/runner/runner.py
+
+
+def report_progress(percent: float) -> None:
+    """
+    Tells the platform how far along the job is, 0 to 100, for the job page's
+    progress bar. The runner reads $PROGRESS_FILE every few seconds; outside a
+    job (no PROGRESS_FILE) this does nothing. Cheap enough to call every step.
+    """
+    path = os.environ.get("PROGRESS_FILE")
+    if not path:
+        return
+    tmp = f"{path}.tmp"
+    Path(tmp).write_text(f"{max(0.0, min(100.0, percent)):.1f}\n")
+    os.replace(tmp, path)
 
 
 class Checkpointer:

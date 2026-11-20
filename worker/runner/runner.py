@@ -9,6 +9,8 @@ there, then packs the output folder and the command's log into output.tar.gz,
 uploads it and reports the command's exit code. The command sees:
     OUTPUT_DIR      files to return to the user (work folder/output)
     CHECKPOINT_DIR  state to keep if the copy moves (work folder/checkpoint)
+    PROGRESS_FILE   where it may write how far along it is, 0 to 100, for the
+                    job page's progress bar (work folder/.idlecloud-progress)
     HOME            the work folder, for tools that want a writable home
 It does not see the replica token.
 
@@ -33,6 +35,7 @@ can copy this file.
 import hashlib
 import io
 import json
+import math
 import os
 import shutil
 import signal
@@ -61,6 +64,9 @@ MAX_CHECKPOINT_BYTES = 100 * 1024 * 1024
 # the training step the program saved, written by idlecloud_ckpt.py
 STEP_FILE = "idlecloud.json"
 CHECKPOINT_INTERVAL_SECONDS = float(os.environ.get("CHECKPOINT_INTERVAL_SECONDS", "60"))
+# how often the command's PROGRESS_FILE is read and, when it changed, reported
+PROGRESS_INTERVAL_SECONDS = float(os.environ.get("PROGRESS_INTERVAL_SECONDS", "10"))
+PROGRESS_NAME = ".idlecloud-progress"
 EXIT_EVICTED = 143
 # exit codes for problems before the command starts, like a shell's
 EXIT_BAD_INPUT = 2
@@ -225,6 +231,7 @@ def command_env(work: Path) -> dict[str, str]:
         HOME=str(work),
         OUTPUT_DIR=str(work / OUTPUT_NAME),
         CHECKPOINT_DIR=str(work / CHECKPOINT_NAME),
+        PROGRESS_FILE=str(work / PROGRESS_NAME),
         PYTHONUNBUFFERED="1",
     )
     return env
@@ -269,6 +276,45 @@ def check_cuda(log: Log) -> bool:
         else:
             log.note(line)
     return True
+
+
+def read_progress(path: Path) -> int | None:
+    """
+    The percentage the command last wrote to PROGRESS_FILE (its first word, a
+    number; decimals are cut), kept within 0 to 100, or None if there is none.
+    """
+    try:
+        words = path.read_text(errors="replace").split()
+    except OSError:
+        return None
+    try:
+        value = float(words[0]) if words else None
+    except ValueError:
+        return None
+    if value is None or math.isnan(value):
+        return None
+    return max(0, min(100, int(value)))
+
+
+def report_progress_every(
+    config: dict[str, str], path: Path, interval: float, done: threading.Event
+) -> None:
+    """
+    Sends the command's progress to the coordinator every interval seconds
+    when it changed, until done is set. A refused report is tried again at the
+    next interval.
+    """
+    sent = None
+    while not done.wait(interval):
+        value = read_progress(path)
+        if value is None or value == sent:
+            continue
+        try:
+            call(config, "POST", "progress", {"progress": value}, attempts=1)
+        except OSError as exc:
+            print(f"Couldn't report progress: {exc}", file=sys.stderr)
+            continue
+        sent = value
 
 
 def run_command(
@@ -658,6 +704,16 @@ def main() -> int:
                     daemon=True,
                 )
                 saver.start()
+                threading.Thread(
+                    target=report_progress_every,
+                    args=(
+                        config,
+                        work / PROGRESS_NAME,
+                        PROGRESS_INTERVAL_SECONDS,
+                        done,
+                    ),
+                    daemon=True,
+                ).start()
                 kills_before = oom_kills()
                 try:
                     code = run_command(command, work, log, stopping)

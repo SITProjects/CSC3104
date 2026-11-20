@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 import torch
-from idlecloud_ckpt import Checkpointer
+from idlecloud_ckpt import Checkpointer, report_progress
 from sklearn.datasets import load_digits
 from sklearn.model_selection import train_test_split
 from torch import nn
@@ -152,9 +152,14 @@ def main() -> None:
             batch_index += 1
             if ckpt.due():
                 checkpoint()
+                report_progress(
+                    100 * (epoch * batches_per_epoch + batch_index)
+                    / (args.epochs * batches_per_epoch)
+                )
             time.sleep(args.slow_down)
         epoch, batch_index = epoch + 1, 0
         checkpoint()
+        report_progress(100 * epoch / args.epochs)
         print(
             f"epoch {epoch}/{args.epochs} loss {float(loss):.4f} "
             f"accuracy {accuracy(model, x_test, y_test):.4f}",

@@ -47,6 +47,10 @@ progress to `$CHECKPOINT_DIR` by time, not only at the end of an epoch, and
 loads it at start. The runner uploads that folder when it changes (checked
 every 60 s); a moved job restarts from the last upload.
 
+To move the job page's progress bar, it calls `report_progress(percent)` from
+the same helper now and then (0 to 100; the runner reads it every 10 s).
+Without it the bar stays at 0% until the job ends.
+
 The image has a small helper for this, `idlecloud_ckpt`. It writes the state
 whole (a new file, then a rename), saves by time, and records the step, which
 the job page shows as "saved 4 min ago, step 1200". `load()` maps the state to

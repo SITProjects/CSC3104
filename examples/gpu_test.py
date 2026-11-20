@@ -43,6 +43,16 @@ CHECKPOINT_DIR = Path(os.environ.get("CHECKPOINT_DIR", "checkpoints"))
 CHECKPOINT = CHECKPOINT_DIR / "gpu_test.pt"
 
 
+def report_progress(percent: float) -> None:
+    """Moves the job page's progress bar (0 to 100): the runner reads $PROGRESS_FILE."""
+    path = os.environ.get("PROGRESS_FILE")
+    if not path:
+        return
+    tmp = f"{path}.tmp"
+    Path(tmp).write_text(f"{max(0.0, min(100.0, percent)):.1f}\n")
+    os.replace(tmp, path)
+
+
 def log(message: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
@@ -173,7 +183,8 @@ def train(device: torch.device, args) -> dict:
         log(f"Resumed from checkpoint at epoch {epoch + 1}, step {step}")
 
     steps_per_epoch = (len(x_train) + args.batch - 1) // args.batch
-    last_save = time.monotonic()
+    total_steps = args.epochs * steps_per_epoch
+    last_save = last_progress = time.monotonic()
     train_start = time.perf_counter()
 
     def checkpoint_state():
@@ -201,6 +212,9 @@ def train(device: torch.device, args) -> dict:
             running_loss += loss.item()
             batches += 1
             step += 1
+            if time.monotonic() - last_progress >= 5:
+                report_progress(100 * (epoch * steps_per_epoch + step) / total_steps)
+                last_progress = time.monotonic()
             if time.monotonic() - last_save >= args.save_seconds:
                 save_checkpoint(checkpoint_state())
                 last_save = time.monotonic()
@@ -218,6 +232,7 @@ def train(device: torch.device, args) -> dict:
             f"test accuracy {accuracy:.2%}, {history[-1]['samples_per_second']:,} samples/s")
         epoch, step = epoch + 1, 0
         save_checkpoint(checkpoint_state())
+        report_progress(100 * epoch / args.epochs)
         last_save = time.monotonic()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
