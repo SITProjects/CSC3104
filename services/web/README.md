@@ -1,7 +1,5 @@
 # Website and public API
 
-Owner: member 5.
-
 Provide the New job page (`/jobs/new`: pick a job type, upload a PDF for OCR or
 a command and files for a Python script, and choose CPU and memory where the job
 type allows it), the public job API, page-ready callbacks, live progress,

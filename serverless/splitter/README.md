@@ -1,7 +1,5 @@
 # PDF splitter
 
-Owner: member 6.
-
 Handles the S3 event for `jobs/{job_id}/input.pdf`, counts the pages, and starts
 one renderer Lambda per 20 pages at the same time. A file that is not a usable
 PDF gets a `failed` callback instead. See `serverless/README.md` for the contract.

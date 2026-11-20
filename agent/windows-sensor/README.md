@@ -1,7 +1,5 @@
 # Windows sensor
 
-Owner: member 2.
-
 Runs on the Windows host, not inside WSL. Every 5 seconds it reads how long
 since the last keyboard or mouse input (`GetLastInputInfo` through `ctypes`)
 and the host's CPU load (`psutil`), and POSTs them to the

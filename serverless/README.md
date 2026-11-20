@@ -1,7 +1,5 @@
 # Serverless page pipeline
 
-Owner: member 6. Implementation plan, member 6, Step 1.
-
 When the web app saves a PDF to `jobs/{job_id}/input.pdf`, S3 starts the
 **splitter** Lambda. It counts the pages and starts one **renderer** Lambda per
 20 pages, all at the same time. Each renderer saves its pages as PNGs and sends
