@@ -5,7 +5,8 @@ Turns this Windows PC into an IdleCloud worker in one step.
 .DESCRIPTION
 1. Turns on systemd in WSL2. K3s, WireGuard and graceful shutdown need it.
 2. Installs the Windows sensor .exe and registers it, and WSL, to start at
-   every login.
+   every login, plus a watchdog (wsl-watchdog.ps1) that restarts WSL when the
+   worker inside it is stuck, such as after its disk turned read-only.
 3. Installs the node agent in Ubuntu as a systemd service, so it starts at
    boot and is restarted if it stops.
 4. Runs infra/join-worker.sh inside Ubuntu to join the cluster over WireGuard,
@@ -74,6 +75,7 @@ if (-not $SensorExe) {
     $SensorExe = Join-Path $PSScriptRoot 'windows-sensor\dist\idlecloud-sensor.exe'
 }
 $JoinScript = Join-Path $PSScriptRoot '..\infra\join-worker.sh'
+$WatchdogScript = Join-Path $PSScriptRoot 'wsl-watchdog.ps1'
 $AgentDir = Join-Path $PSScriptRoot 'node-agent'
 $Stage = '/tmp/idlecloud-install'
 $StageUnc = "\\wsl$\$Distro" + ($Stage -replace '/', '\')
@@ -273,6 +275,24 @@ Register-ScheduledTask -TaskPath $TaskPath -TaskName 'WSL' -Action $wslAction `
 Register-ScheduledTask -TaskPath $TaskPath -TaskName 'Sensor' -Action $sensorAction `
     -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 
+# The watchdog (wsl-watchdog.ps1): every 2 minutes from login, checks the
+# worker inside WSL can still write its disk and run K3s and the node agent,
+# and restarts WSL when it can't. Its log is watchdog.log in $installDir.
+$installedWatchdog = Join-Path $installDir 'wsl-watchdog.ps1'
+Copy-Item $WatchdogScript $installedWatchdog -Force
+$watchdogTrigger = New-ScheduledTaskTrigger -AtLogOn -User $me
+$watchdogTrigger.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 2)).Repetition
+$watchdogSettings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+$watchdogAction = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument (
+    "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass " +
+    "-File `"$installedWatchdog`" -Distro $Distro")
+Register-ScheduledTask -TaskPath $TaskPath -TaskName 'Watchdog' -Action $watchdogAction `
+    -Trigger $watchdogTrigger -Principal $principal -Settings $watchdogSettings `
+    -Force | Out-Null
+
 # 3. Node agent as a systemd service. Also before the join, as it downloads
 # packages and can fail on a PC without internet access.
 Write-Host 'Installing the node agent service...'
@@ -352,6 +372,7 @@ if ((Get-WslOutput systemctl is-active k3s-agent) -eq 'active' -and -not $Rejoin
 
 Start-ScheduledTask -TaskPath $TaskPath -TaskName 'WSL'
 Start-ScheduledTask -TaskPath $TaskPath -TaskName 'Sensor'
+Start-ScheduledTask -TaskPath $TaskPath -TaskName 'Watchdog'
 
 if ($setup -and $setup.Files.kubeconfig) {
     Write-Host @"

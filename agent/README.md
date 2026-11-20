@@ -141,6 +141,15 @@ In Ubuntu, `journalctl -u idlecloud-node-agent -n 30` and
   `sudo k3s kubectl --kubeconfig /etc/idlecloud/node-agent.kubeconfig get node <name> -o jsonpath='{.spec.taints}'`.
   `node.kubernetes.io/unreachable` taints there mean the K3s agent, not the
   node agent, has lost the server; check `systemctl status k3s-agent wg-quick@wg0`.
+- **The PC drops out and comes back by itself:** that is the watchdog. The
+  `IdleCloud\Watchdog` task runs `wsl-watchdog.ps1` every 2 minutes from login.
+  It checks that `/var/lib/rancher` can be written to and that `k3s-agent` and
+  `idlecloud-node-agent` are running. After two failed checks in a row it runs
+  `wsl --shutdown` (which stops every WSL distro on the PC) and starts the
+  `IdleCloud\WSL` task again, at most once every 10 minutes. This mostly
+  happens when WSL's disk turns read-only after a disk error, often because C:
+  is full. Its log, with the kernel's disk messages from before each restart,
+  is `%LOCALAPPDATA%\idlecloud\watchdog.log`.
 
 ## GPU workers on Windows
 
