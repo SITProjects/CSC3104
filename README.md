@@ -194,16 +194,6 @@ shared/         Database models, SQL migrations, shared helpers
 worker/         Job container images and the generic job runner
 ```
 
-## Team
-
-| GitHub | Contributions |
-| --- | --- |
-| [@Kitsuneez](https://github.com/Kitsuneez) | Coordinator and scheduling, database migrations, infrastructure (WireGuard, k3s, AWS hub), GPU workers |
-| [@BlackberryDealer](https://github.com/BlackberryDealer) | Burst autoscaler, serverless page pipeline, Python and PyTorch job types, spot checks |
-| [@kaiwenteoo](https://github.com/kaiwenteoo) | Verifier: majority voting and trust scores |
-| [@Timothy-Seow](https://github.com/Timothy-Seow) | Web app and public API |
-| [@felicia-chuaxy](https://github.com/felicia-chuaxy) | Node agent, Windows idle sensor and worker installer, eviction evaluation |
-
 ## License
 
 [MIT](LICENSE)
