@@ -1,0 +1,2 @@
+label,requested,completed,account_count,campus_idle_at_start,campus_idle_at_end,campus_idle_changed,peak_burst_workers_observed,worker_count,batch_seconds,whole_lifetime_estimated_usd,costs_final
+fallback-batch-37d6e93dc120,4,4,1,,,False,2,2,462.0647370815277,0.008711,True

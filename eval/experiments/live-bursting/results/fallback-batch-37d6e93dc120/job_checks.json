@@ -1,0 +1,60 @@
+[
+  {
+    "job_id": "ec73b4ca-79db-417e-8f35-edc290af4940",
+    "status_http": 200,
+    "final_status": "COMPLETED",
+    "replicas": [
+      {
+        "status": "DONE",
+        "node": "burst-202",
+        "attempt": 1,
+        "restarts": 0
+      }
+    ],
+    "events": []
+  },
+  {
+    "job_id": "599fee25-10d0-44b9-b92c-74c9690cbc79",
+    "status_http": 200,
+    "final_status": "COMPLETED",
+    "replicas": [
+      {
+        "status": "DONE",
+        "node": "burst-201",
+        "attempt": 1,
+        "restarts": 0
+      }
+    ],
+    "events": []
+  },
+  {
+    "job_id": "dff0e709-2423-4606-94a1-8d0356182d1b",
+    "status_http": 200,
+    "final_status": "COMPLETED",
+    "replicas": [
+      {
+        "status": "DONE",
+        "node": "burst-202",
+        "attempt": 2,
+        "restarts": 1
+      }
+    ],
+    "events": [
+      "20 Nov 00:48:10 | Lost | dff0e709 | task 192 | burst-200 | TerminationByKubelet | (replica 269, attempt 1)"
+    ]
+  },
+  {
+    "job_id": "52b6b9f5-f496-42f9-b235-00401d5b6467",
+    "status_http": 200,
+    "final_status": "COMPLETED",
+    "replicas": [
+      {
+        "status": "DONE",
+        "node": "burst-201",
+        "attempt": 1,
+        "restarts": 0
+      }
+    ],
+    "events": []
+  }
+]

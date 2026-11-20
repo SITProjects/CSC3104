@@ -1,0 +1,33 @@
+{
+  "gpu_job": {
+    "job_id": "5ab51b86-ad99-447e-959d-8aad283feb49",
+    "job_type": "pytorch-gpu",
+    "command": "python train_bench.py 30",
+    "node": "dylan-desktop",
+    "device": "AMD Radeon RX 7800 XT (ROCm, WSL2)",
+    "train_seconds": 22.853,
+    "train_accuracy": 1.0,
+    "first_epoch_seconds": 15.737,
+    "median_epoch_seconds_after_first": 0.2515,
+    "checker": {
+      "node": "ip-172-31-38-186",
+      "score": 0.986667,
+      "samples": 450,
+      "model_sha256": "7e01f3503d5e77d50a918c64ca1e5b898bf9ff3b83f7e824071636b34eb3f64b",
+      "eval_sha256": "6fde0e76bfa4af346b083fd82e194d6cfd0982080f3f2d3f5af5d580034376e8"
+    }
+  },
+  "cpu_job": {
+    "job_id": "c94ff47d-9b6d-415f-bff3-187b993b84dd",
+    "job_type": "pytorch",
+    "command": "python train_bench.py 30",
+    "node": "dylan-desktop",
+    "device": "CPU, 2 threads",
+    "train_seconds": 43.732,
+    "train_accuracy": 1.0,
+    "first_epoch_seconds": 1.53,
+    "median_epoch_seconds_after_first": 1.449
+  },
+  "speedup_median_epoch_after_first": 5.76,
+  "speedup_total": 1.91
+}

@@ -1,0 +1,34 @@
+{
+  "job_id": "dd13318c-27a1-4b8f-b75f-4803a96e8ec4",
+  "account_email": "group17-burst-6ce48abe9169@example.test",
+  "submitted_utc": "2026-11-19T16:33:24.241005+00:00",
+  "python_job_seconds": 120,
+  "initial_idle_campus": [],
+  "initial_active_burst": 0,
+  "start_observed_utc": "2026-11-19T16:33:34.894667+00:00",
+  "finished_observed_utc": "2026-11-19T16:39:34.244044+00:00",
+  "elapsed_to_terminal_s": 370.003,
+  "cancelled_by_harness": false,
+  "last_status": "COMPLETED",
+  "last_observed_utc": "2026-11-19T16:44:52.180542+00:00",
+  "observed_seconds": 687.94,
+  "estimated_worker_lifetime_usd": "0.003471",
+  "workers": {
+    "i-07f1a0c5ca99e2952": {
+      "instance_id": "i-07f1a0c5ca99e2952",
+      "node": "burst-200",
+      "size": "t3.small",
+      "market": "on-demand",
+      "launched_sgt": "20 Nov 2026 00:35 SGT",
+      "removed_sgt": "20 Nov 2026 00:44 SGT",
+      "active": false,
+      "hourly_usd": "0.022992",
+      "total_usd": "0.003471",
+      "attributed_usd": "0.000390",
+      "unattributed_usd": "0.003082",
+      "pricing_complete": true,
+      "first_seen_utc": "2026-11-19T16:35:48.746966+00:00",
+      "last_seen_utc": "2026-11-19T16:44:52.180542+00:00"
+    }
+  }
+}
