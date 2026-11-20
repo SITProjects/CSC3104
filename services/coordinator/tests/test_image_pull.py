@@ -8,14 +8,22 @@ The database tests need a scratch Postgres, as in test_recovery.py:
 """
 
 import os
+from datetime import UTC, datetime
 
 import pytest
 from kubernetes.client import (
+    CoreV1Event,
+    V1Container,
     V1ContainerState,
     V1ContainerStateRunning,
     V1ContainerStateTerminated,
     V1ContainerStateWaiting,
     V1ContainerStatus,
+    V1ObjectMeta,
+    V1ObjectReference,
+    V1Pod,
+    V1PodSpec,
+    V1PodStatus,
 )
 
 from services.coordinator.crud import (
@@ -23,7 +31,12 @@ from services.coordinator.crud import (
     record_image_pull,
     schedule_replica,
 )
-from services.coordinator.loops.pod_watcher import image_pull, image_refs
+from services.coordinator.loops.housekeeping import creating_pods
+from services.coordinator.loops.pod_watcher import (
+    image_pull,
+    image_refs,
+    latest_pull_event,
+)
 from shared.db.models import ReplicaStatus
 
 GPU_IMAGE = "ghcr.io/sitprojects/idlecloud-pytorch-gpu:main"
@@ -72,14 +85,14 @@ def test_image_refs_full_names():
     assert image_refs("localhost:5000/tool:1") == {"localhost:5000/tool:1"}
 
 
-def test_creating_without_the_image_on_the_node_is_pulling():
-    assert image_pull(waiting("ContainerCreating"), lambda: False) == ImagePull(
+def test_creating_while_pulling_is_pulling():
+    assert image_pull(waiting("ContainerCreating"), lambda: True) == ImagePull(
         "pulling"
     )
 
 
-def test_creating_with_the_image_on_the_node_is_not_pulling():
-    assert image_pull(waiting("ContainerCreating"), lambda: True) == ImagePull("done")
+def test_creating_after_the_pull_is_not_pulling():
+    assert image_pull(waiting("ContainerCreating"), lambda: False) == ImagePull("done")
 
 
 def test_unreadable_node_says_nothing():
@@ -107,6 +120,46 @@ def test_started_or_finished_container_is_done():
 def test_no_container_state_yet_says_nothing():
     assert image_pull(None, never_called) is None
     assert image_pull(worker(None), never_called) is None
+
+
+def event(reason: str, second: int):
+    return CoreV1Event(
+        involved_object=V1ObjectReference(),
+        metadata=V1ObjectMeta(),
+        reason=reason,
+        last_timestamp=datetime(2026, 11, 20, 11, 18, second, tzinfo=UTC),
+    )
+
+
+def test_newest_pull_event_decides():
+    assert latest_pull_event([]) is None
+    assert latest_pull_event([event("Scheduled", 0)]) is None
+    assert latest_pull_event([event("Pulling", 1)]) == "Pulling"
+    assert latest_pull_event([event("Pulling", 1), event("Pulled", 9)]) == "Pulled"
+    # in the same second, Pulled is the later one
+    assert latest_pull_event([event("Pulled", 5), event("Pulling", 5)]) == "Pulled"
+    # a second pull (imagePullPolicy Always, a newer build) after an old one
+    assert (
+        latest_pull_event(
+            [event("Pulling", 1), event("Pulled", 2), event("Pulling", 30)]
+        )
+        == "Pulling"
+    )
+
+
+def placed(state: V1ContainerStatus, node="desktop-nvidia") -> V1Pod:
+    return V1Pod(
+        metadata=V1ObjectMeta(name="p", labels={}),
+        spec=V1PodSpec(node_name=node, containers=[V1Container(name="worker")]),
+        status=V1PodStatus(container_statuses=[state]),
+    )
+
+
+def test_housekeeping_rechecks_only_pods_being_created():
+    creating = placed(waiting("ContainerCreating"))
+    running = placed(worker(V1ContainerState(running=V1ContainerStateRunning())))
+    unplaced = placed(waiting("ContainerCreating"), node=None)
+    assert creating_pods([creating, running, unplaced]) == [creating]
 
 
 # ---------- with a database ----------

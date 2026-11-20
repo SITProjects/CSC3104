@@ -2,13 +2,15 @@ import asyncio
 import logging
 import threading
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from kubernetes import watch
 from kubernetes.client import (
     ApiException,
     CoreV1Api,
+    CoreV1Event,
+    CoreV1EventList,
     V1ContainerStatus,
     V1Node,
     V1ObjectMeta,
@@ -151,16 +153,69 @@ def image_on_node(v1: CoreV1Api, name: str, image: str) -> bool | None:
     )
 
 
+def latest_pull_event(events: list[CoreV1Event]) -> str | None:
+    """
+    The reason of the kubelet's newest image event for a Pod: "Pulling" while
+    it downloads, "Pulled" once done, or None if it has sent none. A tie (both
+    in the same second) goes to "Pulled", which always comes after "Pulling".
+    """
+    floor = datetime.min.replace(tzinfo=UTC)
+    pulls = [e for e in events if e.reason in ("Pulling", "Pulled")]
+    if not pulls:
+        return None
+    newest = max(
+        pulls,
+        key=lambda e: (
+            e.last_timestamp
+            or e.event_time
+            or e.first_timestamp
+            or (e.metadata.creation_timestamp if e.metadata else None)
+            or floor,
+            e.reason == "Pulled",
+        ),
+    )
+    return newest.reason
+
+
+def pulling_now(v1: CoreV1Api, pod: V1Pod, image: str | None) -> bool | None:
+    """
+    Whether the Pod's node is downloading its image now, or None if unknown.
+
+    The kubelet's Pulling and Pulled events for the Pod say so. Without them
+    (none yet, or events can't be read), the node's image list stands in. It
+    can be wrong: task Pods use imagePullPolicy Always, so a node holding an
+    older build under the same tag still pulls the new one.
+    """
+    meta, node = pod.metadata, pod.spec.node_name if pod.spec else None
+    if meta and meta.uid:
+        try:
+            events = cast(
+                CoreV1EventList,
+                v1.list_namespaced_event(
+                    JOB_NAMESPACE, field_selector=f"involvedObject.uid={meta.uid}"
+                ),
+            )
+            latest = latest_pull_event(events.items or [])
+            if latest is not None:
+                return latest == "Pulling"
+        except ApiException:
+            pass
+    if not node or not image:
+        return None
+    held = image_on_node(v1, node, image)
+    return None if held is None else not held
+
+
 def image_pull(
-    worker: V1ContainerStatus | None, on_node: Callable[[], bool | None]
+    worker: V1ContainerStatus | None, pulling: Callable[[], bool | None]
 ) -> ImagePull | None:
     """
     What a placed Pod's worker container says about its image, or None if it
     says nothing yet.
 
     The kubelet shows a container being pulled and one being created alike, as
-    waiting with reason ContainerCreating, so the node's image list decides
-    between them. It is read only then (on_node).
+    waiting with reason ContainerCreating, so pulling() decides between them
+    (pulling_now). It is called only then.
     """
     if worker is None or worker.state is None:
         return None
@@ -172,10 +227,10 @@ def image_pull(
     if waiting.reason in PULL_FAILED_REASONS:
         return ImagePull("failed", waiting.message or waiting.reason)
     if waiting.reason == "ContainerCreating":
-        held = on_node()
-        if held is None:
+        now = pulling()
+        if now is None:
             return None
-        return ImagePull("done") if held else ImagePull("pulling")
+        return ImagePull("pulling") if now else ImagePull("done")
     # any other wait (CrashLoopBackOff, a config error) comes after the pull
     return ImagePull("done")
 
@@ -211,10 +266,7 @@ def to_update(v1: CoreV1Api, kind: str, pod: V1Pod) -> PodUpdate | None:
                     reason = "OOMKilled"
     pull = None
     if node and kind != "DELETED" and worker is not None:
-        image = worker.image
-        pull = image_pull(
-            worker, lambda: image_on_node(v1, node, image) if image else None
-        )
+        pull = image_pull(worker, lambda: pulling_now(v1, pod, worker.image))
 
     return PodUpdate(
         replica_id=replica_id,
