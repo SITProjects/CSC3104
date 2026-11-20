@@ -10,7 +10,9 @@ uploads it and reports the command's exit code. The command sees:
     OUTPUT_DIR      files to return to the user (work folder/output)
     CHECKPOINT_DIR  state to keep if the copy moves (work folder/checkpoint)
     PROGRESS_FILE   where it may write how far along it is, 0 to 100, for the
-                    job page's progress bar (work folder/.idlecloud-progress)
+                    job page's progress bar (work folder/.idlecloud-progress).
+                    Without it, the runner reads progress from what the command
+                    prints: "Epoch 3/30" or a tqdm "45%|" bar (OutputProgress).
     HOME            the work folder, for tools that want a writable home
 It does not see the replica token.
 
@@ -37,6 +39,7 @@ import io
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -296,17 +299,71 @@ def read_progress(path: Path) -> int | None:
     return max(0, min(100, int(value)))
 
 
+# "Epoch 3/30", "epoch 3 of 30", "Step: 120/500", "iter 7/10"
+COUNT_PATTERN = re.compile(
+    rb"\b(?:epoch|step|iter(?:ation)?)s?\b\s*[:#]?\s*(\d+)\s*(?:/|of)\s*(\d+)",
+    re.IGNORECASE,
+)
+# a tqdm bar: " 45%|####      | 450/1000 [00:10<00:12, ...]"
+TQDM_PATTERN = re.compile(rb"(?<![\d.])(\d{1,3})%\|")
+
+
+class OutputProgress:
+    """
+    Progress read from what the command prints, for scripts that don't write
+    PROGRESS_FILE: the last "epoch/step/iter k/N" (or "k of N") line, else the
+    last tqdm percentage. It only ever goes up, so a bar that starts again
+    (say, a tqdm bar per epoch) can't pull it back, and stays below 100 until
+    the copy is done, as printed text is a guess.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.counted: int | None = None  # from k/N lines
+        self.bar: int | None = None  # from tqdm
+
+    def feed(self, line: bytes) -> None:
+        # tqdm redraws with \r, so one line can hold many updates: the last counts
+        for part in reversed(line.split(b"\r")):
+            counted = COUNT_PATTERN.findall(part)
+            bars = TQDM_PATTERN.findall(part)
+            if counted or bars:
+                break
+        else:
+            return
+        with self.lock:
+            for k, n in counted[-1:]:
+                k, n = int(k), int(n)
+                if 0 < n and k <= n:
+                    self.counted = max(self.counted or 0, min(99, 100 * k // n))
+            for pct in bars[-1:]:
+                pct = int(pct)
+                if pct <= 100:
+                    self.bar = max(self.bar or 0, min(99, pct))
+
+    def value(self) -> int | None:
+        with self.lock:
+            return self.counted if self.counted is not None else self.bar
+
+
 def report_progress_every(
-    config: dict[str, str], path: Path, interval: float, done: threading.Event
+    config: dict[str, str],
+    path: Path,
+    interval: float,
+    done: threading.Event,
+    output: OutputProgress | None = None,
 ) -> None:
     """
     Sends the command's progress to the coordinator every interval seconds
-    when it changed, until done is set. A refused report is tried again at the
-    next interval.
+    when it changed, until done is set: what it wrote to PROGRESS_FILE, or else
+    what output (OutputProgress) read from its log. A refused report is tried
+    again at the next interval.
     """
     sent = None
     while not done.wait(interval):
         value = read_progress(path)
+        if value is None and output is not None:
+            value = output.value()
         if value is None or value == sent:
             continue
         try:
@@ -318,7 +375,11 @@ def report_progress_every(
 
 
 def run_command(
-    command: list[str], work: Path, log: Log, stopping: threading.Event
+    command: list[str],
+    work: Path,
+    log: Log,
+    stopping: threading.Event,
+    output: OutputProgress | None = None,
 ) -> int:
     """
     Runs the command in its own process group and returns its exit code.
@@ -352,6 +413,8 @@ def run_command(
     threading.Thread(target=stop_when_asked, daemon=True).start()
     for line in child.stdout:
         log.write(line)
+        if output is not None:
+            output.feed(line)
     return child.wait()
 
 
@@ -704,6 +767,7 @@ def main() -> int:
                     daemon=True,
                 )
                 saver.start()
+                printed = OutputProgress()
                 threading.Thread(
                     target=report_progress_every,
                     args=(
@@ -711,12 +775,13 @@ def main() -> int:
                         work / PROGRESS_NAME,
                         PROGRESS_INTERVAL_SECONDS,
                         done,
+                        printed,
                     ),
                     daemon=True,
                 ).start()
                 kills_before = oom_kills()
                 try:
-                    code = run_command(command, work, log, stopping)
+                    code = run_command(command, work, log, stopping, printed)
                 finally:
                     done.set()
                 note_out_of_memory(code, kills_before, log)

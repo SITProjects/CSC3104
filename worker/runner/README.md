@@ -89,9 +89,14 @@ The command can move the job page's progress bar by writing how far along it
 is, a number from 0 to 100, to `$PROGRESS_FILE` (`.idlecloud-progress` in the
 work folder). Every 10 s (`PROGRESS_INTERVAL_SECONDS`) the runner reads it and,
 when the whole-number value changed, sends it to
-`POST /internal/replicas/{id}/progress`. Without the file the bar stays at 0%
-until the copy is done. Write it whole (a new file, then a rename), e.g.
-`idlecloud_ckpt.report_progress(42.5)` in the GPU image.
+`POST /internal/replicas/{id}/progress`. Write it whole (a new file, then a
+rename), e.g. with `idlecloud_ckpt.report_progress(42.5)` in the GPU image.
+
+A command that doesn't write the file still moves the bar if it prints its
+progress: the last `epoch`, `step` or `iter` line with `k/N` (or `k of N`)
+counts, else the last tqdm bar's `NN%|`. This fallback only goes up, so a bar
+that restarts each epoch can't pull it back, and stops at 99% until the copy
+is done. The file wins whenever it exists.
 
 Presigned URLs can stop working during a long job, when the hub's AWS
 credentials rotate. An upload refused with 403 fetches the manifest again and
