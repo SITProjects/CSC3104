@@ -525,6 +525,9 @@ def progress_view(job: dict[str, Any]) -> dict[str, Any]:
                 # the last checkpoint this copy saved, for long jobs
                 "saved_at": r.get("checkpoint_at"),
                 "saved_step": r.get("checkpoint_step"),
+                # the PC is still downloading the job's image, or couldn't
+                "pulling_since": r.get("pulling_since"),
+                "pull_error": r.get("pull_error"),
                 # a check copy scores a trained model on the platform's checker
                 "check": r.get("check_of") is not None,
             }

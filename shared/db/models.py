@@ -687,6 +687,15 @@ class Replica(Base):
         nullable=True,
     )
 
+    # The node is still pulling this attempt's image, or failed to (migration
+    # 018). Set by the coordinator's pod watcher, cleared when the container
+    # starts and when the copy is launched again.
+    pulling_since: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    pull_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # A check copy scores the model of the training copy check_of, on a
     # checker node (migration 017). Its outcome: 'scored' with the top-1
     # accuracy on check_samples samples, or 'not_scored' with check_reason.
@@ -863,6 +872,9 @@ class ReplicaView(BaseModel):
     # The newest saved checkpoint, for "last saved" on the job page
     checkpoint_step: int | None = None
     checkpoint_at: datetime | None = None
+    # The node is still downloading the image (since when), or couldn't
+    pulling_since: datetime | None = None
+    pull_error: str | None = None
     # Set on a check copy: the training copy it scored and how that went
     check_of: int | None = None
     check_status: str | None = None

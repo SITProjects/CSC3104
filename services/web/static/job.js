@@ -13,6 +13,7 @@
     FAILED: "Failed", CANCELLED: "Cancelled", SCHEDULED: "Queued",
     WAITING: "Waiting for a PC", EVICTED: "Moving to another PC",
     LOST: "Moving to another PC", DONE: "Done", SCORING: "Scoring",
+    PULLING: "Downloading image", PULL_FAILED: "Can't download image",
   };
   const label = (s) => STATUS_TEXT[s] || s;
 
@@ -20,10 +21,11 @@
   const TONE = {
     RUNNING: "bg-blue-100 text-blue-800", SCHEDULED: "bg-blue-100 text-blue-800",
     PREPARING: "bg-blue-100 text-blue-800", VOTING: "bg-blue-100 text-blue-800",
-    SCORING: "bg-blue-100 text-blue-800",
+    SCORING: "bg-blue-100 text-blue-800", PULLING: "bg-blue-100 text-blue-800",
     COMPLETED: "bg-green-100 text-green-800", VERIFIED: "bg-green-100 text-green-800",
     DONE: "bg-green-100 text-green-800",
     EVICTED: "bg-amber-100 text-amber-800", LOST: "bg-amber-100 text-amber-800",
+    PULL_FAILED: "bg-amber-100 text-amber-800",
   };
   const DESTRUCTIVE = new Set(["FAILED", "DISPUTED", "CANCELLED"]);
   // Job types with something to download, and when the button shows
@@ -61,9 +63,13 @@
   }
 
   // The coordinator calls a copy RUNNING as soon as its Kubernetes Job exists,
-  // even before any PC has picked it up. Without a PC it is still waiting.
+  // even before any PC has picked it up. Without a PC it is still waiting; with
+  // one, the PC may first have to download the job's image (several GB for GPU
+  // jobs), which the coordinator reports as pulling_since or pull_error.
   function copyState(r) {
     if (r.status === "RUNNING" && !r.node) return "WAITING";
+    if (r.status === "RUNNING" && r.pull_error) return "PULL_FAILED";
+    if (r.status === "RUNNING" && r.pulling_since) return "PULLING";
     if (r.status === "SCHEDULED") return "PENDING";
     return r.status;
   }
@@ -80,8 +86,22 @@
     const item = el("li", "flex flex-wrap items-center gap-1.5");
     // a check copy runs on the platform's checker, not on a lending PC
     const who = r.check ? `checker${r.node ? ` (${r.node})` : ""}` : r.node || "–";
-    item.append(el("span", "font-medium", who), " · ", badge(copyState(r)));
-    if (r.status === "RUNNING" && r.node) item.append(` ${r.progress}%`);
+    const state = copyState(r);
+    item.append(el("span", "font-medium", who), " · ", badge(state));
+    if (state === "RUNNING") item.append(` ${r.progress}%`);
+    if (state === "PULLING" || state === "PULL_FAILED") {
+      // the kubelet keeps retrying a failed pull, so both show how long it has been
+      if (r.pulling_since) {
+        const since = el("span", "text-xs text-muted-foreground", `started ${ago(r.pulling_since)}`);
+        since.title = new Date(r.pulling_since).toLocaleString();
+        item.append(since);
+      }
+      if (r.pull_error) {
+        const why = el("span", "text-xs text-amber-700", "retrying");
+        why.title = r.pull_error;
+        item.append(why);
+      }
+    }
     if (r.saved_at && (r.status === "RUNNING" || r.status === "SCHEDULED")) {
       // a moved copy carries on from here; older work is redone
       const step = r.saved_step != null ? `, step ${r.saved_step}` : "";

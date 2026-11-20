@@ -12,6 +12,7 @@ from .jobs import (
 )
 from .nodes import ensure_node, list_nodes, mark_offline, update_node_state
 from .replicas import (
+    ImagePull,
     create_replicas,
     evict_replica,
     fail_unplaced,
@@ -25,6 +26,7 @@ from .replicas import (
     out_of_retries,
     record_check,
     record_checkpoint,
+    record_image_pull,
     record_placement,
     recover_replicas,
     requeue_without_gpu,
@@ -44,6 +46,7 @@ from .users import (
 )
 
 __all__ = [
+    "ImagePull",
     "add_tasks",
     "cancel_job",
     "check_job_type",
@@ -82,6 +85,7 @@ __all__ = [
     "out_of_retries",
     "record_check",
     "record_checkpoint",
+    "record_image_pull",
     "record_placement",
     "recover_replicas",
     "requeue_without_gpu",

@@ -278,3 +278,16 @@ def test_clean_filename(name, expected):
 def test_clean_filename_caps_length(monkeypatch):
     monkeypatch.setattr(settings, "max_filename_chars", 10)
     assert jobs.clean_filename("x" * 50) == "x" * 10
+
+
+def test_progress_view_passes_on_image_pulls():
+    job = sample_job()
+    job["tasks"][0]["replicas"][0].update(
+        pulling_since="2026-11-20T07:05:00+00:00", pull_error=None
+    )
+    copy = jobs.progress_view(job)["tasks"][1]["replicas"][0]
+    assert copy["pulling_since"] == "2026-11-20T07:05:00+00:00"
+    assert copy["pull_error"] is None
+    # replicas from a coordinator without migration 018 have neither
+    other = jobs.progress_view(sample_job())["tasks"][0]["replicas"][0]
+    assert other["pulling_since"] is None and other["pull_error"] is None

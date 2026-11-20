@@ -1,8 +1,10 @@
 import hashlib
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import exists, or_, select, update
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -18,6 +20,18 @@ from shared.db.models import (
 )
 
 from .tasks import set_voting
+
+
+@dataclass(frozen=True)
+class ImagePull:
+    """
+    What a placed Pod's status says about its image: the node is pulling it,
+    the pull failed (message from the kubelet), or it is done (the container
+    started, or the image was already on the node).
+    """
+
+    state: Literal["pulling", "failed", "done"]
+    message: str | None = None
 
 
 async def fetch_running_replicas(
@@ -404,6 +418,9 @@ async def schedule_replica(session: AsyncSession, replica: Replica, token: str) 
     replica.token_hash = hashlib.sha256(token.encode()).hexdigest()
     replica.progress = 0
     replica.started_at = datetime.now(UTC)
+    # an earlier attempt's pull says nothing about this one
+    replica.pulling_since = None
+    replica.pull_error = None
     await session.flush()
 
 
@@ -469,6 +486,55 @@ async def record_placement(
         )
         .values(**values)
     )
+
+
+async def record_image_pull(
+    session: AsyncSession,
+    replica_id: int,
+    attempt: int,
+    pull: ImagePull,
+) -> None:
+    """
+    Records whether a RUNNING replica's node is still pulling its image.
+
+    Only the current attempt's Pod is listened to, as in record_placement. A
+    pull keeps the time it started; a failed pull keeps that time as well, as
+    the kubelet retries it; a started container clears both.
+
+    args:
+        session: The database session for this request.
+        replica_id: The id of the replica whose Pod changed.
+        attempt: The attempt the Pod belongs to.
+        pull: What the Pod's status says about its image.
+    """
+    current = (
+        Replica.id == replica_id,
+        Replica.attempt == attempt,
+        Replica.status == ReplicaStatus.RUNNING,
+    )
+    since = func.coalesce(Replica.pulling_since, func.now())
+    if pull.state == "pulling":
+        stmt = (
+            update(Replica).where(*current).values(pulling_since=since, pull_error=None)
+        )
+    elif pull.state == "failed":
+        stmt = (
+            update(Replica)
+            .where(*current)
+            .values(pulling_since=since, pull_error=pull.message or "ImagePullFailed")
+        )
+    else:
+        stmt = (
+            update(Replica)
+            .where(
+                *current,
+                or_(
+                    Replica.pulling_since.is_not(None), Replica.pull_error.is_not(None)
+                ),
+            )
+            .values(pulling_since=None, pull_error=None)
+        )
+    await session.execute(stmt)
 
 
 async def handle_replica_completed(
