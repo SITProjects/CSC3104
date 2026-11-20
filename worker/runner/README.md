@@ -83,6 +83,16 @@ with its SHA-256 and size, and with the training step if the program wrote
 `idlecloud_ckpt` helper does). A failed report is only logged: S3 has the
 archive anyway.
 
+## Progress
+
+The command can move the job page's progress bar by writing how far along it
+is, a number from 0 to 100, to `$PROGRESS_FILE` (`.idlecloud-progress` in the
+work folder). Every 10 s (`PROGRESS_INTERVAL_SECONDS`) the runner reads it and,
+when the whole-number value changed, sends it to
+`POST /internal/replicas/{id}/progress`. Without the file the bar stays at 0%
+until the copy is done. Write it whole (a new file, then a rename), e.g.
+`idlecloud_ckpt.report_progress(42.5)` in the GPU image.
+
 Presigned URLs can stop working during a long job, when the hub's AWS
 credentials rotate. An upload refused with 403 fetches the manifest again and
 is retried once with the new URL.
