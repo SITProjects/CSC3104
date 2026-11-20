@@ -107,3 +107,64 @@ def test_progress_is_sent_only_when_it_changes(runner, tmp_path, monkeypatch):
     threading.Thread(target=change_soon).start()
     runner.report_progress_every({}, path, 0.01, done)
     assert sent == [10, 55]
+
+
+def test_output_progress_from_epoch_lines(runner):
+    out = runner.OutputProgress()
+    assert out.value() is None
+    out.feed(b"[11:49:06] Epoch 1/30: loss 0.8468, test accuracy 92.15%\n")
+    assert out.value() == 3
+    out.feed(b"[11:50:21] Epoch 11/30: loss 0.0514\n")
+    assert out.value() == 36
+    out.feed(b"epoch 3 of 30\n")  # going back is ignored
+    assert out.value() == 36
+    out.feed(b"Epoch 30/30: done\n")  # stays below 100 until the copy is done
+    assert out.value() == 99
+
+
+def test_output_progress_from_tqdm(runner):
+    out = runner.OutputProgress()
+    out.feed(
+        b" 10%|#         | 10/100 [00:01<00:09]\r 45%|####5     | 45/100 [00:04<00:05]\n"
+    )
+    assert out.value() == 45
+
+
+def test_counted_lines_beat_tqdm(runner):
+    out = runner.OutputProgress()
+    out.feed(b"Epoch 2/10\n")
+    out.feed(b"100%|##########| 500/500 [00:05<00:00]\n")  # an inner bar per epoch
+    assert out.value() == 20
+
+
+def test_other_text_is_ignored(runner):
+    out = runner.OutputProgress()
+    for line in (
+        b"Downloaded 3/10 files\n",
+        b"accuracy 98.5%\n",
+        b"epoch 5/0\n",
+        b"Epoch 12/10\n",
+    ):
+        out.feed(line)
+    assert out.value() is None
+
+
+def test_progress_file_wins_over_output(runner, tmp_path, monkeypatch):
+    import threading
+
+    path = tmp_path / "progress"
+    out = runner.OutputProgress()
+    out.feed(b"Epoch 5/10\n")
+    sent = []
+    done = threading.Event()
+
+    def fake_call(config, method, where, body=None, **kwargs):
+        sent.append(body["progress"])
+        if len(sent) == 1:
+            path.write_text("80")
+        else:
+            done.set()
+
+    monkeypatch.setattr(runner, "call", fake_call)
+    runner.report_progress_every({}, path, 0.01, done, out)
+    assert sent == [50, 80]
