@@ -17,6 +17,10 @@ NodeState = Literal["IDLE", "BUSY", "OFFLINE"]
 MAX_FILES_PER_TASK = 50
 # A 500-page PDF split into single pages, with room to spare
 MAX_TASKS_PER_JOB = 1000
+# The most memory (MiB) one copy may ask for: GPU job types may go higher, as
+# their PCs have more and PyTorch on CUDA needs it (services/web/jobs.py)
+CPU_MAX_MEM = 4096
+GPU_MAX_MEM = 6144
 
 
 class TaskIn(BaseModel):
@@ -83,7 +87,8 @@ class JobSpec(BaseModel):
     # not met. Scoring needs an "eval_file" in the task input (GPU plan phase 3).
     min_score: float | None = Field(default=None, ge=0, le=1, examples=[0.9])
     cpu_request: int = Field(ge=1, le=16, examples=[2])  # in cores
-    mem_request: int = Field(ge=64, le=4096, examples=[256])  # in MiB
+    # in MiB; above CPU_MAX_MEM only for GPU types (crud.jobs.check_job_type)
+    mem_request: int = Field(ge=64, le=GPU_MAX_MEM, examples=[256])
 
     @model_validator(mode="after")
     def check_task_indices(self) -> "JobSpec":

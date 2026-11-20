@@ -30,7 +30,7 @@
                 data-runs-command="{{ 'true' if t.runs_command else 'false' }}"
                 data-scored="{{ 'true' if t.name in scored_types else 'false' }}"
                 data-example="{{ t.example }}"
-                data-description="{{ t.description }}" data-cpu="{{ t.default_cpu }}" data-mem="{{ t.default_mem }}"
+                data-description="{{ t.description }}" data-cpu="{{ t.default_cpu }}" data-mem="{{ t.default_mem }}" data-max-mem="{{ t.max_mem or mem_range[1] }}"
                 {% if chosen and chosen.name == t.name %}selected{% endif %}>{{ t.label }}</option>
         {% endfor %}
       </select>
@@ -105,10 +105,10 @@
         <div role="group" class="field">
           <label class="label" for="mem">Memory (MiB)</label>
           <input class="input" id="mem" type="number" name="mem" inputmode="numeric" step="1"
-                 min="{{ mem_range[0] }}" max="{{ mem_range[1] }}" value="{{ form.mem or '' }}"
+                 min="{{ mem_range[0] }}" max="{{ (chosen.max_mem if chosen and chosen.max_mem) or mem_range[1] }}" value="{{ form.mem or '' }}"
                  placeholder="Default: {{ chosen.default_mem if chosen else '' }}" aria-describedby="mem-hint"
                  {% if not custom %}disabled{% endif %}>
-          <p id="mem-hint">{{ mem_range[0] }} to {{ mem_range[1] }} MiB.</p>
+          <p id="mem-hint">{{ mem_range[0] }} to <span id="mem-max">{{ (chosen.max_mem if chosen and chosen.max_mem) or mem_range[1] }}</span> MiB.</p>
         </div>
       </div>
     </fieldset>
