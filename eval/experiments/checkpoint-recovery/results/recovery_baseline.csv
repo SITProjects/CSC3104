@@ -1,0 +1,4 @@
+trial,job_id,requested_delay_s,old_node,new_node,old_pod,new_pod,t_submit,t_old_running,t_taint,t_taint_ack,t_old_stopped,t_new_running,t_first_resumed_epoch,t_done,final_status,epoch_at_taint,resumed_at,epochs_repeated,successful,release_s,resume_s,duration_s,overhead_s,pod_minus_host_clock_s,clock_uncertainty_s
+1,4c02f860-8728-447c-81c0-6c0286b192a5,,local-pc-1,,replica-11-a1-2phjv,,1795104851.9896374,1795104857.526047,,,,,,1795104991.6001284,COMPLETED,,,,,,,139.61049103736877,,0.10978531837463379,0.1294841766357422
+2,2ca88a8f-da9f-48a4-bb0a-cf620a86a424,,local-pc-1,,replica-12-a1-rg5fx,,1795104992.7046735,1795104998.3751009,,,,,,1795105136.4783316,COMPLETED,,,,,,,143.77365803718567,,0.10471057891845703,0.12381482124328613
+3,3275a319-f8df-4778-a8d9-b08e5f197232,,local-pc-2,,replica-13-a1-s6xdf,,1795105137.5212429,1795105143.895113,,,,,,1795105276.952788,COMPLETED,,,,,,,139.43154525756836,,0.08166956901550293,0.12018585205078125
