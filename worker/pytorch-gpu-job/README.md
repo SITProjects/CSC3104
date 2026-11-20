@@ -118,7 +118,7 @@ Examples:
 
 - `examples/train_gpu.py` exports `model.onnx` at the end.
   `examples/make_eval_digits.py` writes its `eval.npz` (the digits it held out).
-- `examples/gpu_test.py` is a first job to try on a new GPU worker. It
+- [`examples/gpu_test.py`](../../examples/gpu_test.py) (in the repo root) is a first job to try on a new GPU worker. It
   reports the GPU, benchmarks it against the CPU, then trains an MLP on
   synthetic data with checkpoints. `--samples` sets the RAM it needs (about
   600000 fit the default 4096 MiB, 900000 fit 6144 MiB), and `--amp` turns on
