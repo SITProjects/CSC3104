@@ -39,8 +39,10 @@ see "Local stack" in `infra/README.md`. Open http://localhost:8000 (API docs at
 
 `/jobs/new` lets the user pick a job type (`JOB_TYPES` in `jobs.py`, mirroring the
 types seeded in `shared/migrations`). Each type has a default CPU and memory; only
-types with `custom_resources` (the test workload and Python script) let the user
-change them, within the coordinator's limits (1 to 16 cores, 64 to 4096 MiB). Tasks
+types with `custom_resources` (the test workload, Python, PyTorch and PyTorch GPU)
+let the user change them, within the coordinator's limits: 1 to 16 cores, and 64 to
+4096 MiB, or up to 6144 MiB for GPU types (`max_mem`, `GPU_MAX_MEM`). The form's
+memory field and hint follow the chosen type. Tasks
 start with `REPLICAS_PER_TASK` copies (default 1, see `services/verifier/README.md`),
 and job types without `voting` always run one.
 
