@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "Campus Idle-Compute Cloud: idle lab PCs as a verified k3s compute cluster with AWS bursting"
 readme = "README.md"
 authors = [
-    { name = "Kitsunez", email = "nyx2753@gmail.com" }
+    { name = "Ng Ying Xuan", email = "nyx2753@gmail.com" },
+    { name = "Dylan Ho Sheng Xue" },
+    { name = "Kai Wen Teo" },
+    { name = "Timothy Seow" },
+    { name = "felicia-chuaxy" },
 ]
 requires-python = ">=3.12"
 dependencies = [
