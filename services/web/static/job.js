@@ -117,11 +117,27 @@
     return item;
   }
 
-  // A task only counts as running once one of its copies has a PC.
+  // A task only counts as running once one of its copies has a PC, and while
+  // its PCs are all still downloading the image it says so instead.
+  const DOWNLOADING = ["PULLING", "PULL_FAILED"];
   function taskState(task) {
     if (task.status !== "RUNNING") return task.status;
+    const copies = task.replicas.map(copyState);
+    if (!copies.some((s) => s === "RUNNING" || s === "DONE")) {
+      const downloading = DOWNLOADING.find((s) => copies.includes(s));
+      if (downloading) return downloading;
+    }
     const started = task.replicas.some((r) => r.node || r.status === "DONE");
     return started ? "RUNNING" : "PENDING";
+  }
+
+  // The job's badge: a running job whose tasks are all still queued or
+  // downloading the image says it is downloading.
+  function jobState(job) {
+    if (job.status !== "RUNNING") return job.status;
+    const tasks = job.tasks.map(taskState);
+    if (!tasks.every((s) => s === "PENDING" || DOWNLOADING.includes(s))) return job.status;
+    return DOWNLOADING.find((s) => tasks.includes(s)) || job.status;
   }
 
   // The job's stages, in order; see the stages list in templates/job_detail.html.
@@ -205,7 +221,7 @@
 
   function render(job) {
     const download = DOWNLOADS[job.job_type];
-    styleBadge($("status-badge"), job.status);
+    styleBadge($("status-badge"), jobState(job));
     renderStages(job);
 
     $("overall").value = job.progress;
