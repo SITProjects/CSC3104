@@ -69,10 +69,28 @@ systemctl restart wg-quick@wg0
 ping -I wg0 -c 3 -W 3 10.10.0.1 >/dev/null ||
     die "Cannot reach the WireGuard hub."
 
+# A new join token means the PC registers again (a new setup zip, e.g. after the
+# worker was removed on the admin pages, which deletes its node on the hub).
+# Drop the certificates the agent got for the old node first: K3s keeps using
+# them while they exist, and the hub refuses them once that node is gone
+# ("unable to verify node identity"), so the agent never reconnects. With them
+# gone, the agent registers with the new token and gets fresh ones. The node
+# password (/etc/rancher/node/password) stays: the hub deletes its copy with
+# the node, or still holds the matching one.
+AGENT_TOKEN=/etc/rancher/k3s/agent-token
+AGENT_DIR=/var/lib/rancher/k3s/agent
+if [[ -s "$AGENT_TOKEN" ]] && ! cmp -s "$TOKEN_FILE" "$AGENT_TOKEN" &&
+    compgen -G "$AGENT_DIR/client-*.crt" >/dev/null; then
+    echo "New join token: clearing this PC's old node certificates so it registers again."
+    systemctl stop k3s-agent 2>/dev/null || true
+    rm -f -- "$AGENT_DIR"/client-*.crt "$AGENT_DIR"/client-*.key \
+        "$AGENT_DIR"/serving-kubelet.crt "$AGENT_DIR"/serving-kubelet.key
+fi
+
 # Store the join token for the K3s agent service.
 install -d -m 700 /etc/rancher/k3s
-[[ "$TOKEN_FILE" -ef /etc/rancher/k3s/agent-token ]] ||
-    install -m 600 "$TOKEN_FILE" /etc/rancher/k3s/agent-token
+[[ "$TOKEN_FILE" -ef "$AGENT_TOKEN" ]] ||
+    install -m 600 "$TOKEN_FILE" "$AGENT_TOKEN"
 
 # Make the agent wait for WireGuard during startup.
 install -d -m 755 /etc/systemd/system/k3s-agent.service.d
@@ -408,7 +426,12 @@ if [[ -n "$GPU_VENDOR" ]]; then
     echo "$GPU_VENDOR GPU found ($GPU_VRAM_GIB GiB): joining as a GPU worker."
 fi
 
-INSTALL_K3S_VERSION="$VERSION" sh "$INSTALLER" agent "${AGENT_ARGS[@]}"
+# Always (re)start the agent. When its service file is unchanged the installer
+# otherwise skips the start ("No change detected"), which leaves a stopped agent
+# stopped and a running one on the old containerd template and registries.yaml
+# written above, as K3s reads those only when the agent starts.
+INSTALL_K3S_VERSION="$VERSION" INSTALL_K3S_FORCE_RESTART=true \
+    sh "$INSTALLER" agent "${AGENT_ARGS[@]}"
 
 # Pull the GPU image now: it is several GB, and pulling it at the first job
 # would count against that job's time limit. crictl pulls the way the kubelet

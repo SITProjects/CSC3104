@@ -145,6 +145,21 @@ labels appear without removing the node. It never removes one, though: after
 taking a GPU out, also run `kubectl label node <node-name> idlecloud/gpu-
 idlecloud/gpu-vram-gib-` on the hub.
 
+### Rejoining a worker
+
+The script restarts the agent at the end, and on a new join token it drops
+the PC's old node certificates so the agent registers again. Two things it
+can't catch:
+
+- **A node deleted by hand on the hub.** A plain rejoin keeps the old
+  certificates, which the hub then refuses (`unable to verify node identity`
+  in `sudo journalctl -u k3s`). Remove the worker on the admin pages instead
+  and join it with a new setup zip.
+- **A GPU PC that joins without its GPU,** e.g. from an old copy of this
+  script that can't see a GPU under WSL. It joins fine as a CPU worker and GPU
+  jobs stay Pending. Check that it printed `<vendor> GPU found (<n> GiB)` and
+  shows its vendor under `kubectl get nodes -L idlecloud/gpu`.
+
 **Windows workers (WSL2):** `agent/install-worker.ps1` runs this script
 inside WSL, where the GPU is the Windows driver's. It has no `/dev/nvidia*`
 or `/dev/kfd`, only `/dev/dxg` and the driver's libraries in `/usr/lib/wsl`.
