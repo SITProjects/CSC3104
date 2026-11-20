@@ -1,4 +1,4 @@
-# Eviction speed (member 2)
+# Eviction speed
 
 Claim: owners get their PC back fast. Measures the time from a key press on a
 lent worker to (1) the owner-active taint being applied and (2) the task pod

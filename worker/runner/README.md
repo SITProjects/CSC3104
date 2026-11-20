@@ -1,7 +1,5 @@
 # Generic job runner
 
-Owner: member 6.
-
 `runner.py` runs a user's own command for a generic job type and reports back
 like any worker. Each approved image copies it in and uses it as the entrypoint
 (see `worker/python-job`, `worker/pytorch-job` and `worker/pytorch-gpu-job`). It uses only the Python

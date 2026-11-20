@@ -5,7 +5,7 @@
 #   bash services/autoscaler/deploy.sh             # build, then deploy
 #   bash services/autoscaler/deploy.sh --no-build  # reuse the image in Docker and k3s
 #
-# Safe to run again. It checks member 1's Secrets first, then refreshes the EC2
+# Safe to run again. It checks the hub's Secrets first, then refreshes the EC2
 # launch template, loads the image into k3s and applies both manifests. Last, a
 # one-off Job points OCR at the newest image published from main, so workers
 # can download it. AWS calls use the hub's own role (LabRole), so no keys are
@@ -33,13 +33,13 @@ env_in_manifest() {
 IMAGE=$(grep -oE "idlecloud/autoscaler:[^[:space:]]+" "$MANIFEST" | head -1)
 REGION=$(env_in_manifest AWS_REGION)
 K3S_VERSION=$(env_in_manifest K3S_VERSION)
-# The OCR Job reuses member 1's coordinator image
+# The OCR Job reuses the coordinator image
 COORDINATOR_IMAGE=$(grep -oE "idlecloud/coordinator:[^[:space:]]+" infra/k8s/base/coordinator.yml | head -1)
 [ -n "$IMAGE" ] && [ -n "$REGION" ] && [ -n "$K3S_VERSION" ] ||
   die "could not read the image, AWS_REGION or K3S_VERSION from $MANIFEST"
 [ -n "$COORDINATOR_IMAGE" ] || die "could not read the coordinator image from infra/k8s/base/coordinator.yml"
 
-step "Checking what member 1 sets up"
+step "Checking the hub setup"
 secret_key() {
   [ -n "$(kubectl -n "$NS" get secret "$1" -o jsonpath="{.data.$2}" 2>/dev/null)" ] ||
     die "Secret $1 has no key $2. $3"

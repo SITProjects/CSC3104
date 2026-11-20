@@ -1,10 +1,10 @@
 # Burst autoscaler: one Deployment in idlecloud-system plus the narrowest
-# permissions it needs. Member 1 can include this file in infra/k8s.
+# permissions it needs. infra/k8s can include this file.
 #
 # Before applying, create in idlecloud-system:
 #   Secret idlecloud-db       key DATABASE_URL  (same database as the coordinator)
-#   Secret burst-wg-slots     keys slot-200 ... slot-204  (member 1, Step 2)
-#   Secret k3s-agent-token    key token                   (member 1, Step 2)
+#   Secret burst-wg-slots     keys slot-200 ... slot-204  (hub setup)
+#   Secret k3s-agent-token    key token                   (hub setup)
 # AWS access comes from the control-plane instance's role (LabRole in AWS Academy),
 # which needs the instance metadata hop limit set to 2 so pods can reach it.
 # The role needs ec2:RunInstances, ec2:CreateTags (tags are set at launch),

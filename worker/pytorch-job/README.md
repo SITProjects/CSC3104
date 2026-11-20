@@ -1,7 +1,5 @@
 # PyTorch script image
 
-Owner: member 6.
-
 The approved image for the `pytorch` job type (migration 012): Python 3.12 with
 CPU-only PyTorch, numpy, pandas and scikit-learn, and the generic job runner
 (`worker/runner`) as its entrypoint. GPU support is future work.

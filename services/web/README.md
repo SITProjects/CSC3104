@@ -1,7 +1,5 @@
 # Website and public API
 
-Owner: member 5.
-
 Provide the New job page (`/jobs/new`: pick a job type, upload a PDF for OCR or
 a command and files for a Python script, and choose CPU and memory where the job
 type allows it), the public job API, page-ready callbacks, live progress,
@@ -185,7 +183,7 @@ download appears in the event log with the admin's email.
 - `static/confirm.js` asks before any form with a `data-confirm` question is
   sent. Without it the forms still work, unasked.
 
-## Burst workers and cost (member 6)
+## Burst workers and cost
 
 The admin dashboard (`/admin`) shows burst workers and each job's estimated burst
 cost, from the coordinator's `GET /admin/burst`, next to the worker nodes, every

@@ -1,7 +1,5 @@
 # Cloud burst autoscaler
 
-Owner: member 6.
-
 Monitor queued work and available campus capacity, launch bounded EC2 burst
 capacity, and retire unused workers. Manage burst slots and cost controls, and
 coordinate Spot interruption handling with the existing eviction and checkpoint
@@ -10,7 +8,7 @@ flow. Infrastructure templates belong in root `infra/`.
 The EC2 launch template is the one exception. `burst/launch_template.py` creates
 it with boto3, because the autoscaler reuses the same settings when it launches
 workers. Shared network and cluster setup, such as the WireGuard hub and peer
-configs, stays in member 1's `infra/`.
+configs, stays in `infra/`.
 
 A burst worker is an EC2 `t3.small` that joins the K3s cluster through WireGuard,
 like a campus PC. It gets the labels `idlecloud/role=worker` and
@@ -60,7 +58,7 @@ controller in `controller/`, which calls the same functions on its own.
 | `deploy.sh` | One command that installs the autoscaler and Spot watcher on the hub |
 | `ocrimage/` | One-off Job, run by `deploy.sh`, that points OCR at the newest published image |
 
-## Needed from member 1
+## Needed from the hub setup
 
 1. Five WireGuard peers on the hub for `10.10.0.200` to `10.10.0.204`, each with
    `PersistentKeepalive = 25` and no `DNS` line.
@@ -102,7 +100,7 @@ python -m services.autoscaler.burst.launch down --slot 200
 ```
 
 `launch_template` only needs to run once, and again when the settings change.
-A real launch needs member 1's Secrets and hub (see above).
+A real launch needs the hub and its Secrets (see above).
 
 ## How the autoscaler decides (Step 3)
 
@@ -197,7 +195,7 @@ bash services/autoscaler/deploy.sh --no-build  # reuse the image in Docker and k
 
 It runs these steps, and is safe to run again:
 
-1. Checks member 1's setup: the `burst-wg-slots` and `k3s-agent-token`
+1. Checks the hub setup: the `burst-wg-slots` and `k3s-agent-token`
    Secrets, a node labelled `idlecloud/role=control`, and that `K3S_VERSION` in
    `k8s/autoscaler.yml` matches the server. A wrong version stops it here,
    because burst workers would fail to join.
@@ -213,7 +211,7 @@ It runs these steps, and is safe to run again:
 `AWS_REGION` and `K3S_VERSION` live only in `k8s/autoscaler.yml`, so the
 template and the running autoscaler always use the same values. The pod reaches
 the hub's role through instance metadata, which needs hop limit 2 on the hub.
-If its logs show missing credentials, ask member 1 to check that setting.
+If its logs show missing credentials, check that setting on the hub.
 
 ### Publishing the OCR worker image
 
@@ -251,8 +249,8 @@ AWS gives a Spot machine a two-minute warning before taking it back. The
 **Spot watcher** (`spotwatch/`) is a small pod on every burst node. Every 5
 seconds it asks the instance metadata service (IMDSv2) for a warning. On one, it
 adds the owner-active taint `idlecloud/owner-active=true:NoExecute` to its node,
-the same taint member 2's agent uses when a PC's owner returns. Kubernetes then
-evicts the task pods, and member 3's checkpoint and requeue logic resumes them
+the same taint the node agent uses when a PC's owner returns. Kubernetes then
+evicts the task pods, and the coordinator's checkpoint and requeue logic resumes them
 elsewhere. It also writes `idlecloud/reclaim-at` (the deadline) and
 `idlecloud/reclaim-source` (`spot` or `injected`) on the node, and logs one JSON
 line with the timings.
@@ -468,7 +466,7 @@ and `decide._rescue_demand`):
   until then.
 
 This is only a speed-up, and it does not move any work by itself. Running an
-evicted replica again is the coordinator's job (member 3). It requeues an
+evicted replica again is the coordinator's job. It requeues an
 EVICTED or LOST replica as the next attempt with the same replica id, until the
 retry limit marks it FAILED. The normal scale-up places the new pod, with or
 without this step. If the
@@ -579,7 +577,7 @@ running copy at a time. One replica, the `Recreate` strategy and the advisory
 lock per tick make overlap unlikely, but do not prove it. After a restart, held
 launches are forgotten. A machine one of them started is then handled as an
 orphan once EC2 lists it, and its slot can be reused before that. Covering
-restarts needs the token stored in `burst_slots`, a follow-up with member 3.
+restarts needs the token stored in `burst_slots`, a follow-up in the coordinator.
 AWS does not document what a replay returns after the first request failed,
 or how long a token stays valid. A live test should check both.
 
@@ -614,7 +612,7 @@ Why it is safe:
 
 120 minutes is a target. A tick runs every 30 seconds plus the time it takes,
 so the end can be up to one tick late, longer if AWS calls fail. Work evicted
-at 118 minutes is requeued by the coordinator (member 3), like any evicted
+at 118 minutes is requeued by the coordinator, like any evicted
 replica. A live test has not measured this yet.
 
 Settings: `BURST_MAX_LIFETIME_MIN` (minutes, default 120, also used by the boot
@@ -716,6 +714,6 @@ price is unknown. The two lists page on their own with `machine_limit`,
 The coordinator's database user needs SELECT on the three views,
 `burst_machines`, `jobs`, `burst_slots` and `nodes`. The web app needs no database access.
 
-Dependency on member 5: the page reads the token from the `session` cookie.
+Dependency on the web app: the page reads the token from the `session` cookie.
 The login page on main is still a placeholder, so it does not set that cookie
 yet. Until it does, set a coordinator admin token as the cookie by hand to test.

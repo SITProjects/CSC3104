@@ -21,7 +21,7 @@ copy (one replica, Recreate, and the advisory lock per tick reduce overlap but
 do not prove it). After a restart, held launches are forgotten. An instance one
 of them started is then handled as an orphan once EC2 lists it, and a slot can
 be reused before that. Covering restarts needs the token in burst_slots, a
-follow-up with member 3.
+follow-up in the coordinator.
 """
 
 import logging

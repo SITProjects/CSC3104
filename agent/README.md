@@ -1,7 +1,5 @@
 # Worker management
 
-Owner: member 2.
-
 Turns a Windows PC into a worker that is lent out when idle and taken back
 within seconds when its owner returns. K3s workers must run Linux, so the work
 is split in two halves that talk over `localhost:9100`:

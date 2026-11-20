@@ -189,7 +189,7 @@ def read_nodes(
     burst nodes by slot.
 
     A campus PC takes pods when it is a Ready worker, not cordoned, with no
-    owner-active taint (member 2's node agent adds that taint when the owner is
+    owner-active taint (the node agent adds that taint when the owner is
     back). Its free room is its allocatable CPU and memory minus what the task
     pods bound to it request.
     """

@@ -52,7 +52,7 @@ def render_user_data(
         raise ValueError(f"slot must be one of {list(config.SLOTS)}")
     k3s_version = k3s_version or config.K3S_VERSION
     if not k3s_version:
-        raise ValueError("set K3S_VERSION to the server's version (ask member 1)")
+        raise ValueError("set K3S_VERSION to the server's version (run k3s --version on the hub)")
     if not K3S_VERSION_RE.match(k3s_version):
         raise ValueError(
             f"K3S_VERSION must look like v1.31.4+k3s1, got {k3s_version!r}"

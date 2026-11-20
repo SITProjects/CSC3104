@@ -1,4 +1,4 @@
-"""Eviction speed trials (member 2). Run on the EC2 control node.
+"""Eviction speed trials. Run on the EC2 control node.
 
 Each trial waits for the worker to be lent (no owner-active taint), starts a test
 pod on it, asks you to press a key on the worker, then records when the taint

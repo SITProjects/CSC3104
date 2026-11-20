@@ -26,10 +26,10 @@ SLOTS = range(200, 205)
 HUB_WG_IP = "10.10.0.1"
 K3S_URL = f"https://{HUB_WG_IP}:6443"
 # Must match the server version, or the agent may refuse to join.
-# Member 1 can read it with:  k3s --version
+# Read it on the hub with:  k3s --version
 K3S_VERSION = os.environ.get("K3S_VERSION", "")
 
-# Where member 1 stores the slot configs and the join token
+# Where the hub setup stores the slot configs and the join token
 SECRETS_NAMESPACE = "idlecloud-system"
 WG_SLOTS_SECRET = "burst-wg-slots"  # keys slot-200 ... slot-204, each a full wg0.conf
 K3S_TOKEN_SECRET = "k3s-agent-token"  # key token

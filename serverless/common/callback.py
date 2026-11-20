@@ -1,4 +1,4 @@
-"""Signed POST to the web app's /hooks/pages-ready (member 5's endpoint).
+"""Signed POST to the web app's /hooks/pages-ready (the web app's endpoint).
 
 Two kinds of body, both with a "status" field:
   ok      one batch of pages is in S3

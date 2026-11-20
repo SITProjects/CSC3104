@@ -1,7 +1,6 @@
 # Project documentation
 
-Owner: all members.
-
 Keep report drafts, architecture diagrams, testing instructions, and demo notes
-here. Member 1 will add local application-stack instructions in `local-dev.md`
-when the root Compose stack is implemented.
+here. Instructions for running the stack locally are in the root
+[README](../README.md#running-locally) and
+[`infra/README.md`](../infra/README.md#local-stack).

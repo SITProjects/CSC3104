@@ -1,7 +1,5 @@
 # Evaluation
 
-Owner: all members; each owner contributes experiments for their component.
-
 Place experiment and plotting scripts here. Use `data/` for shared sample PDFs,
 `results/` for raw CSV measurements, and `graphs/` for report figures. These
 artifacts remain trackable so results can be reproduced.

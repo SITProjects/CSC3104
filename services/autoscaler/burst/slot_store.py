@@ -1,6 +1,6 @@
 """Load a slot's WireGuard config and the K3s join token.
 
-Normal path: read the K8s Secrets member 1 creates (needs the shared kubeconfig).
+Normal path: read the K8s Secrets the hub setup creates (needs the shared kubeconfig).
 File path: set BURST_WG_DIR (folder with slot-200.conf ...) and K3S_TOKEN_FILE
 in services/autoscaler/.env.aws to read the same values from local files.
 """
@@ -31,7 +31,7 @@ def _from_cluster(slot: int) -> tuple[str, str]:
         except (kube_config.ConfigException, FileNotFoundError) as error:
             raise SystemExit(
                 "No kubeconfig found to read the burst Secrets. Get the shared kubeconfig "
-                "from member 1, or set BURST_WG_DIR and K3S_TOKEN_FILE in .env.aws."
+                "from the hub, or set BURST_WG_DIR and K3S_TOKEN_FILE in .env.aws."
             ) from error
     core = client.CoreV1Api()
 

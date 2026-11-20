@@ -1,5 +1,5 @@
--- Estimated burst cost (member 6, plan step 5). The autoscaler writes these
--- tables. Member 5's admin page reads the views at the end.
+-- Estimated burst cost. The autoscaler writes these tables. The web admin
+-- page reads the views at the end.
 
 -- One row per burst machine the autoscaler recorded on a slot.
 CREATE TABLE burst_machines (

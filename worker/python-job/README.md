@@ -1,7 +1,5 @@
 # Python script image
 
-Owner: member 6.
-
 The approved image for the `python` job type (migration 010): Python 3.12 with
 the libraries in `requirements.txt` (numpy, pandas, scikit-learn) and the
 generic job runner (`worker/runner`) as its entrypoint.

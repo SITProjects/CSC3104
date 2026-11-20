@@ -1,68 +1,72 @@
-# Cloud and Distributed Computing
+# Campus Idle-Compute Cloud
 
-> [!NOTE]
-> WIP, remove this note when project is ready.
+A private compute cloud built from the idle time of campus lab PCs. Each PC
+lends itself to the cluster while nobody is using it and is handed back within
+seconds when its owner returns. Users submit jobs through a website, the
+platform splits them into tasks, runs copies of each task on different PCs,
+checks that the copies agree and returns a verified result. When the PCs are
+full, it bursts onto AWS EC2.
 
-project_description
+Built for CSC3104 (Cloud and Distributed Computing) at the Singapore Institute
+of Technology.
 
----
+## Features
 
-## Project Scope
+- **Idle PCs as workers.** Windows lab PCs run a k3s worker inside WSL2 and
+  join the cluster over WireGuard. A sensor on Windows watches keyboard, mouse
+  and CPU activity, and the node agent stops taking work and evicts running
+  tasks as soon as the owner is back.
+- **Verified results.** A task's copies run on different PCs and their result
+  hashes are compared by majority vote. Each PC earns a trust score, so trusted
+  PCs are only spot-checked while new ones are always double-checked.
+- **Checkpoints and recovery.** Work saves progress as it goes. A task taken
+  off a reclaimed PC resumes from its last checkpoint on another node.
+- **Cloud bursting.** An autoscaler launches bounded EC2 (including Spot)
+  workers when queued work outgrows the campus PCs, tracks their cost and
+  retires them when they are idle.
+- **Serverless page pipeline.** Uploaded PDFs are split and rendered into
+  pages by AWS Lambda, in parallel, before the job starts.
+- **Job types.** OCR of PDFs (Tesseract), Python scripts, PyTorch training on
+  CPU, and PyTorch training on NVIDIA (CUDA) or AMD (ROCm) GPUs, with trained
+  models scored on a node the platform controls.
+- **Web app and API.** Submit jobs, follow live progress and download results.
+  Admins get a dashboard for jobs, users, events, burst cost and campus
+  workers, including adding a lab PC to the cluster without a shell on the hub.
 
-- [link_to_source](link_to_source)
-  - scope_description
+## Architecture
 
-## Usage
-
-### runtime_executable
-
-```sh
-./runtime_executable <args> [optional]
+```text
+             Users (browser / API)
+                      |
+                      v
+   +------------------------------------------+       +-------------------+
+   | Hub (AWS EC2)                            |       | S3 + Lambda       |
+   |  web app -> coordinator -> verifier      |<----->| PDF splitter and  |
+   |  PostgreSQL, autoscaler, k3s control     |       | page renderer     |
+   +------------------------------------------+       +-------------------+
+          |  WireGuard               |  EC2 API
+          v                          v
+   Campus PCs (k3s in WSL2)     Burst EC2 workers
 ```
 
-- runtime_executable_description
+| Component | Folder | Role |
+| --- | --- | --- |
+| Web app | [`services/web/`](services/web/README.md) | Website, public job API, admin dashboard |
+| Coordinator | [`services/coordinator/`](services/coordinator/README.md) | Splits jobs into tasks and copies, schedules Kubernetes Jobs, recovers interrupted work |
+| Verifier | [`services/verifier/`](services/verifier/README.md) | Majority voting, trust scores, final output |
+| Autoscaler | [`services/autoscaler/`](services/autoscaler/README.md) | EC2 burst capacity, Spot interruption handling, cost controls |
+| Worker agent | [`agent/`](agent/README.md) | Windows idle sensor and Linux node agent |
+| Worker images | [`worker/`](worker/) | OCR, Python, PyTorch (CPU, CUDA, ROCm), model checker, generic job runner |
+| Page pipeline | [`serverless/`](serverless/README.md) | Lambdas that split and render uploaded PDFs |
+| Infrastructure | [`infra/`](infra/README.md) | AWS, WireGuard, k3s manifests, worker enrollment |
+| Shared code | [`shared/`](shared/README.md) | Database models, SQL migrations, common helpers |
 
-## Getting Started
-
-### Prerequisites
-
-- [Git](https://github.com/git-guides/install-git) (fully set-up)
-- [Docker/Podman](https://docs.docker.com/engine/install/)
-- [VS Code](https://code.visualstudio.com/download)
-  - [Dev Containers](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) extension
-
-> [!WARNING]
-> Do not use GitHub Desktop! All interactions (files, git, runtime, etc.) should be done through the Dev Container within VS Code.
-
-### Installation
-
-1. Clone the repo
-
-   ```sh
-   git clone git@github.com:10x-Slackers/repo_name.git
-   ```
-
-2. Open the repository in VS Code
-
-   ```sh
-   code repo_name/
-   ```
-
-3. Click on the "Re-open in Dev Container" prompt
-4. Install the pre-commit hooks
-
-   ```sh
-   pre-commit install
-   ```
-
-5. Start working!
-
-## Local Deployment
+## Running locally
 
 The root `docker-compose.yml` runs the whole system on one machine, jobs
-included: PostgreSQL, MinIO (S3), the coordinator, verifier and web app, a k3s
-control plane and three k3s worker nodes standing in for lab PCs. Run these on
-the host (not in the Dev Container), from the repo root:
+included: PostgreSQL, MinIO (standing in for S3), the coordinator, verifier and
+web app, a k3s control plane and three k3s worker nodes standing in for lab
+PCs. You need Docker (or Podman) with Compose. From the repo root:
 
 ```sh
 docker compose up -d --build
@@ -70,9 +74,10 @@ scripts/load-worker-images.sh   # builds the worker images and loads them into t
 docker compose exec coordinator python scripts/seed_test_users.py   # optional test logins
 ```
 
-Open http://localhost:8000. Seeded logins: `user@example.com` / `password123`
-and `admin@example.com` / `admin12345`. A Test workload job (New job page) is
-the quickest end-to-end check.
+Open http://localhost:8000. The seed script creates two local-only test
+logins: `user@example.com` / `password123` and `admin@example.com` /
+`admin12345`. A Test workload job (New job page) is the quickest end-to-end
+check.
 
 - Run `scripts/load-worker-images.sh` again after changing anything in
   `worker/`. The k3s workers have their own image store and don't see Docker's.
@@ -86,7 +91,7 @@ the quickest end-to-end check.
 More detail, such as the network layout, is in
 [`infra/README.md`](infra/README.md#local-stack).
 
-## Cloud Deployment (AWS)
+## Deploying to AWS
 
 On AWS, the hub is an EC2 instance running the k3s control plane, PostgreSQL,
 the coordinator, verifier, web app and autoscaler. Campus PCs join it as k3s
@@ -100,13 +105,13 @@ two Lambdas split uploaded PDFs into pages in S3.
 - `S3_BUCKET` and `AWS_DEFAULT_REGION` in `infra/k8s/overlays/aws/*-s3.yml`
   name your bucket and its region.
 - The autoscaler's Secrets (`k3s-agent-token`, `burst-wg-slots`) and WireGuard
-  peers exist. See "Needed from member 1" in
-  [`services/autoscaler/README.md`](services/autoscaler/README.md#needed-from-member-1).
-- The worker images are published and Public on GHCR: the Publish worker
-  images workflow pushes `ghcr.io/sitprojects/idlecloud-{ocr,python,pytorch}`
-  on every merge to `main`. A new package is private, so an organisation owner
-  must set it to Public once (Package settings, Change visibility). Workers
-  download images without a login.
+  peers exist. See
+  [`services/autoscaler/README.md`](services/autoscaler/README.md#needed-from-the-hub-setup).
+- The worker images are published and public on GHCR: the Publish worker
+  images workflow pushes `ghcr.io/sitprojects/idlecloud-*` images on every
+  merge to `main`. A new package is private, so an organisation owner must set
+  it to public once (Package settings, Change visibility). Workers download
+  images without a login.
 
 ### Deploy or rebuild
 
@@ -123,17 +128,17 @@ bash services/autoscaler/deploy.sh   # burst autoscaler, Spot watcher, OCR image
 - The coordinator applies new SQL migrations from `shared/migrations/` when it
   starts.
 - The autoscaler script ends by pinning the newest published OCR image. It
-  fails if the GHCR package isn't Public, and keeps the current image while OCR
+  fails if the GHCR package isn't public, and keeps the current image while OCR
   jobs are running; run it again once they finish.
 - Both scripts are safe to run again and keep existing Secrets.
 
 ### Page-splitting Lambdas
 
 Only when `serverless/` changes, on the hub after `infra/k8s/deploy.sh`, with
-the AWS Academy credentials in `runtime/aws-credentials`:
+AWS credentials in `runtime/aws-credentials`:
 
 ```sh
-python -m serverless.deploy --bucket csc3104-idle-compute --web-url https://<web app domain>
+python -m serverless.deploy --bucket <your bucket> --web-url https://<web app domain>
 ```
 
 `--web-url` is only needed the first time. See
@@ -145,9 +150,11 @@ python -m serverless.deploy --bucket csc3104-idle-compute --web-url https://<web
   (`/admin/workers`). Add the PC by name, download its setup zip and run
   `agent/install-worker.ps1 -Bundle <zip>` on the PC. Once the page shows it as
   joined, download its agent credentials and run the installer again with
-  `-AgentCredentials <zip>`. No shell on the hub is needed. See
+  `-AgentCredentials <zip>`. See
   [`agent/README.md`](agent/README.md#set-up-a-worker) and
   [`services/web/README.md`](services/web/README.md#campus-workers-admin).
+- **GPU PCs:** NVIDIA and AMD PCs, on Linux or on Windows through WSL2, join
+  as GPU workers. See [`infra/README.md`](infra/README.md#gpu-workers).
 - **Laptops** (VPN access only) use
   `sudo bash infra/wireguard/add-peer.sh laptop <name>` on the hub.
 - **Burst EC2 workers** are launched and ended by the autoscaler. See
@@ -156,75 +163,37 @@ python -m serverless.deploy --bucket csc3104-idle-compute --web-url https://<web
 Check the deployment with `kubectl -n idlecloud-system get pods` and
 `kubectl get nodes`.
 
-## Developer Tooling
+## Development
 
-- Dev Containers
-  - Standardised developer environment
-- Pre-Commit
-  - Run linting and formatting for all files during git commit
+The repo includes a Dev Container (`.devcontainer/`) with the Python toolchain,
+and [pre-commit](https://pre-commit.com) hooks for linting and formatting:
 
-## Repository Structure
-
-The repository root corresponds to `idlecloud/` in the Campus Idle-Compute Cloud
-implementation plan. These folders establish component ownership; service
-implementations will be added separately.
-
-```text
-shared/                  # Shared contracts and Python helpers
-  migrations/            # SQL migrations
-infra/                   # Infrastructure
-  aws/
-  wireguard/
-  k8s/
-    base/
-    overlays/aws/
-agent/                   # Worker management
-  windows-sensor/
-  node-agent/
-services/
-  coordinator/           # Scheduling and checkpoint recovery
-  verifier/              # Voting and trust scores
-  web/                   # Website and public API
-    templates/
-    static/
-  autoscaler/            # Cloud bursting
-worker/
-  ocr-task/              # OCR container
-serverless/              # Lambda page pipeline
-  splitter/
-  renderer/
-eval/
-  data/                  # Reusable sample PDFs
-  results/               # Experiment CSVs
-  graphs/                # Report figures
-docs/                    # Reports, diagrams, testing instructions
-tests/
-  unit/
-  integration/
+```sh
+uv sync
+pre-commit install
 ```
 
-| Owner | Responsibilities | Folders |
-| --- | --- | --- |
-| Member 1 | AWS, WireGuard, K3s, deployment, and local application stack | `infra/` |
-| Member 2 | Windows idle detection and Linux node management | `agent/` |
-| Member 3 | Scheduling, checkpoints, and recovery | `services/coordinator/` |
-| Member 4 | Majority voting, trust scores, and verified output | `services/verifier/` |
-| Member 5 | Website, public API, and OCR workload | `services/web/`, `worker/ocr-task/` |
-| Member 6 | Burst capacity and serverless page splitting | `services/autoscaler/`, `serverless/` |
-| All members | Contracts, evaluation evidence, documentation, and tests | `shared/`, `eval/`, `docs/`, `tests/` |
+Each component's README covers how to run and test it on its own.
 
-Member 3 will author shared SQL migrations, with review by the whole team.
-Component READMEs describe the responsibilities for each folder.
+Keep local settings in ignored `.env` files and commit only `.env.example`
+templates. Generated WireGuard configs go in `infra/wireguard/generated/` and
+transient runtime files in `runtime/`, both ignored.
 
-The existing `src/csc3104/` package, `pyproject.toml`, and `uv.lock` remain in place.
-Python package migration and service entry points will be addressed when services
-are implemented; this scaffold does not change imports or executable behavior.
+## Repository layout
 
-The existing `.devcontainer/docker-compose.yml` provides the development
-environment. The root `docker-compose.yml` runs the full local application stack
-(see [Local Deployment](#local-deployment)).
+```text
+agent/          Windows idle sensor, Linux node agent, worker installer
+core/           Shared service settings
+docs/           Reports, diagrams, testing notes
+eval/           Experiments, raw results and report graphs
+infra/          AWS, WireGuard, k3s manifests, worker enrollment
+scripts/        Local helper scripts
+serverless/     PDF splitter and renderer Lambdas
+services/       web, coordinator, verifier, autoscaler
+shared/         Database models, SQL migrations, shared helpers
+worker/         Job container images and the generic job runner
+```
 
-Keep local environment settings in ignored `.env` files and commit only safe
-`.env.example` or `.env.*.example` templates. Put generated WireGuard configs in
-`infra/wireguard/generated/` and transient runtime files in root `runtime/`.
-Evaluation sample PDFs, result CSVs, graphs, and documentation remain trackable.
+## License
+
+[MIT](LICENSE)

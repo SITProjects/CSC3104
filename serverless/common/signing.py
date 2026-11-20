@@ -3,7 +3,7 @@
 Signature = hex(HMAC-SHA256(secret, f"{timestamp}." + body)).
 Headers: X-Idlecloud-Timestamp and X-Idlecloud-Signature.
 The timestamp stops an old request from being replayed later.
-Member 5 can copy verify() into the web app's /hooks/pages-ready endpoint.
+The web app's /hooks/pages-ready endpoint checks requests the same way.
 """
 
 import hashlib
