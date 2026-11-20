@@ -408,7 +408,12 @@ if [[ -n "$GPU_VENDOR" ]]; then
     echo "$GPU_VENDOR GPU found ($GPU_VRAM_GIB GiB): joining as a GPU worker."
 fi
 
-INSTALL_K3S_VERSION="$VERSION" sh "$INSTALLER" agent "${AGENT_ARGS[@]}"
+# Always (re)start the agent. When its service file is unchanged the installer
+# otherwise skips the start ("No change detected"), which leaves a stopped agent
+# stopped and a running one on the old containerd template and registries.yaml
+# written above, as K3s reads those only when the agent starts.
+INSTALL_K3S_VERSION="$VERSION" INSTALL_K3S_FORCE_RESTART=true \
+    sh "$INSTALLER" agent "${AGENT_ARGS[@]}"
 
 # Pull the GPU image now: it is several GB, and pulling it at the first job
 # would count against that job's time limit. crictl pulls the way the kubelet
