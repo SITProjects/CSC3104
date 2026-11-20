@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import threading
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any, cast
 
@@ -8,6 +9,7 @@ from kubernetes import watch
 from kubernetes.client import (
     ApiException,
     CoreV1Api,
+    V1ContainerStatus,
     V1Node,
     V1ObjectMeta,
     V1Pod,
@@ -20,9 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.settings import JOB_NAMESPACE
 from services.coordinator.crud import (
+    ImagePull,
     create_event,
     ensure_node,
     handle_replica_completed,
+    record_image_pull,
     record_placement,
     set_voting,
 )
@@ -33,6 +37,13 @@ SELECTOR = "app.kubernetes.io/managed-by=idlecloud-coordinator"
 # because the owner came back (agent/node-agent/localstop.py), most likely
 # while the hub couldn't be reached to report /evicted
 EXIT_EVICTED = 143
+# The kubelet's waiting reasons for a container whose image it couldn't pull
+PULL_FAILED_REASONS = {
+    "ErrImagePull",
+    "ImagePullBackOff",
+    "InvalidImageName",
+    "ErrImageNeverPull",
+}
 log = logging.getLogger("coordinator.pod_watcher")
 
 
@@ -44,6 +55,7 @@ class PodUpdate:
     started_at: datetime | None
     outcome: tuple[ReplicaStatus, str] | None
     exit_code: int | None
+    pull: ImagePull | None = None
 
 
 EVENT_TYPES = {
@@ -109,6 +121,65 @@ def node_is_ready(v1: CoreV1Api, name: str) -> bool:
     return any(c.type == "Ready" and c.status == "True" for c in conditions)
 
 
+def image_refs(image: str) -> set[str]:
+    """
+    The names a node may list an image under: as written, and in containerd's
+    full form (docker.io/library/python:3.12 for python:3.12, :latest when no
+    tag or digest is given).
+    """
+    full = image
+    first, _, rest = image.partition("/")
+    if not rest or ("." not in first and ":" not in first and first != "localhost"):
+        full = f"docker.io/{image if rest else 'library/' + image}"
+    last = full.rsplit("/", 1)[-1]
+    if "@" not in last and ":" not in last:
+        full += ":latest"
+    return {image, full}
+
+
+def image_on_node(v1: CoreV1Api, name: str, image: str) -> bool | None:
+    """Whether the node lists the image among those it holds; None if the node
+    can't be read."""
+    try:
+        node = cast(V1Node, v1.read_node(name))
+    except ApiException:
+        return None
+    refs = image_refs(image)
+    return any(
+        refs.intersection(held.names or [])
+        for held in ((node.status.images if node.status else None) or [])
+    )
+
+
+def image_pull(
+    worker: V1ContainerStatus | None, on_node: Callable[[], bool | None]
+) -> ImagePull | None:
+    """
+    What a placed Pod's worker container says about its image, or None if it
+    says nothing yet.
+
+    The kubelet shows a container being pulled and one being created alike, as
+    waiting with reason ContainerCreating, so the node's image list decides
+    between them. It is read only then (on_node).
+    """
+    if worker is None or worker.state is None:
+        return None
+    if worker.state.running or worker.state.terminated:
+        return ImagePull("done")
+    waiting = worker.state.waiting
+    if waiting is None:
+        return None
+    if waiting.reason in PULL_FAILED_REASONS:
+        return ImagePull("failed", waiting.message or waiting.reason)
+    if waiting.reason == "ContainerCreating":
+        held = on_node()
+        if held is None:
+            return None
+        return ImagePull("done") if held else ImagePull("pulling")
+    # any other wait (CrashLoopBackOff, a config error) comes after the pull
+    return ImagePull("done")
+
+
 def to_update(v1: CoreV1Api, kind: str, pod: V1Pod) -> PodUpdate | None:
     if pod.metadata is None or pod.spec is None or pod.status is None:
         return
@@ -128,9 +199,18 @@ def to_update(v1: CoreV1Api, kind: str, pod: V1Pod) -> PodUpdate | None:
         disruption.reason if disruption and disruption.status == "True" else None
     )
     exit_code = None
+    worker = None
     for cs in status.container_statuses or []:
-        if cs.name == "worker" and cs.state and cs.state.terminated:
-            exit_code = cs.state.terminated.exit_code
+        if cs.name == "worker":
+            worker = cs
+            if cs.state and cs.state.terminated:
+                exit_code = cs.state.terminated.exit_code
+    pull = None
+    if node and kind != "DELETED" and worker is not None:
+        image = worker.image
+        pull = image_pull(
+            worker, lambda: image_on_node(v1, node, image) if image else None
+        )
 
     return PodUpdate(
         replica_id=replica_id,
@@ -146,6 +226,7 @@ def to_update(v1: CoreV1Api, kind: str, pod: V1Pod) -> PodUpdate | None:
             exit_code,
         ),
         exit_code=exit_code,
+        pull=pull,
     )
 
 
@@ -188,6 +269,13 @@ async def apply(
                 pod_update.node,
                 pod_update.started_at,
             )
+            if pod_update.pull is not None:
+                await record_image_pull(
+                    session,
+                    pod_update.replica_id,
+                    pod_update.attempt,
+                    pod_update.pull,
+                )
         if pod_update.outcome is None:
             return
         status, cause = pod_update.outcome
