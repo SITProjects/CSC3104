@@ -31,7 +31,7 @@ from services.coordinator.k8s import (
     list_replica_pods,
 )
 from services.coordinator.loops.pod_watcher import image_pull, pulling_now
-from shared.db.models import Job, Task
+from shared.db.models import Job, Replica, Task
 
 log = logging.getLogger("coordinator.housekeeping")
 LAUNCH_GRACE = timedelta(minutes=2)
@@ -39,6 +39,9 @@ HEARTBEAT_GRACE = timedelta(seconds=30)
 # How long a task Pod may stay Terminating past its deletion time (which already
 # includes its grace period) before housekeeping removes it by force
 STUCK_TERMINATING = timedelta(minutes=2)
+# How long a node may stay not Ready before housekeeping gives up on the copies
+# on it, in case Kubernetes doesn't evict them (lost_node_pods)
+NODE_LOST_AFTER = timedelta(minutes=3)
 
 
 def replica_key(resource: V1Job | V1Pod) -> tuple[int, int] | None:
@@ -85,6 +88,98 @@ def node_ready(node: V1Node) -> bool:
     """Whether the node's Ready condition is True."""
     conditions = (node.status.conditions if node.status else None) or []
     return any(c.type == "Ready" and c.status == "True" for c in conditions)
+
+
+def not_ready_since(node: V1Node) -> datetime | None:
+    """When the node's Ready condition stopped being True, or None if it is Ready."""
+    conditions = (node.status.conditions if node.status else None) or []
+    ready = next((c for c in conditions if c.type == "Ready"), None)
+    if ready is not None and ready.status == "True":
+        return None
+    when = ready.last_transition_time if ready is not None else None
+    return when or datetime.min.replace(tzinfo=UTC)
+
+
+def lost_node_pods(
+    pods: list[V1Pod], nodes: list[V1Node], now: datetime, limit: timedelta
+) -> list[V1Pod]:
+    """
+    Unfinished task Pods on nodes that haven't been Ready for limit.
+
+    Kubernetes normally evicts them 30 s after their node becomes unreachable
+    (the Pod's toleration), and the pod watcher then marks the copy LOST. With
+    most nodes in the cluster NotReady (old PCs, ended burst workers), the node
+    lifecycle controller treats the zone as disrupted and stops evicting, so a
+    copy on a PC that went offline would wait for it forever.
+
+    args:
+        pods: Task Pods.
+        nodes: Worker nodes.
+        now: The current time.
+        limit: How long a node may stay not Ready.
+    returns:
+        list[V1Pod]: The Pods to give up on.
+    """
+    lost = set()
+    for node in nodes:
+        since = not_ready_since(node)
+        if node.metadata and since is not None and now - since >= limit:
+            lost.add(node.metadata.name)
+    return [
+        pod
+        for pod in pods
+        if pod.spec
+        and pod.spec.node_name in lost
+        and not (pod.status and pod.status.phase in ("Succeeded", "Failed"))
+    ]
+
+
+async def give_up_lost_nodes(
+    session_factory: async_sessionmaker[AsyncSession],
+    core_api: CoreV1Api,
+    pods: list[V1Pod],
+    now: datetime,
+) -> None:
+    """
+    Marks the copies on long-lost nodes LOST, so recovery relaunches them, and
+    removes their Pods by force (the node's kubelet can't confirm).
+    """
+    if not any(p.spec and p.spec.node_name for p in pods):
+        return
+    nodes = await asyncio.to_thread(
+        core_api.list_node, label_selector=WORKER_SELECTOR, _request_timeout=10
+    )
+    for pod in lost_node_pods(pods, nodes.items or [], now, NODE_LOST_AFTER):
+        key = replica_key(pod)
+        meta = pod.metadata
+        node = pod.spec.node_name
+        if key is None or meta is None or not meta.name:
+            continue
+        async with session_factory.begin() as session:
+            if await mark_lost(session, *key):
+                replica = await session.get(Replica, key[0])
+                task = await session.get(Task, replica.task_id) if replica else None
+                if task is not None:
+                    log.info(
+                        "Replica %s/%s is lost: node %s not Ready for over %s",
+                        *key,
+                        node,
+                        NODE_LOST_AFTER,
+                    )
+                    await create_event(
+                        session,
+                        "replica_lost",
+                        task.job_id,
+                        task.id,
+                        node,
+                        {
+                            "replica_id": key[0],
+                            "attempt": key[1],
+                            "node_name": node,
+                            "message": "NodeLost",
+                        },
+                    )
+        await force_delete_pod(meta.name, core_api, meta.uid)
 
 
 def stuck_terminating_pods(
@@ -435,6 +530,7 @@ async def housekeeping_pass(
     await fail_unplaceable(session_factory, batch_api, core_api, pods, now)
     await remove_stuck_terminating(session_factory, core_api, pods, now)
     await recheck_image_pulls(session_factory, core_api, pods)
+    await give_up_lost_nodes(session_factory, core_api, pods, now)
 
 
 async def housekeeping_loop(

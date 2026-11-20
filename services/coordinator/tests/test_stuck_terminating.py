@@ -1,5 +1,5 @@
 """
-Task Pods stuck Terminating (issue #195): a Pod deleted while its node was
+Task Pods stuck Terminating (issue #195) or on lost nodes (issue #213): a Pod deleted while its node was
 still pulling the image holds its memory until the pull returns, so
 housekeeping removes it by force once nothing of it can be running.
 """
@@ -22,8 +22,11 @@ from kubernetes.client import (
 )
 
 from services.coordinator.loops.housekeeping import (
+    NODE_LOST_AFTER,
     STUCK_TERMINATING,
+    lost_node_pods,
     node_ready,
+    not_ready_since,
     stuck_terminating_pods,
 )
 
@@ -123,3 +126,54 @@ def test_node_ready():
     assert node_ready(node("True"))
     assert not node_ready(node("Unknown"))
     assert not node_ready(V1Node())
+
+
+# ---------- copies on lost nodes (issue #213) ----------
+
+
+def worker_node(name: str, ready: str, since_min: float) -> V1Node:
+    return V1Node(
+        metadata=V1ObjectMeta(name=name),
+        status=V1NodeStatus(
+            conditions=[
+                V1NodeCondition(
+                    type="Ready",
+                    status=ready,
+                    last_transition_time=NOW - timedelta(minutes=since_min),
+                )
+            ]
+        ),
+    )
+
+
+def task_pod(name: str, node: str | None, phase: str = "Pending") -> V1Pod:
+    return V1Pod(
+        metadata=V1ObjectMeta(name=name, uid="u"),
+        spec=V1PodSpec(node_name=node, containers=[V1Container(name="worker")]),
+        status=V1PodStatus(phase=phase),
+    )
+
+
+def test_pods_on_a_long_lost_node_are_given_up():
+    nodes = [
+        worker_node("gone", "Unknown", 20),
+        worker_node("blip", "Unknown", 1),
+        worker_node("fine", "True", 60),
+    ]
+    pods = [
+        task_pod("on-gone", "gone"),
+        task_pod("on-gone-running", "gone", "Running"),
+        task_pod("on-gone-finished", "gone", "Succeeded"),
+        task_pod("on-blip", "blip"),
+        task_pod("on-fine", "fine"),
+        task_pod("unplaced", None),
+    ]
+    lost = lost_node_pods(pods, nodes, NOW, NODE_LOST_AFTER)
+    assert names(lost) == ["on-gone", "on-gone-running"]
+
+
+def test_not_ready_since():
+    assert not_ready_since(worker_node("n", "True", 5)) is None
+    assert not_ready_since(worker_node("n", "False", 5)) == NOW - timedelta(minutes=5)
+    # no Ready condition at all counts as long gone
+    assert not_ready_since(V1Node(metadata=V1ObjectMeta(name="n"))) is not None
