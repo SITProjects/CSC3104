@@ -355,6 +355,26 @@ async def cancel_k3_pod(pod_name: str, core_api: CoreV1Api, uid: str | None) -> 
             raise
 
 
+async def force_delete_pod(pod_name: str, core_api: CoreV1Api, uid: str | None) -> None:
+    """
+    Removes a Pod at once, without waiting for its kubelet to confirm (like
+    kubectl delete --force --grace-period=0). Only for a Pod with nothing left
+    running; see housekeeping.stuck_terminating_pods.
+    """
+    try:
+        await asyncio.to_thread(
+            core_api.delete_namespaced_pod,
+            pod_name,
+            JOB_NAMESPACE,
+            body=V1DeleteOptions(
+                grace_period_seconds=0, preconditions=V1Preconditions(uid=uid)
+            ),
+        )
+    except ApiException as e:
+        if e.status != 404:
+            raise
+
+
 async def review_token(
     auth_api: AuthenticationV1Api, token: str, audience: str
 ) -> V1UserInfo | None:
