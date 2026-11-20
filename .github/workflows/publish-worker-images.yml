@@ -84,6 +84,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Choose image name
+        id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+          NAME: ${{ matrix.name }}
+        shell: bash
+        run: echo "name=ghcr.io/${OWNER,,}/idlecloud-${NAME}" >> "$GITHUB_OUTPUT"
+
       - name: Free disk space for a large image
         if: matrix.large
         shell: bash
@@ -104,6 +112,8 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: false
+          # read-only: the published images' layer cache (anonymous, as they are public)
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
 
   publish:
     # Manual runs from other branches must not replace the production image.
@@ -173,6 +183,11 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
+          # Reuse unchanged layers from the last build. Without it each build
+          # reinstalls PyTorch into a new 3 GB layer, and every GPU worker then
+          # downloads all of it again although only runner.py changed.
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
+          cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=max
           tags: |
             ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
             ${{ steps.image.outputs.name }}:main
