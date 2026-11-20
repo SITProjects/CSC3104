@@ -20,6 +20,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["delete", "get", "list", "watch"]
+  # the kubelet's Pulling/Pulled events: whether a node is downloading the image
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

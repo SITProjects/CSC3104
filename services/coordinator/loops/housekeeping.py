@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,7 @@ from services.coordinator.crud import (
     lock_stale_replica_job,
     mark_lost,
     mark_offline,
+    record_image_pull,
     set_voting,
 )
 from services.coordinator.crud.jobs import delete_job_files, expire_old_jobs
@@ -28,6 +30,7 @@ from services.coordinator.k8s import (
     list_replica_jobs,
     list_replica_pods,
 )
+from services.coordinator.loops.pod_watcher import image_pull, pulling_now
 from shared.db.models import Job, Task
 
 log = logging.getLogger("coordinator.housekeeping")
@@ -171,6 +174,49 @@ async def remove_stuck_terminating(
                     "message": "StuckTerminating",
                 },
             )
+
+
+def creating_pods(pods: list[V1Pod]) -> list[V1Pod]:
+    """Task Pods placed on a node whose worker container is still being created."""
+    found = []
+    for pod in pods:
+        if pod.metadata is None or pod.metadata.deletion_timestamp is not None:
+            continue
+        if not (pod.spec and pod.spec.node_name) or pod.status is None:
+            continue
+        for cs in pod.status.container_statuses or []:
+            waiting = cs.state.waiting if cs.state else None
+            if (
+                cs.name == "worker"
+                and waiting
+                and waiting.reason == "ContainerCreating"
+            ):
+                found.append(pod)
+    return found
+
+
+async def recheck_image_pulls(
+    session_factory: async_sessionmaker[AsyncSession],
+    core_api: CoreV1Api,
+    pods: list[V1Pod],
+) -> None:
+    """
+    Records image pulls the pod watcher can miss: it decides when the Pod
+    changes, and the kubelet's Pulling event can come just after that, with no
+    further Pod change until the container starts.
+    """
+    for pod in creating_pods(pods):
+        key = replica_key(pod)
+        worker = next(cs for cs in pod.status.container_statuses if cs.name == "worker")
+        pull = await asyncio.to_thread(
+            image_pull,
+            worker,
+            functools.partial(pulling_now, core_api, pod, worker.image),
+        )
+        if key is None or pull is None:
+            continue
+        async with session_factory.begin() as session:
+            await record_image_pull(session, *key, pull)
 
 
 def unplaceable_pods(
@@ -388,6 +434,7 @@ async def housekeeping_pass(
 
     await fail_unplaceable(session_factory, batch_api, core_api, pods, now)
     await remove_stuck_terminating(session_factory, core_api, pods, now)
+    await recheck_image_pulls(session_factory, core_api, pods)
 
 
 async def housekeeping_loop(
