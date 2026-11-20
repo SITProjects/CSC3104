@@ -145,6 +145,35 @@ labels appear without removing the node. It never removes one, though: after
 taking a GPU out, also run `kubectl label node <node-name> idlecloud/gpu-
 idlecloud/gpu-vram-gib-` on the hub.
 
+### Rejoining a worker
+
+The script always restarts the K3s agent at the end, so the agent picks up
+the GPU settings it just wrote even when its own flags didn't change.
+
+- **To pick up a GPU or script change, rejoin; don't remove the worker.**
+  Run the script again with the PC's own files (above), or
+  `install-worker.ps1 -Rejoin` on Windows. The node keeps its name, history
+  and certificates.
+- **Joining with a new join token** (a new setup zip, or `-TokenFile`) makes
+  the PC register again. The script deletes the agent's old node
+  certificates in `/var/lib/rancher/k3s/agent` first. Otherwise K3s keeps
+  presenting them, and once the hub has deleted that node (removing the
+  worker on the admin pages does) it refuses them with `unable to verify
+  node identity`, and the PC never reconnects.
+- **Don't delete a node or its `<node>.node-password.k3s` secret by hand on
+  the hub** to fix a join. Remove the worker on the admin pages and join it
+  with a new setup zip, or just rejoin.
+- **Check the result.** A GPU PC must print
+  `<vendor> GPU found (<n> GiB): joining as a GPU worker.` and show its
+  vendor under `kubectl get nodes -L idlecloud/gpu` on the hub. Without
+  that label it is a CPU worker and GPU jobs stay Pending. Always join with
+  the current `infra/join-worker.sh` (or a setup zip and this repo's
+  `agent/install-worker.ps1`): older copies can't see a GPU under WSL.
+
+If a PC still won't reconnect, `sudo journalctl -u k3s` on the hub shows
+why: `Node authorization rejected` (node password mismatch) or `unable to
+verify node identity` (old certificates for a deleted node).
+
 **Windows workers (WSL2):** `agent/install-worker.ps1` runs this script
 inside WSL, where the GPU is the Windows driver's. It has no `/dev/nvidia*`
 or `/dev/kfd`, only `/dev/dxg` and the driver's libraries in `/usr/lib/wsl`.
